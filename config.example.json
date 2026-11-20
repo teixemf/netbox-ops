@@ -1,11 +1,5 @@
 {
-  "services": {
-    "netbox": "netbox.service",
-    "netbox-rq": "netbox-rq.service",
-    "nginx": "nginx.service",
-    "postgresql": "postgresql.service",
-    "redis": "redis.service"
-  },
+  "services": {},
   "backup": {
     "directory": "/var/lib/netbox-ops/backups",
     "database": "netbox",

@@ -14,6 +14,7 @@ from typing import Callable
 
 from .config import Configuration, SERVICE_NAMES
 from .netbox_version import read_netbox_version
+from .platform import pg_binary, PlatformError
 
 LOCK_PATH = Path('/run/lock/netbox-ops.lock')
 LOG_DIR = Path('/var/log/netbox-ops')
@@ -229,8 +230,10 @@ class ServiceVersionCache:
     Reset after a future successful upgrade implementation changes a component.
     """
 
-    def __init__(self, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run):
+    def __init__(self, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+                 config: Configuration | None = None):
         self.runner = runner
+        self.config = config
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix='nbo-version')
         self._futures: dict[str, concurrent.futures.Future[str]] = {}
 
@@ -272,6 +275,13 @@ class ServiceVersionCache:
             return read_netbox_version() or '—'
         if name not in commands:
             return '—'
+        if name == 'postgresql':
+            try:
+                commands[name][4] = pg_binary('psql', self.config.pg_bin_directory if self.config else None)
+            except PlatformError:
+                return '—'
+        if name == 'postgresql' and self.config and self.config.postgres_port:
+            commands[name].extend(['--port', str(self.config.postgres_port)])
         try:
             cp = self.runner(commands[name], text=True, capture_output=True, timeout=12,
                              check=False)

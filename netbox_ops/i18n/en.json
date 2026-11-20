@@ -237,5 +237,15 @@
   "nbo_pre_restore_short": "PRE-REST.",
   "nbo_pre_restore": "Pre-restore (automatic safety copy)",
   "nbo_manual": "Manual",
-  "nbo_purpose": "Origin"
+  "nbo_purpose": "Origin",
+  "nbo_confirm_failed_title": "Incorrect confirmation",
+  "nbo_confirm_failed_message": "The confirmation text does not match. No operation was started.",
+  "nbo_confirm_failed_hint": "Enter/Esc — Return to previous screen",
+  "nbo_manual_short": "MANUAL",
+  "nbo_restore_scope_hint": "↑↓ Choose scope  Enter Continue  Esc Cancel",
+  "nbo_restore_source": "SELECTED BACKUP",
+  "nbo_restore_db_desc": "Restore PostgreSQL data only; preserve media files.",
+  "nbo_restore_media_desc": "Restore uploaded images and files only; preserve database.",
+  "nbo_restore_all_desc": "Restore database and media together.",
+  "nbo_restore_scope_warning": "Restore requires confirmation and makes a precautionary backup."
 }

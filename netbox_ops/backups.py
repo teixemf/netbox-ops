@@ -24,6 +24,7 @@ from typing import Callable
 
 from .config import Configuration
 from .netbox_version import read_netbox_version
+from .platform import pg_binary, PlatformError
 from .services import ExclusiveLock, SystemdServices, write_audit
 
 FORMAT = 1
@@ -76,13 +77,20 @@ def _run(argv: list[str], *, timeout: int = 600, stdin=None, stdout=None) -> str
     return cp.stdout.decode('utf-8', 'replace').strip() if stdout is None else ''
 
 
-def _pg(*args: str, timeout: int = 600, stdin=None, stdout=None) -> str:
-    return _run(['runuser', '-u', 'postgres', '--', *args], timeout=timeout, stdin=stdin, stdout=stdout)
+def _pg(*args: str, timeout: int = 600, stdin=None, stdout=None,
+        cfg: Configuration | None = None) -> str:
+    try:
+        command = pg_binary(args[0], cfg.pg_bin_directory if cfg else None)
+    except PlatformError as exc:
+        raise BackupError(str(exc)) from exc
+    options = ['--port', str(cfg.postgres_port)] if cfg and cfg.postgres_port else []
+    return _run(['runuser', '-u', 'postgres', '--', command, *options, *args[1:]],
+                timeout=timeout, stdin=stdin, stdout=stdout)
 
 
-def _sql(sql: str, database: str = 'postgres') -> str:
+def _sql(sql: str, database: str = 'postgres', cfg: Configuration | None = None) -> str:
     return _pg('psql', '-X', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-d', database,
-               '-c', sql, timeout=90)
+               '-c', sql, timeout=90, cfg=cfg)
 
 
 def _safe_directory(path: Path) -> Path:
@@ -139,17 +147,21 @@ def _json_bytes(manifest: dict) -> bytes:
 def _db_dump(cfg: Configuration, target: Path) -> None:
     with target.open('wb') as output:
         _pg('pg_dump', '--format=custom', '--no-owner', '--no-acl', '--dbname',
-            cfg.database, stdout=output, timeout=3600)
+            cfg.database, stdout=output, timeout=3600, cfg=cfg)
     if target.stat().st_size < 16:
         raise BackupError('Database dump is empty')
-    _check_dump(target)
+    _check_dump(target, cfg=cfg)
 
 
-def _check_dump(source: Path) -> None:
+def _check_dump(source: Path, cfg: Configuration | None = None) -> None:
     with source.open('rb') as stream:
         if stream.read(5) != b'PGDMP':
             raise BackupError('Not a PostgreSQL custom-format dump (PGDMP)')
-    _run(['pg_restore', '--list', str(source)], timeout=180)
+    try:
+        executable = pg_binary('pg_restore', cfg.pg_bin_directory if cfg else None)
+    except PlatformError as exc:
+        raise BackupError(str(exc)) from exc
+    _run([executable, '--list', str(source)], timeout=180)
 
 
 def _artifacts(cfg: Configuration) -> list[tuple[str, Path, str]]:
@@ -452,11 +464,11 @@ def _version_guard(manifest: dict | None, *, accept_unknown: bool,
 def _preflight_db(cfg: Configuration, source: Path) -> None:
     if not DB_ID.fullmatch(cfg.database) or not DB_ID.fullmatch(cfg.database_owner):
         raise BackupError('Unsafe database or database role identifier')
-    _check_dump(source)
-    exists = _sql(f"SELECT 1 FROM pg_database WHERE datname='{cfg.database}'")
+    _check_dump(source, cfg=cfg)
+    exists = _sql(f"SELECT 1 FROM pg_database WHERE datname='{cfg.database}'", cfg=cfg)
     if exists != '1':
         raise BackupError(f'Current database does not exist: {cfg.database}')
-    role = _sql(f"SELECT 1 FROM pg_roles WHERE rolname='{cfg.database_owner}'")
+    role = _sql(f"SELECT 1 FROM pg_roles WHERE rolname='{cfg.database_owner}'", cfg=cfg)
     if role != '1':
         raise BackupError(f'Database role does not exist: {cfg.database_owner}')
 
@@ -474,37 +486,37 @@ def _sidecar_manifest(path: Path) -> dict | None:
 
 def _stage_db(cfg: Configuration, dump: Path) -> str:
     stage = 'nbo_stage_' + uuid.uuid4().hex[:16]
-    _pg('createdb', '--owner', cfg.database_owner, '--template', 'template0', stage, timeout=120)
+    _pg('createdb', '--owner', cfg.database_owner, '--template', 'template0', stage, timeout=120, cfg=cfg)
     try:
         with dump.open('rb') as src:
             _pg('pg_restore', '--no-owner', '--no-acl', '--role', cfg.database_owner,
                 '--exit-on-error', '--single-transaction', '--dbname', stage,
-                stdin=src, timeout=7200)
-        if _sql("SELECT to_regclass('public.django_migrations') IS NOT NULL", stage) != 't':
+                stdin=src, timeout=7200, cfg=cfg)
+        if _sql("SELECT to_regclass('public.django_migrations') IS NOT NULL", stage, cfg=cfg) != 't':
             raise BackupError('Restored database has no django_migrations table')
     except Exception:
-        _drop_db(stage)
+        _drop_db(stage, cfg=cfg)
         raise
     return stage
 
 
-def _drop_db(name: str) -> None:
+def _drop_db(name: str, cfg: Configuration | None = None) -> None:
     if not DB_ID.fullmatch(name):
         raise BackupError('Unsafe database identifier')
-    _pg('dropdb', '--if-exists', '--force', name, timeout=90)
+    _pg('dropdb', '--if-exists', '--force', name, timeout=90, cfg=cfg)
 
 
-def _rename_db(current: str, new: str) -> None:
+def _rename_db(current: str, new: str, cfg: Configuration | None = None) -> None:
     if not DB_ID.fullmatch(current) or not DB_ID.fullmatch(new):
         raise BackupError('Unsafe database identifier')
-    _sql(f'ALTER DATABASE "{current}" RENAME TO "{new}"')
+    _sql(f'ALTER DATABASE "{current}" RENAME TO "{new}"', cfg=cfg)
 
 
-def _terminate(name: str) -> None:
+def _terminate(name: str, cfg: Configuration | None = None) -> None:
     if not DB_ID.fullmatch(name):
         raise BackupError('Unsafe database identifier')
     _sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-         f"WHERE datname = '{name}' AND pid <> pg_backend_pid()")
+         f"WHERE datname = '{name}' AND pid <> pg_backend_pid()", cfg=cfg)
 
 
 def _django_check() -> None:
@@ -916,7 +928,7 @@ class BackupManager:
         if not source.is_file():
             raise BackupError(f'Backup is not a regular file: {source}')
         if kind == 'db':
-            _check_dump(source)
+            _check_dump(source, cfg=self.cfg)
             return _sidecar_manifest(source)
         if kind == 'legacy':
             return _verify_legacy_archive(source)
@@ -993,12 +1005,12 @@ class BackupManager:
                     _progress(progress, 'replace', 5, total)
                     if staged_name:
                         previous_name = 'nbo_prev_' + uuid.uuid4().hex[:16]
-                        _terminate(self.cfg.database)
-                        _rename_db(self.cfg.database, previous_name)
+                        _terminate(self.cfg.database, cfg=self.cfg)
+                        _rename_db(self.cfg.database, previous_name, cfg=self.cfg)
                         try:
-                            _rename_db(staged_name, self.cfg.database)
+                            _rename_db(staged_name, self.cfg.database, cfg=self.cfg)
                         except Exception:
-                            _rename_db(previous_name, self.cfg.database)
+                            _rename_db(previous_name, self.cfg.database, cfg=self.cfg)
                             previous_name = None
                             raise
                         swapped = True
@@ -1032,9 +1044,9 @@ class BackupManager:
                                     with contextlib.suppress(Exception):
                                         systemd.stop([name])
                             failed_name = 'nbo_failed_' + uuid.uuid4().hex[:16]
-                            _terminate(self.cfg.database)
-                            _rename_db(self.cfg.database, failed_name)
-                            _rename_db(previous_name, self.cfg.database)
+                            _terminate(self.cfg.database, cfg=self.cfg)
+                            _rename_db(self.cfg.database, failed_name, cfg=self.cfg)
+                            _rename_db(previous_name, self.cfg.database, cfg=self.cfg)
                             previous_name = None
                             write_audit(f'RESTORE DB ROLLBACK OK failed_db={failed_name}')
                         except Exception as rollback_error:
@@ -1048,4 +1060,4 @@ class BackupManager:
                 finally:
                     if staged_name is not None:
                         with contextlib.suppress(Exception):
-                            _drop_db(staged_name)
+                            _drop_db(staged_name, cfg=self.cfg)

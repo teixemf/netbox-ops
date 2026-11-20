@@ -1,5 +1,27 @@
 # netbox-ops — Histórico de alterações
 
+## NBH-xxx — Compatibilidade RHEL/Debian e melhorias TUI (netbox-ops v0.4.0)
+
+**Situação inicial:** a v0.3.6 assumia unidades Linux (`postgresql.service`, `redis.service`) e utilitários PostgreSQL compatíveis sobretudo com a instalação RHEL. Em Debian, os serviços PostgreSQL podem usar unidades por cluster, Redis usa habitualmente `redis-server.service` e a versão de Python predefinida não é necessariamente 3.12. Adicionalmente, a confirmação incorrecta regressava sem alerta, a tabela não distinguia backups `manual`, os detalhes ficavam fixos quando outros backups eram marcados, e o espaço livre inferior não era aproveitado.
+
+**Trabalho realizado:**
+- Criado detector de famílias RHEL e Debian pelo `/etc/os-release`, incluindo derivados relevantes.
+- Acrescentada descoberta automática, não destrutiva e com cache, das unidades systemd de PostgreSQL e Redis; recusa-se a escolha arbitrária perante vários clusters PostgreSQL ou vários serviços versionados RHEL.
+- Suportados caminhos de binários PGDG e configuração opcional da porta do cluster PostgreSQL (`backup.pg_bin_directory` e `backup.postgres_port`), respeitando as unidades definidas no JSON e sem alterar o servidor PostgreSQL.
+- Adaptados `install.sh` e `upgrade.sh` para ambas as famílias, mantendo Python **3.12** exclusivo no venv e o launcher seguro em `/usr/local/sbin` e `/usr/sbin`.
+- Adicionado comando de diagnóstico `netbox-ops platform` para consultar distribuição, unidades e ferramentas PostgreSQL sem alterações ao sistema.
+- Adicionado alerta explícito após erro na palavra de confirmação, com regresso ao menu anterior; nenhuma operação é iniciada.
+- Adicionada etiqueta `MANUAL` para backups normais e mantida `PRÉ-REST.` para backups de salvaguarda, sem alterar o formato de arquivo.
+- Corrigido o painel direito de detalhe para acompanhar o backup focado mesmo com outros marcados, mantendo a selecção múltipla separada da pré-visualização.
+- Colocadas as operações de backups no rodapé, integrado o gráfico de armazenamento Braille no painel esquerdo, e reformulado o ecrã de escolha de âmbito de restauro completo.
+- Preservados os controlos de segurança, restauros selectivos, integridade e política Redis existentes; actualizados PT/EN e testes de regressão.
+
+**Motivo:** permitir a administração segura de instalações NetBox equivalentes em RHEL e Debian, sem mudar serviços errados ou a versão de Python pretendida, e melhorar a legibilidade e a segurança da TUI.
+
+**Validação:** 168 testes automatizados isolados para ambos os perfis e para as alterações de interface; não houve ensaios de recuperação PostgreSQL em VMs RHEL/Debian nem validação end-to-end com Python 3.12 neste ambiente. Validação funcional nas VMs ainda necessária antes de produção.
+
+---
+
 ## NBH-xxx — Correções da gestão de backups e do restauro (netbox-ops v0.3.6)
 
 **Situação inicial:** na v0.3.5 a lista de backups seguia a ordem alfabética dos nomes, misturando diferentes tipos sem respeitar a data de criação. O restauro parcial apenas da BD a partir de um pacote completo falhava porque o dump não era extraído antes da tentativa de importação. A gestão incluía uma acção autónoma «Apagar todos» e a opção «Validar» era pouco evidente, sobretudo para arquivos legados.

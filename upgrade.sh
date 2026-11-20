@@ -10,7 +10,18 @@ fi
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 VENV="${ROOT}/venv"
-PYTHON="${PYTHON_BIN:-/usr/bin/python3.12}"
+# Debian may install Python 3.12 under /usr/local/bin, while RHEL often uses
+# /usr/bin. Honour an explicit override and refuse any interpreter != 3.12.
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+    PYTHON="${PYTHON_BIN}"
+elif [[ -x /usr/bin/python3.12 ]]; then
+    PYTHON=/usr/bin/python3.12
+elif [[ -x /usr/local/bin/python3.12 ]]; then
+    PYTHON=/usr/local/bin/python3.12
+else
+    echo 'Python 3.12 não está instalado. Instale-o primeiro (incluindo venv/ensurepip) ou defina PYTHON_BIN.' >&2
+    exit 1
+fi
 
 if [[ ! -x "${PYTHON}" ]]; then
     echo "Python 3.12 não encontrado em ${PYTHON}; ajuste PYTHON_BIN." >&2

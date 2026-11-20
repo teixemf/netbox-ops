@@ -365,7 +365,9 @@ class CursesMenu:
     def _status(self) -> None:
         """Read-only compact status table; Enter opens read-only journal details."""
         try:
-            systemd = SystemdServices(load_config(self.config_path))
+            config = load_config(self.config_path)
+            systemd = SystemdServices(config)
+            self.versions.config = config
             states = systemd.status(SERVICE_NAMES)
         except (ServiceError, ConfigError, OSError) as exc:
             self._show_lines(self.t('tui_error_title'),
@@ -718,6 +720,7 @@ class CursesMenu:
         except (ConfigError, OSError) as exc:
             self._show_lines(self.t('tui_error_title'), [(str(exc), 'failure')])
             return 1
+        self.versions.config = config
         for name in names:
             self.versions.request(name)
         self.stdscr.timeout(250)
@@ -938,7 +941,9 @@ class CursesMenu:
     def _manage(self) -> None:
         """Manage selected units, with an always-visible log panel and bottom actions."""
         try:
-            systemd = SystemdServices(load_config(self.config_path))
+            config = load_config(self.config_path)
+            systemd = SystemdServices(config)
+            self.versions.config = config
             states = systemd.status(SERVICE_NAMES)
             self._update_cpu(states)
         except (ServiceError, ConfigError, OSError) as exc:
@@ -1116,7 +1121,12 @@ class CursesMenu:
             if key in (27, 3):
                 return False
             if key in (10,13,curses.KEY_ENTER):
-                return typed == token
+                if typed == token:
+                    return True
+                self._show_lines(self.t('nbo_confirm_failed_title'),
+                                 [(self.t('nbo_confirm_failed_message'), 'failure')],
+                                 self.t('nbo_confirm_failed_hint'))
+                return False
             if key in (8,127,curses.KEY_BACKSPACE):
                 typed = typed[:-1]
             elif 32 <= key <= 126 and len(typed) < 48:
@@ -1254,6 +1264,48 @@ class CursesMenu:
             return marked > 0 or target_present
         return False
 
+    def _choose_restore_scope(self, entry) -> str | None:
+        """Explicit, arrow-controlled restore scope; no accidental Enter default."""
+        kinds = ('db', 'media', 'all')
+        names = (self.t('nbo_restore_db'), self.t('nbo_restore_media'),
+                 self.t('nbo_restore_all'))
+        descriptions = (self.t('nbo_restore_db_desc'), self.t('nbo_restore_media_desc'),
+                        self.t('nbo_restore_all_desc'))
+        selected: int | None = None
+        while True:
+            frame = self._frame(self.t('nbo_restore_choose'), self.t('nbo_restore_scope_hint'))
+            if frame:
+                h, w = frame
+                width = min(w-8, max(55, min(92, w-8)))
+                self._paint(3, 3, width, min(18, h-7))
+                self._put(4, 5, self.t('nbo_restore_source'), 'section')
+                self._put(5, 5, safe_text(entry.path.name)[:max(10,width-7)], 'title')
+                compact = h < 25
+                for i, (name, description) in enumerate(zip(names, descriptions)):
+                    y = (7 + i*2) if compact else (8 + i*3)
+                    if y >= h-3:
+                        break
+                    highlighted = i == selected
+                    if highlighted:
+                        self._put(y, 5, ' ' * (width-4), 'selected')
+                    marker = '●' if highlighted else '○'
+                    self._put(y, 6, f'{marker} {name}', 'selected' if highlighted else 'title')
+                    if y+1 < h-3:
+                        self._put(y+1, 9, description[:max(10,width-12)], 'muted')
+                if h > 25:
+                    self._put(19, 5, self.t('nbo_restore_scope_warning')[:max(10,width-7)], 'warning')
+                self.stdscr.refresh()
+            key = self.stdscr.getch()
+            if key in (27,3):
+                return None
+            if key in (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k')):
+                if selected is None:
+                    selected = 2 if key in (curses.KEY_UP, ord('k')) else 0
+                else:
+                    selected = (selected + (-1 if key in (curses.KEY_UP,ord('k')) else 1)) % len(kinds)
+            elif key in (10,13,curses.KEY_ENTER) and selected is not None:
+                return kinds[selected]
+
     def _backups(self) -> None:
         """Responsive inventory; manifests loaded only for selection and cached.
 
@@ -1278,6 +1330,20 @@ class CursesMenu:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='nbo-metadata')
         task = None
         task_key = None
+        disk_info: tuple[int,int,int,int,int] | None = None
+        disk_error = ''
+
+        def refresh_storage():
+            nonlocal disk_info, disk_error
+            try:
+                measurement = manager.storage_breakdown()
+                disk_info = measurement if isinstance(measurement, tuple) and len(measurement) == 5 else None
+                disk_error = ''
+            except (OSError, ValueError, BackupError) as exc:
+                disk_info = None
+                disk_error = safe_text(exc)
+
+        refresh_storage()
 
         def fingerprint(entry):
             # A replaced file or modified sidecar must not inherit stale detail.
@@ -1294,6 +1360,7 @@ class CursesMenu:
             nonlocal entries, cursor, scroll
             selected = entries[cursor].path if cursor is not None and cursor < len(entries) else None
             entries = manager.quick_list()
+            refresh_storage()
             cursor = next((i for i, e in enumerate(entries) if e.path == selected), None)
             chosen.intersection_update(e.path for e in entries)
             scroll = 0
@@ -1316,9 +1383,9 @@ class CursesMenu:
                     task_key = None
                 entry = entries[cursor] if cursor is not None and cursor < len(entries) else None
                 marked = [item for item in entries if item.path in chosen]
-                # One explicitly marked item is the operation target, even if
-                # the cursor subsequently moves to another row.
-                preview = (marked[0] if len(marked) == 1 else entry) if len(marked) < 2 else None
+                # Detail follows keyboard focus. Marked files are separate
+                # operation targets; never pin preview to the first marked row.
+                preview = entry if entry is not None else (marked[0] if len(marked) == 1 else None)
                 entry_key = fingerprint(preview) if preview else None
                 if preview is not None and entry_key not in details and task is None:
                     # v0.3.1 sidecars are tiny JSON: resolve immediately. Older
@@ -1331,6 +1398,11 @@ class CursesMenu:
                         task = pool.submit(manager.describe_one, preview)
                 detail = details.get(entry_key, preview) if preview else None
                 ready = preview is not None and entry_key in details
+                if len(marked) == 1 and fingerprint(marked[0]) not in details and task is None:
+                    other = marked[0]
+                    other_key = fingerprint(other)
+                    task_key = other_key
+                    task = pool.submit(manager.describe_one, other)
                 # A legacy or corrupt archive is never presented as
                 # restorable. Metadata must be loaded before enabling restore.
                 action_targets = marked if marked else ([entry] if entry else [])
@@ -1354,9 +1426,10 @@ class CursesMenu:
                     labels = [self.t('nbo_act_' + a) for a in backup_actions]
                     positions = self._backup_action_positions(labels, w - 8)
                     action_rows = max(row for _, row in positions) + 1
-                    action_y = min(max(18, 7 + min(12, len(entries))), h - 4 - action_rows)
-                    action_y = max(9, action_y)
+                    action_y = max(10, h - 5 - action_rows)
                     list_bottom = action_y - 2
+                    show_storage = pane and split >= 57 and h >= 31 and action_y >= 25
+                    chart_y = min(6 + min(13, len(entries)) + 2, action_y - 12) if show_storage else 0
                     self._paint(3, 2, split - 3, max(2, list_bottom - 2))
                     if pane:
                         self._paint(3, split + 1, w - split - 4, max(2, list_bottom - 2))
@@ -1370,7 +1443,8 @@ class CursesMenu:
                     remaining = max(8, split - 7 - len(header))
                     header += f'{self.t("nbo_name"):^{remaining}}'
                     self._put(4, 4, header[:max(8, split-7)], 'muted')
-                    visible = max(1, action_y - 8)
+                    visible = max(1, min(action_y - 8,
+                                         chart_y - 7 if show_storage else action_y - 8))
                     if cursor is not None:
                         if cursor < scroll:
                             scroll = cursor
@@ -1386,7 +1460,7 @@ class CursesMenu:
                                    f'{self._pretty_date(item.created):<16} '
                                    f'{self._human_size(item.size):>10} ')
                         if show_tag:
-                            tag = (self.t('nbo_pre_restore_short') if item.purpose=='pre_restore' else '')
+                            tag = (self.t('nbo_pre_restore_short') if item.purpose=='pre_restore' else self.t('nbo_manual_short'))
                             content += f'{tag:<12} '
                         content += item.path.name
                         self._put(row, 4, content[:max(8, split - 7)],
@@ -1398,24 +1472,7 @@ class CursesMenu:
                         x = split + 2
                         right_width = max(10, w - x - 3)
                         self._put(3, x, self.t('nbo_detail_label'), 'section')
-                        if len(marked) >= 2:
-                            # A multi-selection is a set, not an arbitrary
-                            # current-file detail; avoid implying restoration
-                            # will operate on the focused item.
-                            types = ', '.join(sorted({e.kind for e in marked}))
-                            summary = [
-                                self.t('nbo_multi_title'),
-                                self.t('nbo_chosen') + ': ' + str(len(marked)),
-                                self.t('nbo_type') + ': ' + types,
-                                self.t('nbo_total_size') + ': ' +
-                                self._human_size(sum(e.size for e in marked)),
-                                self.t('nbo_multi_available'),
-                                self.t('nbo_multi_restore_disabled'),
-                            ]
-                            for y, value in enumerate(summary, 5):
-                                self._put(y, x, value[:right_width],
-                                          'section' if y == 5 else 'muted')
-                        elif preview is None:
+                        if preview is None:
                             self._put(5, x, self.t('nbo_backup_select_preview'), 'muted')
                         else:
                             kind_label = self.t('nbo_kind_' + preview.kind)
@@ -1450,6 +1507,31 @@ class CursesMenu:
                                 self._put(y, x, line, 'title')
                                 y += 1
 
+                    if show_storage and disk_info is not None:
+                        self._put(chart_y - 1, 4, self.t('nbo_storage_label'), 'section')
+                        self._draw_storage_ring(5, chart_y, disk_info)
+                        bx = 25
+                        used, other, free, total, count = disk_info
+                        legends = ((self.t('nbo_storage_used'), used, 'disk_backup'),
+                                   (self.t('nbo_storage_other'), other, 'disk_other'),
+                                   (self.t('nbo_storage_free'), free, 'disk_free'))
+                        for j, (label, value, color) in enumerate(legends):
+                            self._put(chart_y + j + 1, bx,
+                                      f'● {label}: {self._human_size(value)}'[:max(8, split-bx-2)],
+                                      color)
+                        self._put(chart_y + 5, bx,
+                                  f'{self.t("nbo_storage_count")}: {count}', 'muted')
+                    elif show_storage and disk_error:
+                        self._put(chart_y, 4, disk_error[:max(10, split-7)], 'warning')
+
+                    if pane and len(marked) >= 2 and action_y >= 25:
+                        sy = min(20, action_y - 5)
+                        if sy > 17:
+                            self._put(sy, x, self.t('nbo_multi_title') +
+                                      f' ({len(marked)})', 'section')
+                            self._put(sy+1, x, f'{self.t("nbo_total_size")}: '
+                                      f'{self._human_size(sum(e.size for e in marked))}', 'muted')
+                            self._put(sy+2, x, self.t('nbo_multi_restore_disabled')[:right_width], 'warning')
                     self._put(action_y - 2, 3, f'{self.t("nbo_backup_count")}: {len(entries)}  |  '
                               f'{self.t("nbo_chosen")}: {len(chosen)}', 'muted')
                     self._put(action_y - 1, 3, '─' * (w - 7), 'muted')
@@ -1571,13 +1653,10 @@ class CursesMenu:
                     self.stdscr.timeout(-1)
                     only = 'all'
                     if entry.kind == 'full':
-                        i = self._choose(self.t('nbo_restore_choose'), [
-                            (self.t('nbo_restore_db'),''),(self.t('nbo_restore_media'),''),
-                            (self.t('nbo_restore_all'),'')], self.t('tui_back_hint'))
-                        if not isinstance(i,int):
+                        only = self._choose_restore_scope(entry)
+                        if only is None:
                             self.stdscr.timeout(120)
                             continue
-                        only = ('db','media','all')[i]
                     # Backups made before v0.3.2 mislabeled Django as NetBox.
                     # Never auto-bypass the version guard. Require a distinct
                     # confirmation before permitting an unknown backup version.

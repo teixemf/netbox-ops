@@ -44,7 +44,7 @@ class BackupView034Tests(unittest.TestCase):
             menu._backups()
 
     def test_version(self):
-        self.assertEqual(__version__, '0.3.6')
+        self.assertEqual(__version__, '0.4.0')
 
     def test_action_bar_single_row_wide_terminal_and_wraps_narrow(self):
         labels = [Translator('pt')('nbo_act_' + action) for action in
@@ -115,14 +115,15 @@ class BackupView034Tests(unittest.TestCase):
         self.assertEqual({call.args[1] for call in verify.call_args_list}, set(self.files))
         self.assertIn('MULTIPLE BACKUPS', ' '.join(t for _, _, t, _ in screen.writes))
 
-    def test_marked_backup_remains_preview_target_after_cursor_moves(self):
+    def test_marked_backup_does_not_pin_preview_when_cursor_moves(self):
         menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_DOWN,
                                   27, 27, 27])
         self.run_menu(menu)
-        # The second row is highlighted, but the one marked file remains
-        # the preview and the eventual restore target.
+        # The second row is highlighted and the detail follows focus;
+        # the marked file remains the operation target, not the preview.
         rendered = ' '.join(text for _, _, text, _ in screen.frames[3])
-        self.assertIn(self.files[2].name, rendered)
+        self.assertIn('NOME:', rendered)
+        self.assertIn(self.files[1].name, rendered)
 
     def test_tab_enter_delete_targets_only_marked_files(self):
         menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_DOWN, 32,

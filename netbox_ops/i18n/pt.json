@@ -237,5 +237,15 @@
   "nbo_pre_restore_short": "PRÉ-REST.",
   "nbo_pre_restore": "Pré-restauro (salvaguarda automática)",
   "nbo_manual": "Manual",
-  "nbo_purpose": "Origem"
+  "nbo_purpose": "Origem",
+  "nbo_confirm_failed_title": "Confirmação incorrecta",
+  "nbo_confirm_failed_message": "A palavra de confirmação não corresponde. Nenhuma operação foi iniciada.",
+  "nbo_confirm_failed_hint": "Enter/Esc — Regressar ao ecrã anterior",
+  "nbo_manual_short": "MANUAL",
+  "nbo_restore_scope_hint": "↑↓ Escolher âmbito  Enter Continuar  Esc Cancelar",
+  "nbo_restore_source": "BACKUP SELECCIONADO",
+  "nbo_restore_db_desc": "Repor apenas os dados PostgreSQL; conservar imagens e anexos.",
+  "nbo_restore_media_desc": "Repor apenas imagens e ficheiros; conservar a base de dados.",
+  "nbo_restore_all_desc": "Repor base de dados e imagens; operação completa.",
+  "nbo_restore_scope_warning": "O restauro exige confirmação adicional e cria salvaguardas prévias."
 }

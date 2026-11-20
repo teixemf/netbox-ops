@@ -16,6 +16,31 @@ if [[ "$(stat -c %u -- "${ROOT}")" -ne 0 ]]; then
     echo 'O directório /opt/netbox-ops deve pertencer a root.' >&2
     exit 1
 fi
+# Supported families: RHEL (including Rocky/Alma) and Debian (incl. Ubuntu).
+if [[ ! -r /etc/os-release ]]; then
+    echo 'Não foi possível identificar o sistema Linux.' >&2
+    exit 1
+fi
+. /etc/os-release
+DISTRO_IDS=" ${ID:-} ${ID_LIKE:-} "
+case "${DISTRO_IDS}" in
+    *' debian '*|*' ubuntu '*) FAMILY=debian ;;
+    *' rhel '*|*' centos '*|*' fedora '*) FAMILY=rhel ;;
+    *) echo 'Distribuição não suportada: requer RHEL ou Debian (ou derivada).' >&2; exit 1 ;;
+esac
+for command in systemctl runuser pg_dump pg_restore psql; do
+    if ! command -v "${command}" >/dev/null 2>&1; then
+        # PGDG clients on RHEL may live outside PATH; the Python backend can
+        # discover them, so don't demand bare PG tools at install time.
+        if [[ "${command}" == pg_dump || "${command}" == pg_restore || "${command}" == psql ]]; then
+            echo "Aviso: ${command} fora do PATH; configure backup.pg_bin_directory se utilizar PGDG." >&2
+        else
+            echo "Dependência do sistema em falta: ${command}." >&2
+            exit 1
+        fi
+    fi
+done
+printf 'Distribuição detectada: %s (%s)\n' "${FAMILY}" "${PRETTY_NAME:-${ID}}"
 "${ROOT}/upgrade.sh"
 install -d -o root -g root -m 0700 /etc/netbox-ops /var/log/netbox-ops
 # Persistent data is deliberately outside /opt/netbox-ops (Git-rebuildable code).

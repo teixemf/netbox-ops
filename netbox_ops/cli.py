@@ -116,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     stack_selector.add_argument('--plugins', choices=('all',), help='Upgrade all plugins (reserved).')
     stack_selector.add_argument('--plugin', action='append', help='Selected plugins (reserved).')
 
+    top.add_parser('platform', help='Show OS family, systemd units and PostgreSQL tools (read-only).')
     top.add_parser('self-upgrade', help='Upgrade netbox-ops itself (not implemented).')
     return parser
 
@@ -337,6 +338,25 @@ def perform_backup_action(group: str, action: str, cfg: Configuration,
 
 def dispatch(args: argparse.Namespace, t: Translator) -> int:
     action = getattr(args, 'action', '')
+    if args.command == 'platform':
+        from .platform import detect_platform, pg_binary, PlatformError
+        profile = detect_platform()
+        print(f'Linux: {profile.distro} {profile.version} (family: {profile.family})')
+        print(f'Python: {sys.version_info.major}.{sys.version_info.minor}')
+        if profile.family not in ('rhel', 'debian'):
+            print('Unsupported OS family', file=sys.stderr)
+            return 1
+        config = load_config(args.config)
+        for name in SERVICE_NAMES:
+            print(f'  {name:<13} {config.units[name]}')
+        for name in ('psql', 'pg_dump', 'pg_restore', 'createdb', 'dropdb'):
+            try:
+                binary = pg_binary(name, config.pg_bin_directory)
+            except PlatformError as exc:
+                print(f'  {name:<13} unavailable: {exc}')
+            else:
+                print(f'  {name:<13} {binary}')
+        return 0
     if args.command in ('backup', 'restore'):
         config = load_config(args.config)
         return perform_backup_action(

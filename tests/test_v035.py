@@ -173,7 +173,7 @@ class JournalUiTests(unittest.TestCase):
                 self.assertNotIn('<',t(key))
 
     def test_release(self):
-        self.assertEqual(__version__,'0.3.6')
+        self.assertEqual(__version__,'0.4.0')
 
 
 if __name__=='__main__':
