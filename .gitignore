@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Environments
+venv/
+.venv/
+.env
+.env.*
+
+# Runtime and server-private data
+backups/
+*.dump
+*.dump.json
+*.tar.gz
+*.log
+*.sqlite
+*.db
+config.json
+configuration.py
+ldap_config.py
+*.key
+*.pem
+
+# Editors, OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

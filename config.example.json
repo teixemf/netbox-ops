@@ -1,0 +1,15 @@
+{
+  "services": {
+    "netbox": "netbox.service",
+    "netbox-rq": "netbox-rq.service",
+    "nginx": "nginx.service",
+    "postgresql": "postgresql.service",
+    "redis": "redis.service"
+  },
+  "backup": {
+    "directory": "/var/lib/netbox-ops/backups",
+    "database": "netbox",
+    "owner": "netbox",
+    "media_directory": "/opt/netbox/netbox/media"
+  }
+}

@@ -1,0 +1,300 @@
+"""TUI tests are run without a real systemd or without controlling a real tty."""
+from __future__ import annotations
+
+import curses
+import io
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from netbox_ops.i18n import Translator
+from netbox_ops.tui import (CursesMenu, SECTIONS, make_main_items,
+                            move_selection, safe_text, action_enabled)
+from netbox_ops.services import ServiceState
+
+
+class FakeScreen:
+    def __init__(self, keys=(), dimensions=(24, 100)):
+        self.keys = iter(keys)
+        self.dimensions = dimensions
+        self.writes = []
+        self.current_frame = []
+        self.frames = []
+
+    def getmaxyx(self):
+        return self.dimensions
+
+    def addnstr(self, y, x, text, n, attr):
+        entry = (y, x, text[:n], attr)
+        self.writes.append(entry)
+        self.current_frame.append(entry)
+
+    def erase(self):
+        self.current_frame = []
+
+    def refresh(self):
+        self.frames.append(list(self.current_frame))
+
+    def getch(self):
+        return next(self.keys)
+
+    def keypad(self, enabled):
+        pass
+
+    def timeout(self, ms):
+        self.wait_ms = ms
+
+
+class MenuNavigationTests(unittest.TestCase):
+    def test_all_actions_plus_language_and_exit(self):
+        pt = make_main_items(Translator('pt'))
+        en = make_main_items(Translator('en'))
+        self.assertEqual(len(pt), 9)
+        self.assertEqual(len(en), 9)
+        self.assertEqual(pt[0][2], ('services', 'manage'))
+        self.assertEqual(pt[6][2], ('self-upgrade', ''))
+        self.assertEqual(pt[-1][1], 'exit')
+        self.assertEqual(SECTIONS, {0: 'menu_services', 1: 'menu_backups',
+                                    2: 'menu_updates', 6: 'menu_maintenance'})
+        self.assertIn('Manage services', en[0][0])
+
+    def test_arrows_wrap_home_end_and_pages(self):
+        self.assertEqual(move_selection(0, curses.KEY_UP, 15), 14)
+        self.assertEqual(move_selection(14, curses.KEY_DOWN, 15), 0)
+        self.assertEqual(move_selection(8, curses.KEY_HOME, 15), 0)
+        self.assertEqual(move_selection(8, curses.KEY_END, 15), 14)
+        self.assertEqual(move_selection(8, curses.KEY_NPAGE, 15), 14)
+        self.assertEqual(move_selection(8, curses.KEY_PPAGE, 15), 2)
+
+    def test_printed_system_errors_do_not_include_control_characters(self):
+        self.assertEqual(safe_text('bad\x1b[31m\nservice'), 'bad [31m service')
+
+    def test_fast_escape_delay_configured(self):
+        menu = CursesMenu(FakeScreen(), Translator('en'))
+        with patch('netbox_ops.tui.curses.set_escdelay') as delay, \
+             patch('netbox_ops.tui.curses.curs_set'), \
+             patch('netbox_ops.tui.curses.has_colors', return_value=False):
+            menu._init_screen()
+        delay.assert_called_once_with(45)
+
+    def test_tui_entry_navigation_and_escape(self):
+        screen = FakeScreen(keys=[curses.KEY_DOWN, curses.KEY_DOWN, 10])
+        menu = CursesMenu(screen, Translator('pt'))
+        menu._init_screen = lambda: None
+        result = menu._choose('Menu', [('a', ''), ('b', ''), ('c', '')], 'hint')
+        self.assertEqual(result, 1)
+        self.assertTrue(any('c' in entry[2] for entry in screen.writes))
+
+    def test_language_can_change_without_exiting(self):
+        menu = CursesMenu(FakeScreen(), Translator('pt'))
+        with patch.object(menu, '_choose', return_value=1):
+            menu._language()
+        self.assertEqual(menu.t.language, 'en')
+
+
+class RestartSafetyTests(unittest.TestCase):
+    def test_confirmation_accepts_only_literal_RESTART(self):
+        keys = [*(ord(ch) for ch in 'RESTART'), 10]
+        screen = FakeScreen(keys)
+        self.assertTrue(CursesMenu(screen, Translator('pt'))._confirm(['netbox']))
+        self.assertFalse(CursesMenu(FakeScreen([*(ord(ch) for ch in 'restart'), 10]),
+                                     Translator('pt'))._confirm(['netbox']))
+        self.assertFalse(CursesMenu(FakeScreen([27]), Translator('pt'))._confirm(['netbox']))
+
+    def test_cancelled_manage_action_never_executes_systemctl(self):
+        # Select first service; open action selector; cancel confirmation; Esc twice.
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27])
+        menu = CursesMenu(screen, Translator('pt'))
+        systemd = MagicMock()
+        systemd.status.return_value = [ServiceState(n, f'{n}.service', 'loaded',
+                                       'active', 'running', 'enabled', '123')
+                                       for n in ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'), \
+             patch.object(menu, '_choose', return_value=None), \
+             patch.object(menu, '_execute_batch') as batch:
+            menu._manage()
+        batch.assert_not_called()
+        systemd.restart.assert_not_called()
+
+    def test_unimplemented_tui_item_never_runs_business_logic(self):
+        menu = CursesMenu(FakeScreen([curses.KEY_DOWN,curses.KEY_DOWN,curses.KEY_DOWN,10,ord('q')]), Translator('pt'))
+        systemd = MagicMock()
+        systemd.status.return_value = []
+        with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups, \
+             patch.object(menu, '_show_lines') as show:
+            backups.return_value.storage_stats.return_value = (0,0,0)
+            self.assertEqual(menu.run(), 0)
+        self.assertEqual(show.call_count, 1)
+        self.assertIn('NÃO IMPLEMENTADO', show.call_args.args[1][0][0])
+
+
+class NewServiceTuiTests(unittest.TestCase):
+    def _state(self, name='netbox', active='active'):
+        return ServiceState(name, f'{name}.service', 'loaded', active,
+                            'running' if active == 'active' else 'dead', 'enabled', '4321')
+
+    def test_escape_ignored_only_on_main_menu(self):
+        menu = CursesMenu(FakeScreen([27, ord('q')]), Translator('pt'))
+        self.assertEqual(menu._choose('menu', [('one', '')], 'hint', main_menu=True), 'quit')
+        menu = CursesMenu(FakeScreen([27]), Translator('pt'))
+        self.assertIsNone(menu._choose('submenu', [('one', '')], 'hint'))
+
+    def test_first_escape_clears_highlight_second_returns_from_submenu(self):
+        screen = FakeScreen([curses.KEY_DOWN, 27, 27])
+        menu = CursesMenu(screen, Translator('pt'))
+        self.assertIsNone(menu._choose('submenu', [('one', ''), ('two', '')], 'hint'))
+        self.assertEqual(len(screen.frames), 3)
+        self.assertFalse(any(e[-1] == curses.A_REVERSE for e in screen.frames[0]))
+        self.assertTrue(any(e[-1] == curses.A_REVERSE for e in screen.frames[1]))
+        self.assertFalse(any(e[-1] == curses.A_REVERSE for e in screen.frames[2]))
+
+    def test_main_menu_esc_clears_highlight_but_only_q_exits(self):
+        screen = FakeScreen([curses.KEY_DOWN, 27, 27, ord('q')])
+        menu = CursesMenu(screen, Translator('en'))
+        self.assertEqual(menu._choose('main', [('one', '')], 'hint', main_menu=True), 'quit')
+        self.assertFalse(any(e[-1] == curses.A_REVERSE for e in screen.frames[-1]))
+
+    def test_main_menu_escape_then_q_exits(self):
+        menu = CursesMenu(FakeScreen([27, ord('q')]), Translator('pt'))
+        systemd=MagicMock(); systemd.status.return_value=[]
+        with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices',return_value=systemd), \
+             patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups:
+            backups.return_value.storage_stats.return_value=(0,0,0)
+            self.assertEqual(menu.run(),0)
+
+    def test_status_initial_view_has_no_highlight(self):
+        menu = CursesMenu(FakeScreen([27]), Translator('pt'))
+        systemd = MagicMock()
+        systemd.status.return_value = [self._state(n) for n in
+                                       ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
+        with patch('netbox_ops.tui.load_config'), \
+             patch('netbox_ops.tui.SystemdServices', return_value=systemd):
+            menu._status()
+        self.assertFalse(any('› ' in entry[2] for entry in menu.stdscr.writes))
+
+    def test_table_can_open_detail_without_modifying_services(self):
+        screen = FakeScreen([curses.KEY_DOWN, 10, 27, 27])
+        menu = CursesMenu(screen, Translator('pt'))
+        manager = MagicMock()
+        manager.status.return_value = [self._state(n) for n in
+                                       ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
+        with patch('netbox_ops.tui.load_config'), \
+             patch('netbox_ops.tui.SystemdServices', return_value=manager), \
+             patch.object(menu, '_detail') as detail:
+            menu._status()
+        detail.assert_called_once()
+        self.assertEqual(detail.call_args.args[1].name, 'netbox')
+        self.assertTrue(any('5/5 serviços activos' in write[2] for write in screen.writes))
+        self.assertTrue(any('netbox-rq' in write[2] for write in screen.writes))
+
+    def test_details_display_cpu_ram_version_not_journal(self):
+        screen = FakeScreen([27])
+        menu = CursesMenu(screen, Translator('en'))
+        menu.cpu_display['netbox'] = '2.3%'
+        menu.versions.get = MagicMock(return_value='4.4.1')
+        menu.versions.request = MagicMock()
+        systemd = MagicMock()
+        systemd.logs.return_value = ['journal ready']
+        menu._detail(systemd, self._state())
+        self.assertTrue(any('CPU: 2.3%' in x[2] for x in screen.writes))
+        self.assertTrue(any('Version: 4.4.1' in x[2] for x in screen.writes))
+        systemd.logs.assert_called_once()
+        systemd.restart.assert_not_called()
+
+    def test_details_are_read_only_even_after_enter(self):
+        screen = FakeScreen([10, 27, 27])  # Enter opens journal viewer only
+        menu = CursesMenu(screen, Translator('pt'))
+        systemd = MagicMock()
+        systemd.logs.return_value = ['a journal entry']
+        menu._detail(systemd, self._state())
+        for action in ('start', 'stop', 'restart', 'enable', 'disable'):
+            getattr(systemd, action).assert_not_called()
+        self.assertFalse(any('ACÇÕES' in write[2] for write in screen.writes))
+
+    def test_critical_confirmation_name_is_required(self):
+        text = 'RESTART postgresql'
+        menu = CursesMenu(FakeScreen([*(ord(c) for c in text), 10]), Translator('en'))
+        self.assertTrue(menu._confirm_action('restart', ['postgresql']))
+        menu = CursesMenu(FakeScreen([*(ord(c) for c in 'RESTART'), 10]), Translator('en'))
+        self.assertFalse(menu._confirm_action('restart', ['postgresql']))
+
+    def test_action_disabled_for_active_or_inactive(self):
+        self.assertFalse(action_enabled('start', self._state(active='active')))
+        self.assertTrue(action_enabled('stop', self._state(active='active')))
+        self.assertFalse(action_enabled('stop', self._state(active='inactive')))
+        self.assertTrue(action_enabled('start', self._state(active='inactive')))
+        self.assertFalse(action_enabled('restart', self._state(active='inactive')))
+
+    def test_custom_log_count_and_cancel(self):
+        menu = CursesMenu(FakeScreen([ord('5'), ord('0'), 10]), Translator('pt'))
+        self.assertEqual(menu._read_number(20), 50)
+        menu = CursesMenu(FakeScreen([27]), Translator('pt'))
+        self.assertIsNone(menu._read_number(20))
+
+    def test_read_only_detail_does_not_fetch_journal_or_control_services(self):
+        menu = CursesMenu(FakeScreen([9, curses.KEY_PPAGE, curses.KEY_NPAGE,
+                                     ord('+'), 27]), Translator('pt'))
+        systemd = MagicMock()
+        menu._detail(systemd, self._state())
+        systemd.logs.assert_called_once()
+        systemd.start.assert_not_called()
+        systemd.stop.assert_not_called()
+        systemd.restart.assert_not_called()
+
+    def test_manage_initial_screen_has_no_cyan_selection(self):
+        screen = FakeScreen([27])
+        menu = CursesMenu(screen, Translator('pt'))
+        systemd = MagicMock()
+        systemd.status.return_value = [self._state(n) for n in
+                                       ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'):
+            menu._manage()
+        self.assertFalse(any(e[-1] == curses.A_REVERSE for e in screen.frames[0]))
+        systemd.start.assert_not_called()
+
+    def test_manage_multi_select_and_action(self):
+        # Two service checkboxes and A to choose a single action.
+        screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 32,
+                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27])
+        menu = CursesMenu(screen, Translator('pt'))
+        systemd = MagicMock()
+        systemd.status.return_value = [self._state(n) for n in
+                                       ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'), \
+             patch.object(menu, '_choose', return_value=2), \
+             patch.object(menu, '_confirm_action', return_value=True) as confirmed, \
+             patch.object(menu, '_execute_batch') as executed:
+            menu._manage()
+        confirmed.assert_called_once_with('restart', ['netbox', 'netbox-rq'])
+        executed.assert_called_once_with(systemd, 'restart', ['netbox', 'netbox-rq'])
+
+    def test_manage_never_changes_services_without_confirmation(self):
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27])
+        menu = CursesMenu(screen, Translator('pt'))
+        systemd = MagicMock()
+        systemd.status.return_value = [self._state(n) for n in
+                                       ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'), \
+             patch.object(menu, '_choose', return_value=0), \
+             patch.object(menu, '_confirm_action', return_value=False), \
+             patch.object(menu, '_show_lines'), \
+             patch.object(menu, '_execute_batch') as executed:
+            menu._manage()
+        executed.assert_not_called()
+
+    def test_progress_bar_counts_actual_completions(self):
+        screen = FakeScreen([])
+        menu = CursesMenu(screen, Translator('en'))
+        menu._draw_progress('restart', 1, 4, 'redis', 'done', 'active')
+        self.assertTrue(any('25%' in item[2] for item in screen.writes))
+        self.assertTrue(any('1 of 4 services completed' in item[2] for item in screen.writes))
+
+
+if __name__ == '__main__':
+    unittest.main()

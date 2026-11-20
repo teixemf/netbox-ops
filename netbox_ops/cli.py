@@ -1,0 +1,501 @@
+"""One command dispatcher shared by the interactive menu and the CLI."""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from typing import Callable
+from pathlib import Path
+from typing import Sequence
+
+from . import __version__
+from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, Configuration, load_config
+from .i18n import LANGUAGES, Translator
+from .services import ExclusiveLock, ServiceError, SystemdServices, write_audit
+
+
+# Menu numbers and CLI paths are maintained together. Stubs never touch NetBox.
+MENU_ACTIONS = (
+    ('1', 'services', 'manage', 'menu_2'),
+    ('2', 'backup', 'manage', 'menu_backup_manage'),
+    ('3', 'updates', 'check', 'menu_9'),
+    ('4', 'upgrade', 'netbox', 'menu_10'),
+    ('5', 'upgrade', 'plugins', 'menu_11'),
+    ('6', 'upgrade', 'stack', 'menu_12'),
+    ('7', 'self-upgrade', '', 'menu_13'),
+)
+
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog='netbox-ops',
+        description='NetBox maintenance CLI. Run without arguments for interactive menu.')
+    parser.add_argument('--lang', choices=LANGUAGES, default='pt', help='Interface language (pt/en).')
+    parser.add_argument('--no-tui', action='store_true',
+                        help='Use the original numbered text menu (terminal fallback).')
+    parser.add_argument('--config', type=Path, default=CONFIG_PATH,
+                        help='Root-managed JSON configuration path.')
+    parser.add_argument('--version', action='version', version=f'netbox-ops {__version__}')
+    top = parser.add_subparsers(dest='command', metavar='COMMAND')
+
+    services = top.add_parser('services', help='Systemd status, logs and lifecycle/startup operations.')
+    service_commands = services.add_subparsers(dest='action', required=True)
+    service_commands.add_parser('manage', help='Open interactive multi-service manager (TUI).')
+    status = service_commands.add_parser('status', help='Read status of configured services.')
+    status.add_argument('--service', choices=SERVICE_NAMES, action='append',
+                        help='Show one or more services; defaults to all.')
+    logs = service_commands.add_parser('logs', help='Read recent journal records.')
+    logs.add_argument('--service', choices=SERVICE_NAMES, required=True)
+    logs.add_argument('--lines', type=int, default=20, help='Number of records (1-500).')
+    for change in ('start', 'stop', 'enable', 'disable'):
+        cmd = service_commands.add_parser(change, help=f'{change.title()} selected service(s).')
+        cmd.add_argument('--service', choices=SERVICE_NAMES, action='append', required=True)
+        cmd.add_argument('--yes', action='store_true', help='Skip interactive confirmation.')
+        cmd.add_argument('--allow-critical', action='store_true',
+                         help='Required with --yes for PostgreSQL or Redis.')
+    restart = service_commands.add_parser('restart',
+        help='Restart NetBox + RQ by default, or selected services.')
+    selector = restart.add_mutually_exclusive_group()
+    selector.add_argument('--service', choices=SERVICE_NAMES, action='append',
+                          help='May be repeated for multiple services.')
+    selector.add_argument('--all', action='store_true',
+                          help='Include PostgreSQL, Redis, Nginx, NetBox and RQ (disruptive).')
+    restart.add_argument('--yes', action='store_true',
+                         help='Skip confirmation (for deliberate automation).')
+
+    restart.add_argument('--allow-critical', action='store_true',
+                         help='Required with --yes for PostgreSQL or Redis.')
+
+    backup = top.add_parser('backup', help='Create PostgreSQL, artifact or integrated archives.')
+    backup_commands = backup.add_subparsers(dest='action', required=True)
+    for operation in ('db', 'media', 'full'):
+        backup_commands.add_parser(operation, help='Create a protected, timestamped backup.')
+    listed = backup_commands.add_parser('list', help='List local backup archives.')
+    listed.add_argument('--kind', choices=('db', 'media', 'full', 'legacy'))
+    verified = backup_commands.add_parser('verify', help='Verify a backup archive and its checksums.')
+    verified.add_argument('--kind', choices=('db', 'media', 'full', 'legacy'), required=True)
+    verified.add_argument('--file', type=Path, required=True)
+
+    deleted = backup_commands.add_parser('delete', help='Delete one local backup, with explicit confirmation.')
+    deleted.add_argument('--file', type=Path, required=True)
+    deleted.add_argument('--yes', action='store_true')
+    backup_commands.add_parser('manage', help='Open the unified backup TUI.')
+
+    restore = top.add_parser('restore', help='Restore a verified backup (disruptive).')
+    restore_commands = restore.add_subparsers(dest='action', required=True)
+    for operation in ('db', 'media', 'full'):
+        command = restore_commands.add_parser(operation, help='Restore an archive of this type.')
+        command.add_argument('--file', type=Path, required=True)
+        if operation == 'full':
+            command.add_argument('--only', choices=('db', 'media', 'all'), default='all',
+                                 help='Restore only DB, only media, or both (default).')
+        command.add_argument('--yes', action='store_true', help='Noninteractive restore confirmation.')
+        command.add_argument('--acknowledge-data-loss', action='store_true',
+                             help='Required together with --yes for automation.')
+        command.add_argument('--accept-unknown-version', action='store_true',
+                             help='Allow restore if source/current NetBox version is unknown.')
+        command.add_argument('--allow-version-mismatch', action='store_true',
+                             help='Allow a version mismatch after manual compatibility review.')
+
+    updates = top.add_parser('updates', help='Update discovery (not yet implemented).')
+    updates_commands = updates.add_subparsers(dest='action', required=True)
+    updates_commands.add_parser('check', help='Not yet implemented.')
+
+    upgrade = top.add_parser('upgrade', help='NetBox and plugin upgrades (not implemented).')
+    upgrade_commands = upgrade.add_subparsers(dest='action', required=True)
+    netbox = upgrade_commands.add_parser('netbox', help='Not yet implemented.')
+    netbox.add_argument('--version', help='Desired NetBox version (reserved).')
+    plugins = upgrade_commands.add_parser('plugins', help='Not yet implemented.')
+    plugin_selector = plugins.add_mutually_exclusive_group()
+    plugin_selector.add_argument('--all', action='store_true')
+    plugin_selector.add_argument('--plugin', action='append')
+    plugins.add_argument('--version', help='Desired version for a selected plugin (reserved).')
+    stack = upgrade_commands.add_parser('stack', help='Not yet implemented.')
+    stack.add_argument('--netbox-version', help='Desired NetBox version (reserved).')
+    stack_selector = stack.add_mutually_exclusive_group()
+    stack_selector.add_argument('--plugins', choices=('all',), help='Upgrade all plugins (reserved).')
+    stack_selector.add_argument('--plugin', action='append', help='Selected plugins (reserved).')
+
+    top.add_parser('self-upgrade', help='Upgrade netbox-ops itself (not implemented).')
+    return parser
+
+
+def display_status(systemd: SystemdServices, names: Sequence[str], t: Translator) -> int:
+    states = systemd.status(list(names))
+    print(t('status_header'))
+    for state in states:
+        print(f'{state.name:<13} {state.unit:<25} {state.active:<13} '
+              f'{state.substate:<13} {state.enabled:<12} {state.loaded}')
+    if any(not s.healthy for s in states):
+        print(t('status_warning'), file=sys.stderr)
+        return 1
+    return 0
+
+
+CRITICAL_SERVICES = frozenset({'postgresql', 'redis'})
+
+
+def challenge(action: str, names: Sequence[str]) -> str:
+    """Require a more specific confirmation for critical system dependencies."""
+    verb = action.upper()
+    critical = [name for name in dict.fromkeys(names) if name in CRITICAL_SERVICES]
+    if critical:
+        return f'{verb} {",".join(critical)}'
+    return verb
+
+
+def confirmed(t: Translator, names: Sequence[str], action: str = 'restart') -> bool:
+    token = challenge(action, names)
+    print(t('action_target', names=', '.join(names), action=t('action_' + action)))
+    print(t('startup_warning') if action in ('enable', 'disable') else t('restart_warning'))
+    try:
+        answer = input(t('action_confirm', token=token))
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer == token
+
+
+def perform_service_action(systemd: SystemdServices, action: str,
+                           names: Sequence[str], t: Translator, yes: bool = False,
+                           allow_critical: bool = False) -> int:
+    if action not in ('start', 'stop', 'restart', 'enable', 'disable'):
+        raise ValueError(f'Unsupported action: {action}')
+    if os.geteuid() != 0:
+        print(t('root_required_actions'), file=sys.stderr)
+        return 2
+    selected = list(dict.fromkeys(names))
+    if not selected:
+        print(t('service_error', error='No services selected'), file=sys.stderr)
+        return 2
+    if yes and CRITICAL_SERVICES.intersection(selected) and not allow_critical:
+        print(t('critical_flag_required'), file=sys.stderr)
+        return 2
+    if not yes and not confirmed(t, selected, action):
+        print(t('cancelled_action'), file=sys.stdout)
+        return 2
+    try:
+        with ExclusiveLock():
+            who = f'uid={os.getuid()} sudo_user={os.environ.get("SUDO_USER", "unknown")}'
+            write_audit(f'{action.upper()} requested services={",".join(selected)} {who}')
+            try:
+                states = getattr(systemd, action)(selected)
+            except ServiceError as exc:
+                write_audit(f'{action.upper()} failure services={",".join(selected)} error={exc}')
+                raise
+            write_audit(f'{action.upper()} success services={",".join(selected)}')
+    except (ServiceError, OSError) as exc:
+        print(t('service_error', error=exc), file=sys.stderr)
+        return 1
+    for state in states:
+        result_state = state.enabled if action in ('enable', 'disable') else state.active
+        print(t('action_success', action=t('action_' + action), name=state.name,
+                state=result_state))
+    return 0
+
+
+def perform_restart(systemd: SystemdServices, names: Sequence[str], t: Translator,
+                    yes: bool = False, allow_critical: bool = False) -> int:
+    """Backward-compatible entrypoint for existing restart workflows."""
+    return perform_service_action(systemd, 'restart', names, t, yes, allow_critical)
+
+
+# Stop dependants before databases; start/restart databases before the web workers.
+START_ORDER = ('postgresql', 'redis', 'nginx', 'netbox', 'netbox-rq')
+STOP_ORDER = tuple(reversed(START_ORDER))
+
+
+def order_services(action: str, names: Sequence[str]) -> list[str]:
+    unique = list(dict.fromkeys(names))
+    if action not in ('start', 'stop', 'restart', 'enable', 'disable'):
+        raise ValueError(f'Unsupported action: {action}')
+    if any(name not in SERVICE_NAMES for name in unique):
+        raise ServiceError('Unknown service')
+    if action in ('enable', 'disable'):
+        return unique
+    priority = STOP_ORDER if action == 'stop' else START_ORDER
+    return sorted(unique, key=priority.index)
+
+
+def perform_service_batch(systemd: SystemdServices, action: str,
+                          names: Sequence[str], on_progress: Callable[[str, int, int, str, str], None]
+                          | None = None) -> tuple[list[tuple[str, str]], str | None]:
+    '''One exclusive lock, per-service audit and real completed-step progress.
+
+    Abort on the first failure; no implicit rollback or extra services.
+    on_progress receives (stage, completed, total, service, details).
+    '''
+    if os.geteuid() != 0:
+        raise ServiceError('Root privileges required')
+    ordered = order_services(action, names)
+    if not ordered:
+        raise ServiceError('No services selected')
+    results: list[tuple[str, str]] = []
+    total = len(ordered)
+    who = f'uid={os.getuid()} sudo_user={os.environ.get("SUDO_USER", "unknown")}'
+    with ExclusiveLock():
+        write_audit(f'{action.upper()} batch requested services={",".join(ordered)} {who}')
+        for name in ordered:
+            if on_progress:
+                on_progress('running', len(results), total, name, '')
+            try:
+                state = getattr(systemd, action)([name])[0]
+                detail = state.enabled if action in ('enable', 'disable') else state.active
+                write_audit(f'{action.upper()} success service={name} state={detail}')
+            except (ServiceError, OSError) as exc:
+                write_audit(f'{action.upper()} failure service={name} error={exc}')
+                if on_progress:
+                    on_progress('error', len(results), total, name, str(exc))
+                return results, f'{name}: {exc}'
+            results.append((name, detail))
+            if on_progress:
+                on_progress('done', len(results), total, name, detail)
+        write_audit(f'{action.upper()} batch finished services={",".join(ordered)}')
+    return results, None
+
+
+def not_implemented(t: Translator, name: str) -> int:
+    print(t('not_implemented', command=name))
+    return 3
+
+
+def confirm_restore(kind: str, source: Path, t: Translator, only: str = 'all') -> bool:
+    token = f'RESTORE {kind.upper()}' + (f' {only.upper()}' if kind == 'full' else '')
+    print(t('backup_restore_warning', kind=kind, path=str(source)))
+    try:
+        return input(t('backup_restore_confirmation', token=token)) == token
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def perform_backup_action(group: str, action: str, cfg: Configuration,
+                          t: Translator, *, source: Path | None = None,
+                          yes: bool = False, acknowledge: bool = False,
+                          accept_unknown: bool = False, allow_mismatch: bool = False,
+                          kind: str | None = None, only: str = 'all',
+                          config_path: Path = CONFIG_PATH) -> int:
+    from .backups import BackupError, BackupManager
+    manager = BackupManager(cfg)
+    try:
+        if group == 'backup' and action == 'list':
+            for path in manager.list_backups(kind):
+                print(path)
+            return 0
+        if group == 'backup' and action == 'delete':
+            if os.geteuid() != 0:
+                print(t('root_required_actions'), file=sys.stderr)
+                return 2
+            token = 'DELETE BACKUP'
+            if not yes:
+                try:
+                    if input(f'{token} ({source or manager.directory})? Type {token}: ') != token:
+                        return 2
+                except (EOFError, KeyboardInterrupt):
+                    return 2
+            released = manager.delete_backup(source)
+            print(f'Deleted {source} ({released} bytes)')
+            return 0
+        if group == 'backup' and action == 'verify':
+            manifest = manager.verify(kind or '', source)
+            print(t('backup_verified', path=source,
+                    version=(manifest or {}).get('netbox_version') or '?'))
+            return 0
+        if group == 'backup':
+            if action == 'manage':
+                if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    print('backup manage requires interactive terminal', file=sys.stderr)
+                    return 2
+                from .tui import run_tui
+                return run_tui(t, config_path, initial_view='backups')
+            report = manager.backup(action)
+            print(t('backup_created', path=report.path))
+            print(report.detail)
+            return 0
+        if group == 'restore':
+            if source is None:
+                print(t('backup_missing_source'), file=sys.stderr)
+                return 2
+            # Reject incorrect combinations, including --acknowledge-data-loss alone.
+            if yes != acknowledge:
+                print(t('backup_flags_required'), file=sys.stderr)
+                return 2
+            if not yes and not confirm_restore(action, source, t, only):
+                print(t('cancelled_action'))
+                return 2
+            report = manager.restore(action, source, only=only, accept_unknown=accept_unknown,
+                                     allow_mismatch=allow_mismatch)
+            print(t('backup_restored', path=report.path))
+            if report.detail:
+                print(report.detail)
+            return 0
+    except (BackupError, OSError, ValueError, KeyError) as exc:
+        print(t('backup_error', error=exc), file=sys.stderr)
+        return 1
+    return 3
+
+
+def dispatch(args: argparse.Namespace, t: Translator) -> int:
+    action = getattr(args, 'action', '')
+    if args.command in ('backup', 'restore'):
+        config = load_config(args.config)
+        return perform_backup_action(
+            args.command, action, config, t,
+            source=getattr(args, 'file', None),
+            yes=getattr(args, 'yes', False),
+            acknowledge=getattr(args, 'acknowledge_data_loss', False),
+            accept_unknown=getattr(args, 'accept_unknown_version', False),
+            allow_mismatch=getattr(args, 'allow_version_mismatch', False),
+            kind=getattr(args, 'kind', None),
+            only=getattr(args, 'only', 'all'), config_path=args.config)
+    if args.command == 'services' and action == 'manage':
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print('services manage requires an interactive terminal', file=sys.stderr)
+            return 2
+        from .tui import run_tui
+        return run_tui(t, args.config, initial_view='manage')
+    if args.command != 'services' or action not in ('status', 'logs', 'start', 'stop', 'restart', 'enable', 'disable'):
+        name = f'{args.command} {action}'.strip()
+        return not_implemented(t, name)
+    config = load_config(args.config)
+    systemd = SystemdServices(config)
+    if action == 'status':
+        return display_status(systemd, args.service or SERVICE_NAMES, t)
+    if action == 'logs':
+        records = systemd.logs(args.service, args.lines)
+        if not records:
+            print(t('logs_empty'))
+        else:
+            for record in records:
+                print(record)
+        return 0
+    if action == 'restart':
+        names = SERVICE_NAMES if args.all else (args.service or DEFAULT_RESTART)
+    else:
+        names = args.service
+    if action == 'restart':
+        return perform_restart(systemd, names, t, yes=args.yes,
+                               allow_critical=args.allow_critical)
+    return perform_service_action(systemd, action, names, t, yes=args.yes,
+                                  allow_critical=args.allow_critical)
+
+
+def menu_language(t: Translator) -> Translator:
+    print(t('language_prompt'))
+    print('  1) Português (Portugal)')
+    print('  2) English')
+    try:
+        response = input('> ').strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return t
+    selected = {'1': 'pt', '2': 'en', 'pt': 'pt', 'en': 'en'}.get(response.lower())
+    if not selected:
+        print(t('invalid_choice'))
+        return t
+    result = Translator(selected)
+    print(result('language_changed'))
+    return result
+
+
+def menu_manage(t: Translator, config_path: Path) -> None:
+    """Numbered fallback for terminals without curses; no surprise default targets."""
+    print(t('tui_manage_title'))
+    for idx, name in enumerate(SERVICE_NAMES, 1):
+        print(f'  {idx}) {name}')
+    print(t('text_manage_prompt'))
+    try:
+        raw = input(t('prompt')).strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    choices = [piece.strip() for piece in raw.split(',')]
+    if not choices or any(piece not in {str(i) for i in range(1, 6)} for piece in choices):
+        print(t('invalid_choice'))
+        return
+    names = [SERVICE_NAMES[int(piece)-1] for piece in dict.fromkeys(choices)]
+    print('  1) ' + t('action_start'))
+    print('  2) ' + t('action_stop'))
+    print('  3) ' + t('action_restart'))
+    print('  4) ' + t('action_enable'))
+    print('  5) ' + t('action_disable'))
+    try:
+        choice = input(t('prompt')).strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    action = {'1': 'start', '2': 'stop', '3': 'restart',
+              '4': 'enable', '5': 'disable'}.get(choice)
+    if not action:
+        print(t('invalid_choice'))
+        return
+    perform_service_action(SystemdServices(load_config(config_path)), action,
+                           order_services(action, names), t)
+
+
+def interactive_menu(t: Translator, config_path: Path = CONFIG_PATH) -> int:
+    lookup = {number: (group, action, key) for number, group, action, key in MENU_ACTIONS}
+    while True:
+        print(f'\n=== netbox-ops {__version__} ===')
+        for number, _, _, key in MENU_ACTIONS:
+            print(f'{int(number):2d}) {t(key)}')
+        print(t('menu_language'))
+        print(t('menu_exit'))
+        try:
+            choice = input(t('prompt')).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if choice == '0':
+            return 0
+        if choice == 'l':
+            t = menu_language(t)
+            continue
+        if choice not in lookup:
+            print(t('invalid_choice'))
+            continue
+        group, action, _ = lookup[choice]
+        try:
+            cfg = load_config(config_path)
+            if (group, action) == ('services', 'manage'):
+                menu_manage(t, config_path)
+            elif (group, action) == ('backup', 'manage'):
+                print('  1) Backup DB     2) Backup media     3) Backup full')
+                print('  4) List backups (CLI restore/delete requires explicit file and confirmation)')
+                option = input(t('prompt')).strip()
+                if option in ('1', '2', '3'):
+                    kind = {'1': 'db', '2': 'media', '3': 'full'}[option]
+                    if input(f'Create {kind} backup? [yes/NO] ').lower() == 'yes':
+                        perform_backup_action('backup', kind, cfg, t)
+                elif option == '4':
+                    perform_backup_action('backup', 'list', cfg, t)
+            else:
+                not_implemented(t, f'{group} {action}'.strip())
+        except (ServiceError, ConfigError, OSError) as exc:
+            print(t('service_error', error=exc), file=sys.stderr)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    t = Translator(args.lang)
+    if args.command is None:
+        if not sys.stdin.isatty():
+            parser.print_help()
+            return 0
+        if not args.no_tui and sys.stdout.isatty() and os.environ.get('TERM', '') not in ('', 'dumb'):
+            try:
+                from .tui import run_tui
+                return run_tui(t, args.config)
+            except (ImportError, OSError) as exc:
+                print(f'TUI indisponível ({exc}); a utilizar menu de texto.', file=sys.stderr)
+            except Exception as exc:
+                # An unsupported terminal can fail during curses initialisation.
+                import curses
+                if not isinstance(exc, curses.error):
+                    raise
+                print(f'TUI indisponível ({exc}); a utilizar menu de texto.', file=sys.stderr)
+        return interactive_menu(t, args.config)
+    try:
+        return dispatch(args, t)
+    except (ServiceError, ConfigError, OSError) as exc:
+        print(t('service_error', error=exc), file=sys.stderr)
+        return 1
