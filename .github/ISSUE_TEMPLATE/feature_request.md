@@ -1,35 +1,17 @@
 ---
 name: Feature request
-about: Propose a new CLI, TUI, maintenance, or administration capability
+about: Suggest an improvement
 title: "feat: "
 ---
 
-## Problem / motivation
+## Problem or idea
 
-What user problem should this feature solve?
+What would you like to improve, and why?
 
-## Proposed solution
+## Proposed behavior
 
-Describe the expected behavior. Include the command, menu, or workflow affected.
+How should it work?
 
-## Scope
+## Additional context (optional)
 
-What is included and explicitly excluded?
-
-## Acceptance criteria
-
-- [ ]
-- [ ]
-
-## Compatibility and localization
-
-Consider RHEL/Debian, Python 3.12, CLI/TUI consistency, and PT-PT/EN messages when relevant.
-
-## Safety / security considerations
-
-Identify required permissions, confirmation prompts, backups, rollback, and failure behavior.
-
-## Alternatives / dependencies
-
-List alternatives considered and related Issues or PRs.
-
+Alternatives, examples, or safety considerations.
