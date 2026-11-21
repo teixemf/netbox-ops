@@ -145,6 +145,10 @@ elif [[ "$mode" == verify ]]; then
       ubuntu@127.0.0.1:/home/ubuntu/
     ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh provision'
     if (( attempt == 1 )); then
+      if [[ "${NETBOX_VM_E2E:-0}" == 1 ]]; then
+        ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
+        ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-e2e.sh'
+      fi
       ssh_guest 'sudo touch /var/tmp/ci-isolation-marker'
     else
       ssh_guest 'sudo test ! -e /var/tmp/ci-isolation-marker'
