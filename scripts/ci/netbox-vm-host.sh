@@ -107,17 +107,15 @@ if [[ "$mode" == build ]]; then
   qemu-img create -f qcow2 -F qcow2 -b "$PWD/$image" overlay-build.qcow2
   qemu-img resize overlay-build.qcow2 12G
   boot_vm overlay-build.qcow2 build
-  tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.github \
-    --exclude=venv --exclude=__pycache__ -czf source.tar.gz .
+  # Only NetBox goes into the baseline. The current netbox-ops checkout is
+  # installed afresh for every verification boot.
   scp -i ./key-build -P 2222 -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./known-build \
-    source.tar.gz ubuntu@127.0.0.1:/home/ubuntu/source.tar.gz
-  ssh_guest 'sudo install -d -o root -g root -m 0755 /opt/netbox-ops &&
-    sudo tar -xzf /home/ubuntu/source.tar.gz -C /opt/netbox-ops &&
-    sudo chown -R root:root /opt/netbox-ops &&
-    sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh prepare'
-  # Require a successful credential cleanup before creating a portable image.
-  ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh sanitize'
+    "$GITHUB_WORKSPACE/scripts/ci/netbox-vm-guest.sh" \
+    ubuntu@127.0.0.1:/home/ubuntu/netbox-vm-guest.sh
+  ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh prepare'
+  # Refuse to publish when sanitization fails.
+  ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh sanitize'
   qmp_powerdown
   stop_vm
   qemu-img convert -c -O qcow2 overlay-build.qcow2 netbox-ubuntu24.qcow2
@@ -127,17 +125,25 @@ if [[ "$mode" == build ]]; then
     echo '## NetBox baseline build'
     echo "Image size: $(stat -c %s netbox-ubuntu24.qcow2) bytes"
     echo "Build duration: $((SECONDS-started)) seconds"
-    echo 'Contains no NetBox secrets or build-time SSH keys.'
+    echo 'Contains migrated NetBox schema, but no runtime secrets, SSH keys or netbox-ops checkout.'
   } >> "$GITHUB_STEP_SUMMARY"
   echo "PASS: reusable NetBox baseline built in $((SECONDS-started)) s"
 elif [[ "$mode" == verify ]]; then
   sha256sum -c SHA256SUMS.txt
   base_hash=$(sha256sum netbox-ubuntu24.qcow2 | cut -d' ' -f1)
+
+  # Ship the current PR checkout to each disposable VM, not the baseline.
+  tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.github \
+    --exclude=venv --exclude=__pycache__ -czf source.tar.gz .
   for attempt in 1 2; do
     started=$SECONDS
     qemu-img create -f qcow2 -F qcow2 -b "$PWD/netbox-ubuntu24.qcow2" "overlay-$attempt.qcow2"
     boot_vm "overlay-$attempt.qcow2" "$attempt"
-    ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh provision'
+    scp -i "./key-$attempt" -P 2222 -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=./known-$attempt" \
+      "$GITHUB_WORKSPACE/scripts/ci/netbox-vm-guest.sh" source.tar.gz \
+      ubuntu@127.0.0.1:/home/ubuntu/
+    ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh provision'
     if (( attempt == 1 )); then
       ssh_guest 'sudo touch /var/tmp/ci-isolation-marker'
     else
@@ -151,7 +157,7 @@ elif [[ "$mode" == verify ]]; then
   sha256sum -c SHA256SUMS.txt
   {
     echo '## Reusable NetBox baseline verified'
-    echo 'Two isolated boots succeeded: NetBox HTTP, PostgreSQL, Redis, nginx, RQ and netbox-ops.'
+    echo 'Two isolated boots succeeded using the current checkout, with a pre-migrated NetBox schema.'
     echo 'The base image hash remained unchanged; the second boot has no marker from the first.'
   } >> "$GITHUB_STEP_SUMMARY"
 else
