@@ -510,18 +510,18 @@ def _stage_database_options(cfg: Configuration) -> list[str]:
     ctype = settings.get('ctype')
     provider = settings.get('provider') or 'c'  # PostgreSQL before version 15.
     if (not isinstance(encoding, str) or not re.fullmatch(r'[A-Z0-9_]+', encoding)
-            or not all(isinstance(v, str) and v and '\\x00' not in v
+            or not all(isinstance(v, str) and v and chr(0) not in v
                        for v in (collate, ctype))):
         raise BackupError('Invalid active database encoding or locale')
     args = ['--encoding', encoding, '--lc-collate', collate, '--lc-ctype', ctype]
     if provider == 'i':
         icu_locale = settings.get('icu_locale')
-        if not isinstance(icu_locale, str) or not icu_locale or '\\x00' in icu_locale:
+        if not isinstance(icu_locale, str) or not icu_locale or chr(0) in icu_locale:
             raise BackupError('Invalid active database ICU locale')
         args.extend(['--locale-provider', 'icu', '--icu-locale', icu_locale])
     elif provider == 'b':
         builtin_locale = settings.get('icu_locale')
-        if not isinstance(builtin_locale, str) or not builtin_locale or '\\x00' in builtin_locale:
+        if not isinstance(builtin_locale, str) or not builtin_locale or chr(0) in builtin_locale:
             raise BackupError('Invalid active database builtin locale')
         args.extend(['--locale-provider', 'builtin', '--builtin-locale', builtin_locale])
     elif provider != 'c':
