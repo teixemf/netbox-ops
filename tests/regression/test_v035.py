@@ -98,7 +98,7 @@ class JournalUiTests(unittest.TestCase):
                                                   'enabled','200',0,1024**2,1)
                                      for n in ('netbox-rq','nginx','postgresql','redis')]]
 
-    def test_manage_has_logs_and_bottom_horizontal_operations(self):
+    def test_manage_has_operations_above_logs(self):
         screen=FakeScreen([curses.KEY_DOWN,-1,27,27],dimensions=(44,165))
         menu=CursesMenu(screen,Translator('pt'))
         systemd=MagicMock()
@@ -112,11 +112,11 @@ class JournalUiTests(unittest.TestCase):
         self.assertIn('Live log: OFF',shown)
         self.assertIn('Iniciar',shown)
         self.assertIn('Desactivar',shown)
-        # Footer operations appear lower than the log panel, not above it.
+        # Service actions are above the read-only log preview.
         log_lines=[y for y,x,v,_ in screen.writes if 'ÚLTIMOS LOGS' in v]
         action_lines=[y for y,x,v,_ in screen.writes if 'OPERAÇÕES SOBRE SERVIÇOS' in v]
         self.assertTrue(log_lines and action_lines)
-        self.assertGreater(min(action_lines), min(log_lines))
+        self.assertLess(min(action_lines), min(log_lines))
         systemd.logs.assert_called_once_with('netbox',50)
 
     def test_enter_from_manage_opens_expanded_log_view(self):
