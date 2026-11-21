@@ -1,168 +1,166 @@
-# netbox-ops — Histórico de alterações
+# netbox-ops — Changelog
 
-## NBH-xxx — Compatibilidade RHEL/Debian e melhorias TUI (netbox-ops v0.4.0)
+## NBH-xxx — RHEL/Debian compatibility and TUI improvements (netbox-ops v0.4.0)
 
-**Situação inicial:** a v0.3.6 assumia unidades Linux (`postgresql.service`, `redis.service`) e utilitários PostgreSQL compatíveis sobretudo com a instalação RHEL. Em Debian, os serviços PostgreSQL podem usar unidades por cluster, Redis usa habitualmente `redis-server.service` e a versão de Python predefinida não é necessariamente 3.12. Adicionalmente, a confirmação incorrecta regressava sem alerta, a tabela não distinguia backups `manual`, os detalhes ficavam fixos quando outros backups eram marcados, e o espaço livre inferior não era aproveitado.
+**Previous state:** v0.3.6 assumed Linux units (`postgresql.service`, `redis.service`) and PostgreSQL utilities mainly compatible with RHEL installations. On Debian, PostgreSQL services may use cluster-specific units, Redis typically uses `redis-server.service`, and the system's default Python version is not necessarily 3.12. In addition, incorrect confirmation returned without an alert, the backup table did not distinguish manually created backups, the detail pane did not follow focus when other backups were marked, and unused space in the lower screen remained empty.
 
-**Trabalho realizado:**
-- Criado detector de famílias RHEL e Debian pelo `/etc/os-release`, incluindo derivados relevantes.
-- Acrescentada descoberta automática, não destrutiva e com cache, das unidades systemd de PostgreSQL e Redis; recusa-se a escolha arbitrária perante vários clusters PostgreSQL ou vários serviços versionados RHEL.
-- Suportados caminhos de binários PGDG e configuração opcional da porta do cluster PostgreSQL (`backup.pg_bin_directory` e `backup.postgres_port`), respeitando as unidades definidas no JSON e sem alterar o servidor PostgreSQL.
-- Adaptados `install.sh` e `upgrade.sh` para ambas as famílias, mantendo Python **3.12** exclusivo no venv e o launcher seguro em `/usr/local/sbin` e `/usr/sbin`.
-- Adicionado comando de diagnóstico `netbox-ops platform` para consultar distribuição, unidades e ferramentas PostgreSQL sem alterações ao sistema.
-- Adicionado alerta explícito após erro na palavra de confirmação, com regresso ao menu anterior; nenhuma operação é iniciada.
-- Adicionada etiqueta `MANUAL` para backups normais e mantida `PRÉ-REST.` para backups de salvaguarda, sem alterar o formato de arquivo.
-- Corrigido o painel direito de detalhe para acompanhar o backup focado mesmo com outros marcados, mantendo a selecção múltipla separada da pré-visualização.
-- Colocadas as operações de backups no rodapé, integrado o gráfico de armazenamento Braille no painel esquerdo, e reformulado o ecrã de escolha de âmbito de restauro completo.
-- Preservados os controlos de segurança, restauros selectivos, integridade e política Redis existentes; actualizados PT/EN e testes de regressão.
+**Changes made:**
+- Added detection of RHEL and Debian distribution families, including relevant derivatives, using `/etc/os-release`.
+- Added automatic, non-destructive, cached discovery of PostgreSQL and Redis systemd units; ambiguous PostgreSQL clusters or versioned RHEL units are not selected arbitrarily.
+- Added support for PGDG binary paths and optional PostgreSQL cluster port configuration (`backup.pg_bin_directory` and `backup.postgres_port`), respecting explicit JSON service units without changing PostgreSQL.
+- Updated `install.sh` and `upgrade.sh` for both distribution families, keeping **Python 3.12** in the dedicated virtual environment and the launchers under `/usr/local/sbin` and `/usr/sbin`.
+- Added the read-only `netbox-ops platform` diagnostic command to report the distribution, service units, and PostgreSQL client utilities.
+- Added an explicit alert when the confirmation phrase is incorrect; the TUI returns to the previous menu without starting an operation.
+- Added a `MANUAL` label for regular backups and retained `PRÉ-REST.` for pre-restore safety backups, without changing the archive format.
+- Updated the right detail pane to follow the focused backup even while other backups are marked; multi-selection and preview remain independent.
+- Moved backup actions to the footer, integrated the Braille storage chart into the left pane, and redesigned the full-backup restore-scope selection screen.
+- Preserved existing security controls, selective restores, integrity checks, and Redis policy; updated Portuguese/English translations and regression tests.
 
-**Motivo:** permitir a administração segura de instalações NetBox equivalentes em RHEL e Debian, sem mudar serviços errados ou a versão de Python pretendida, e melhorar a legibilidade e a segurança da TUI.
+**Rationale:** provide safer administration of equivalent NetBox installations on RHEL and Debian without operating the wrong services or changing the intended Python version, while improving TUI readability and safeguards.
 
-**Validação:** 168 testes automatizados isolados para ambos os perfis e para as alterações de interface; não houve ensaios de recuperação PostgreSQL em VMs RHEL/Debian nem validação end-to-end com Python 3.12 neste ambiente. Validação funcional nas VMs ainda necessária antes de produção.
-
----
-
-## NBH-xxx — Correções da gestão de backups e do restauro (netbox-ops v0.3.6)
-
-**Situação inicial:** na v0.3.5 a lista de backups seguia a ordem alfabética dos nomes, misturando diferentes tipos sem respeitar a data de criação. O restauro parcial apenas da BD a partir de um pacote completo falhava porque o dump não era extraído antes da tentativa de importação. A gestão incluía uma acção autónoma «Apagar todos» e a opção «Validar» era pouco evidente, sobretudo para arquivos legados.
-
-**Trabalho realizado:**
-- Ordenação cronológica dos backups, do mais recente para o mais antigo, independentemente do tipo ou da etiqueta pré-restauro. Nomes sem data válida usam a hora de modificação.
-- Remoção de «Apagar todos» do menu interactivo, CLI e gestor de backups; mantida a eliminação selectiva, inclusive em lote, com confirmação.
-- Destaque e reposicionamento de «Validar» na barra de operações; mantido o atalho V e adicionada validação apenas de integridade para arquivos `legacy`, sem permitir o seu restauro.
-- Corrigida a extração do dump PostgreSQL em restauros `full --only db`, e a navegação de restauro quando existe um único backup marcado sem linha focada.
-- Acrescentadas mensagens explicativas para acções de restauro temporariamente indisponíveis ou incompatíveis.
-- Actualizada a documentação e executados testes de regressão e novos testes isolados.
-
-**Motivo:** melhorar a legibilidade, reduzir o risco de eliminação acidental e corrigir falhas no fluxo de reposição de dados.
-
-**Validação:** testes automatizados com PostgreSQL/systemd simulados; validação real de restauro, rollback e coerência do Redis na VM RHEL ainda pendente.
+**Validation:** 168 isolated automated tests covering both platform profiles and UI changes. No real PostgreSQL recovery tests were performed on RHEL/Debian VMs, and end-to-end Python 3.12 validation was not performed in the original development environment. Functional VM validation remains necessary before production use.
 
 ---
 
-## NBH-xxx — Restauro identificado e TUI com Live Log (netbox-ops v0.3.5)
+## NBH-xxx — Backup management and restore fixes (netbox-ops v0.3.6)
 
-**Situação inicial:** a versão 0.3.4 não distinguia os backups de salvaguarda criados automaticamente antes de um restauro. Os cabeçalhos da tabela de backups estavam alinhados à esquerda. Na gestão de serviços, a área inferior era desperdiçada e as operações estavam acima do rodapé, sem pré-visualização contínua do journal nem opção de live log. O gráfico circular tinha legenda com cores inconsistentes face às fatias.
+**Previous state:** in v0.3.5, backup entries were sorted alphabetically by filename, mixing types without respecting creation dates. Database-only restore from a full backup failed because the dump was not extracted before import. Management included a standalone Delete All operation, and the Verify action was not prominent, especially for legacy archives.
 
-**Trabalho realizado:**
-- Identificados os backups de segurança feitos durante restauro com o segmento `pre-restore` no nome e `purpose: pre_restore` no manifesto e no sidecar JSON, mantendo `purpose: manual` para backups normais.
-- A listagem rápida identifica as salvaguardas apenas pelo nome, sem voltar a introduzir leitura pesada dos arquivos. O painel de detalhe e a tabela apresentam a proveniência; arquivos antigos não recebem etiquetas retroactivamente.
-- Centrados os cabeçalhos de tipo, data/hora, tamanho, etiqueta e nome no respectivo campo da tabela de backups.
-- Reorganizada a gestão de serviços: acções na barra inferior horizontal, painel de métricas no topo, journal no espaço inferior e Enter para expandir o painel de logs.
-- Implementada a opção `Live log: ON/OFF` e tecla L, através de subprocesso journalctl --follow com leitura não bloqueante e buffer limitado. As consultas estáticas decorrem em worker para não bloquear navegação.
-- Corrigidas as cores da legenda do donut para coincidirem com os segmentos: backups (teal), outros dados (azul) e espaço livre (cinzento).
-- Mantidas as restrições de acções de serviços e as confirmações de restauro/apagamento. Actualizados PT-PT/EN, testes isolados e documentação.
+**Changes made:**
+- Sorted backups chronologically, newest first, regardless of type or pre-restore label. Filenames without recognizable dates fall back to their modification timestamps.
+- Removed Delete All from the interactive menu, CLI, and backup manager; explicit selective deletion, including batches, remains available with confirmation.
+- Highlighted and repositioned Verify in the action bar; retained the V shortcut and added integrity-only verification for `legacy` archives, without enabling restore.
+- Fixed PostgreSQL dump extraction for `full --only db` restores and restore navigation when exactly one backup is selected but no row is focused.
+- Added explanatory messages for temporarily unavailable or incompatible restore actions.
+- Updated documentation and ran regression tests along with new isolated tests.
 
-**Motivo:** tornar inequívoca a origem dos backups de segurança, melhorar a leitura e utilização dos menus e permitir observar logs sem abandonar a gestão de serviços nem afectar a resposta do teclado.
+**Rationale:** improve clarity, reduce accidental deletion risk, and fix data restoration workflows.
 
-**Validação:** testes automatizados isolados, verificação sintáctica e integridade do ZIP; validação visual e operacional em VM RHEL/Python 3.12 e ensaios reais de restauro pendentes. Não foi realizada qualquer alteração na VM durante a preparação.
-
----
-
-## NBH-xxx — Gestão de backups com painel de detalhe permanente e operações horizontais (netbox-ops v0.3.4)
-
-**Situação inicial:** na v0.3.3 a gestão de backups apresentava operações em posições fixas distribuídas por duas linhas e o Enter na lista abria um ecrã separado de detalhe. O painel da direita não resumia a selecção múltipla, aumentando a navegação necessária e a possibilidade de ambiguidade sobre os ficheiros afectados.
-
-**Trabalho realizado:**
-- Reorganizada a barra de operações de backup para ficar horizontal por baixo da listagem e do painel de detalhe, ajustando-se automaticamente à largura do terminal.
-- Eliminado o ecrã de detalhe aberto por Enter; a pré-visualização está permanentemente disponível no painel direito para o ficheiro focado ou único ficheiro marcado.
-- Adicionado resumo de selecção múltipla com quantidade, tipos e tamanho agregado, indicando que não é possível restaurar vários backups simultaneamente.
-- Operações indisponíveis são apresentadas desactivadas, incluindo restauro de ficheiros legados/incompatíveis ou sem metadados prontos.
-- Mantidas marcação com Espaço, selecção total, atalhos, barra de progresso, confirmações e verificações de integridade existentes.
-- Corrigida a repetição de leitura da lista na acção F5, passando a ocorrer uma única actualização.
-- Actualizados os ficheiros JSON de tradução PT-PT/EN, o README e os testes automatizados.
-- Mantida a lógica de backup/restauro e o isolamento dos ambientes Python; nenhuma alteração efectuada na VM RHEL.
-
-**Motivo:** proporcionar uma vista operacional de backups consistente com a gestão de serviços, reduzir ecrãs redundantes e evitar confusões entre o ficheiro focado e os ficheiros marcados para operações em lote.
-
-**Validação:** 132 testes automatizados isolados com Python 3.13, incluindo navegação e operações TUI simuladas; validação visual e operações reais em RHEL/Python 3.12 ainda pendentes.
+**Validation:** automated tests with mocked PostgreSQL and systemd. Real restore, rollback, and Redis consistency checks on the RHEL VM remain pending.
 
 ---
 
-## NBH-xxx — Paleta NetBox Dark e conclusão integrada nas barras de progresso (netbox-ops v0.3.3)
+## NBH-xxx — Labeled pre-restore backups and TUI live logs (netbox-ops v0.3.5)
 
-**Situação inicial:** a v0.3.2 apresentava uma paleta de terminal pouco uniforme e um gráfico de armazenamento formado por pontos `●`, de contorno pouco circular. Após operações de serviços ou de backups, a TUI substituía o ecrã de progresso por outro ecrã com os resultados, duplicando informação.
+**Previous state:** v0.3.4 did not distinguish safety backups created automatically before a restore. Backup table headers were left-aligned. The lower part of service management was underused, actions sat above the footer, and there was no continuously visible journal preview or live-log option. The donut chart legend colors did not match its segments.
 
-**Trabalho realizado:**
-- Adoptada a paleta A (NetBox Dark): fundo escuro, painéis diferenciados, destaques teal e cores reservadas para sucesso, falha e avisos.
-- Implementada aproximação xterm-256 da paleta e fallback para terminais de oito cores; mantido suporte para `NO_COLOR`.
-- Substituído o gráfico circular pontilhado por um donut de caracteres Unicode Braille com segmentos para backups, outros dados e espaço livre, e percentagem de backups ao centro.
-- As operações de serviços mostram o resultado final no mesmo ecrã da barra e lista de tarefas, mantendo-o visível até Enter/Esc.
-- Backups, restauros, validações e eliminações mantêm também o ecrã de progresso no final, incluindo caminho/resultado ou erro; deixou de existir a página redundante de resultados.
-- Actualizadas traduções PT-PT/EN, testes isolados e documentação. Mantida a lógica de negócios existente, sem intervenções no NetBox nem nas configurações da VM.
+**Changes made:**
+- Identified pre-restore safety backups with `pre-restore` in their filenames and `purpose: pre_restore` in both the manifest and JSON sidecar, while regular backups use `purpose: manual`.
+- The quick listing recognizes safety backups by filename without reintroducing costly archive reads. The table and detail pane show their origin; older archives are not labeled retroactively.
+- Centered the type, timestamp, size, label, and name column headers within the backup table.
+- Reorganized service management with a horizontal bottom action bar, metrics at the top, the journal at the bottom, and Enter to expand the log panel.
+- Added `Live log: ON/OFF` and the L shortcut using a non-blocking `journalctl --follow` subprocess and a bounded buffer. Static log reads run in a worker to keep navigation responsive.
+- Corrected the donut legend to match the segments: backups (teal), other data (blue), and free space (gray).
+- Preserved restrictions on service operations and restore/deletion confirmations. Updated PT-PT/EN translations, isolated tests, and documentation.
 
-**Motivo:** melhorar a consistência visual, legibilidade e experiência em terminais SSH e evitar navegação redundante após operações demoradas.
+**Rationale:** clearly identify safety backups, improve menu readability and usability, and allow operators to monitor logs without leaving service management or sacrificing keyboard responsiveness.
 
-**Validação:** 118 testes automatizados isolados e teste de arranque em terminal emulado de 256 cores; validação do tema no cliente SSH e ensaios reais de backup/restauro na VM RHEL pendentes.
-
----
-
-## NBH-xxx — TUI operacional e versões fiáveis (netbox-ops v0.3.2)
-
-**Situação inicial:** a v0.3.1 apresentava `5.2.9` como se fosse a versão do NetBox, embora fosse a versão do Django. O detalhe de serviços não permitia consultar os logs, o menu de backups não suportava marcação múltipla e as barras de progresso não discriminavam suficientemente as tarefas.
-
-**Trabalho realizado:**
-- Corrigida a detecção da versão NetBox a partir de `release.yaml`, mantendo cache por execução e mostrando as versões também no dashboard.
-- Introduzida marcação de proveniência da versão nos novos manifestos de backup; os anteriores passam a ser tratados como versão desconhecida, com confirmação extra de restauro.
-- Adicionada consulta dos últimos logs ao ecrã completo de detalhe de serviços, com visualizador e escolha de quantidade, sem voltar a mostrar logs na pré-visualização operacional.
-- Adicionado gráfico circular textual do armazenamento de backups, distinguindo backups, restantes dados do filesystem e espaço livre.
-- Implementada selecção múltipla de backups, seleccionar todos, validar e apagar selecção, com barra de progresso; mantém-se o restauro individual e selectivo de `full`.
-- Introduzida lista de tarefas com estado durante a barra de progresso de serviços, backups, restauros, validação e eliminação.
-- Mantidos menu TUI PT/EN, CLI e política `db`/`media`/`full`.
-- Actualizados testes e documentação, sem alterações ao NetBox da VM.
-
-**Motivo:** corrigir informação de versão enganadora, melhorar a legibilidade operacional e reduzir risco de operações involuntárias em lote.
-
-**Validação:** testes automatizados isolados e verificações sintácticas; validação em VM RHEL e ensaios de restauro reais pendentes.
+**Validation:** isolated automated tests, syntax checks, and ZIP integrity checks. Visual and operational validation on an RHEL/Python 3.12 VM and real restore testing are pending. No changes were made to the VM during preparation.
 
 ---
 
+## NBH-xxx — Persistent backup detail pane and horizontal actions (netbox-ops v0.3.4)
 
-## NBH-xxx — Optimização da TUI e cache de metadados (netbox-ops v0.3.1)
+**Previous state:** in v0.3.3, backup actions occupied fixed positions across two rows, and pressing Enter on a list entry opened a separate detail screen. The right pane did not summarize multi-selection, leading to unnecessary navigation and uncertainty about which files were affected.
 
-**Situação inicial:** a v0.3.0 apresentava os logs dos serviços na gestão operacional, operações nem sempre adequadas ao estado actual e a gestão de backups reabria os manifestos de arquivos comprimidos em cada movimento do cursor, com atraso significativo na navegação.
+**Changes made:**
+- Reorganized backup actions into a horizontal bar below the list and detail pane, automatically adapting to terminal width.
+- Removed the Enter-triggered detail screen; a preview is always available in the right pane for the focused or single marked file.
+- Added a multi-selection summary showing count, types, and total size, clarifying that several backups cannot be restored simultaneously.
+- Disabled unavailable actions, including restores of legacy/incompatible files or files whose metadata is still loading.
+- Preserved Space toggling, select-all, shortcuts, progress indicators, confirmations, and integrity safeguards.
+- Fixed F5 so refreshing the backup list reads it only once.
+- Updated PT-PT/EN translation JSON, README, and automated tests.
+- Preserved backup/restore logic and isolated Python environments; no changes were made to the RHEL VM.
 
-**Trabalho realizado:**
-- Reorganizados os painéis do menu principal e da gestão de serviços, mantendo as operações próximas da lista.
-- Substituídos os logs no painel de detalhe por CPU, RAM, uptime, PID, arranque e versão do componente.
-- Introduzida consulta de versões uma vez por execução, de forma assíncrona e com cache; NetBox e NetBox RQ partilham a versão.
-- As acções incompatíveis com o estado do serviço ficam desactivadas; nos lotes mistos apenas os serviços elegíveis avançam para confirmação.
-- A listagem de backups tornou-se leve e independente de abertura de arquivos.
-- Implementado cache de metadados por ficheiro e invalidação por alteração do ficheiro ou sidecar.
-- Adicionados sidecars JSON aos novos backups de media e completos, com metadados de apresentação; a integridade continua a exigir verificação independente.
-- Mantidos os três tipos de backups (`db`, `media` e `full`) e o restauro selectivo de pacotes completos.
-- Adicionados testes automatizados de desempenho, versões, estado de serviços e metadados.
+**Rationale:** make backup management consistent with service management, reduce redundant screens, and avoid confusion between the focused file and files marked for batch operations.
 
-**Motivo:** melhorar a experiência de utilização via SSH, reduzir o trabalho de leitura sobre arquivos grandes e mostrar informação operacional relevante sem modificar o modelo de backup/restauro aprovado.
+**Validation:** 132 isolated automated tests using Python 3.13, including simulated TUI navigation and operations. Visual and live operational validation on RHEL/Python 3.12 remained pending.
 
-**Validação:** testes automatizados isolados concluídos; validação em RHEL e ensaio de restauro real pendentes.
+---
+
+## NBH-xxx — NetBox Dark theme and integrated progress results (netbox-ops v0.3.3)
+
+**Previous state:** v0.3.2 had an inconsistent terminal color palette and a storage chart made of `●` characters that did not form a convincing circle. After service or backup operations, the TUI replaced the progress screen with another results screen, duplicating information.
+
+**Changes made:**
+- Adopted Palette A (NetBox Dark): dark background, differentiated panels, teal highlights, and reserved colors for success, failure, and warnings.
+- Implemented xterm-256 palette approximations with an eight-color fallback and retained `NO_COLOR` support.
+- Replaced the dotted circle with a Unicode Braille donut chart showing backups, other data, and free space, with the backup percentage at the center.
+- Kept the final result of service operations visible on the same screen as the progress bar and task list until Enter/Esc.
+- Applied the same persistent progress screen to backup creation, restore, verification, and deletion, including final paths, results, or errors; removed the redundant results page.
+- Updated PT-PT/EN translations, isolated tests, and documentation while retaining existing business logic and making no changes to NetBox or VM configuration.
+
+**Rationale:** improve visual consistency, readability, and usability in SSH terminals, and avoid unnecessary navigation after long-running operations.
+
+**Validation:** 118 isolated automated tests and a startup test in an emulated 256-color terminal. SSH-client theme validation and real backup/restore tests on the RHEL VM remained pending.
+
+---
+
+## NBH-xxx — Operational TUI and reliable version information (netbox-ops v0.3.2)
+
+**Previous state:** v0.3.1 displayed `5.2.9` as the NetBox version, although it was the Django version. Service details did not offer log browsing, the backup menu lacked multi-selection, and progress bars did not identify tasks clearly enough.
+
+**Changes made:**
+- Fixed NetBox version detection by reading `release.yaml`, caching the value per session, and displaying versions on the dashboard.
+- Added version-source metadata to new backup manifests; older manifests are treated as having an unknown NetBox version and require additional confirmation when restoring.
+- Added recent logs to the expanded service detail screen, including a viewer and configurable line count, without bringing logs back into the operational preview.
+- Added a text-based backup storage chart showing backup files, other filesystem data, and free space.
+- Added multi-selection, select-all, verification, and deletion of selected backups with progress reporting; individual restores and selective `full` restores remain supported.
+- Added a task list showing per-task status during service, backup, restore, verification, and deletion progress.
+- Preserved the bilingual TUI, CLI, and `db`/`media`/`full` policy.
+- Updated tests and documentation without changing NetBox on the VM.
+
+**Rationale:** correct misleading version information, improve operational readability, and reduce the risk of unintended batch operations.
+
+**Validation:** isolated automated tests and syntax checks. RHEL VM validation and actual restore tests remained pending.
+
+---
+
+## NBH-xxx — TUI performance and metadata caching (netbox-ops v0.3.1)
+
+**Previous state:** v0.3.0 displayed service logs in operational service management, offered actions not always appropriate for the current state, and repeatedly opened compressed backup manifests whenever the cursor moved, causing noticeable navigation delays.
+
+**Changes made:**
+- Reorganized the main-menu and service-management panels, keeping operations close to the service list.
+- Replaced logs in the detail panel with CPU, RAM, uptime, PID, startup mode, and component version.
+- Added asynchronous version lookup with one query per session and caching; NetBox and NetBox RQ share the application version.
+- Disabled operations incompatible with the current service state; only eligible services in mixed batches proceed to confirmation.
+- Made backup listing lightweight, without opening archives.
+- Added per-file metadata caching and invalidation when a file or its sidecar changes.
+- Added JSON sidecars to new media and full backups for display metadata; integrity still requires independent verification.
+- Preserved all three backup types (`db`, `media`, `full`) and selective restore from full archives.
+- Added automated tests for performance, versions, service state, and metadata.
+
+**Rationale:** improve SSH usability, avoid repeated work on large archives, and show relevant operational information without changing the approved backup/restore model.
+
+**Validation:** isolated automated tests completed. RHEL VM validation and real restore rehearsal remained pending.
 
 ---
 
 # netbox-ops — v0.3.0
 
-NBH-xxx — Reorganização da TUI e gestão unificada de backups
+NBH-xxx — TUI reorganization and unified backup management
 
-**Situação inicial:**
-- A versão 0.2.0 apresentava os serviços e backups em opções separadas no menu principal.
-- A visualização principal não utilizava o espaço livre para métricas.
-- O backup de artefactos incluía por defeito configurações do NetBox e LDAP.
-- O restauro de pacotes completos não permitia escolher BD ou media de forma independente.
+**Previous state:**
+- v0.2.0 exposed services and backups as separate main-menu entries.
+- The main screen did not use available space for metrics.
+- Artifact backups included NetBox and LDAP configuration files by default.
+- Restoring a full backup did not allow the database and media to be selected independently.
 
-**Trabalho realizado:**
-- Implementado o painel de estado no menu principal com CPU/RAM por serviço e espaço ocupado/livre dos backups.
-- Reorganizado o ecrã de gestão de serviços com multi-selecção, detalhes e operações permanentes no rodapé.
-- Criado menu único de gestão de backups com listagem, metadados, criação, validação, restauro, eliminação individual e eliminação total.
-- Limitado o backup de artefactos a imagens e ficheiros carregados em `media`, excluindo ficheiros de configuração e outros artefactos.
-- Alterado o backup integrado para `BD + media`.
-- Implementado restauro selectivo de backup completo: apenas BD, apenas media ou ambos.
-- Adicionada barra de progresso por etapas nas operações de backup/restauro e confirmações destrutivas.
-- Acrescentada compatibilidade de leitura da configuração anterior sem importar artefactos fora do novo âmbito.
-- Mantidos os pacotes antigos com configurações como legados, sem suporte de restauro na nova versão.
-- Conservada a paragem/arranque coordenados dos serviços NetBox durante o restauro e a preservação de Redis/RQ; limpeza selectiva de cache pendente de validação do ambiente.
-- Actualizadas as traduções PT-PT e EN, documentação e testes automatizados.
+**Changes made:**
+- Added a main-menu status panel with per-service CPU/RAM and backup storage used/free figures.
+- Reorganized service management with multi-selection, detail panels, and persistent operations in the footer.
+- Added a unified backup management menu offering listing, metadata, creation, verification, restore, individual deletion, and delete-all.
+- Limited artifact backups to images and uploaded files under `media`, excluding configuration and other artifacts.
+- Changed combined backups to include **database + media**.
+- Implemented selective restore from full backups: database only, media only, or both.
+- Added stage-based progress bars for backup/restore operations and destructive-action confirmations.
+- Retained compatibility with older configuration files without importing artifacts outside the new scope.
+- Classified older archives containing configuration files as legacy, without allowing restore in the new release.
+- Preserved coordinated NetBox service shutdown/startup during restore and the existing Redis/RQ preservation policy; selective cache cleanup still requires environment validation.
+- Updated PT-PT and English translations, documentation, and automated tests.
 
-**Motivo:**
-- Melhorar a navegação e observabilidade operacional em terminal, reduzir risco de operações involuntárias e limitar o âmbito dos backups aos dados da aplicação definidos para a sprint.
+**Rationale:** improve terminal navigation and operational visibility, reduce accidental operations, and narrow backup scope to application data approved for the release.
 
-**Validação operacional na VM RHEL:** pendente, especialmente os restauros PostgreSQL e a coerência da cache Redis.
+**Operational validation on the RHEL VM:** pending, especially PostgreSQL restores and Redis cache consistency.
