@@ -197,6 +197,52 @@ class NewBackupTests(unittest.TestCase):
 
 
 class NewCliAndTuiTests(unittest.TestCase):
+    def test_tui_creates_combined_backup(self):
+        screen = FakeScreen([ord('c'), 27])
+        menu = CursesMenu(screen, Translator('en'))
+        captured = []
+        with patch('netbox_ops.tui.load_config'), \
+             patch('netbox_ops.backups.BackupManager') as manager, \
+             patch.object(menu, '_choose', return_value=2) as choose, \
+             patch.object(menu, '_confirm_token', return_value=True) as confirm, \
+             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn: captured.append(fn)):
+            manager.return_value.quick_list.return_value = []
+            menu._backups()
+            self.assertEqual(len(captured), 1)
+            captured[0](lambda *args: None)
+            manager.return_value.backup.assert_called_once_with(
+                'combined', progress=unittest.mock.ANY)
+            self.assertIn('Combined', choose.call_args.args[1][2][0])
+            confirm.assert_called_once()
+
+    def test_combined_restore_menu_selects_only_db(self):
+        entry = BackupEntry(Path('/tmp/backup.combined.tar.gz'), 'combined',
+                            '2026-11-20T10:00:00+00:00', 1024, '4.4.1')
+        menu = CursesMenu(FakeScreen([
+            curses.KEY_DOWN, 32, -1, ord('r'), curses.KEY_DOWN, 10,
+            *(ord(c) for c in 'RESTORE COMBINED DB'), 10, 27, 27, 27
+        ]), Translator('en'))
+        captured = []
+        class ImmediatePool:
+            def __init__(self, **kwargs): pass
+            def submit(self, fn, *args):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_result(fn(*args))
+                return future
+            def shutdown(self, **kwargs): pass
+        with patch('netbox_ops.tui.load_config'), \
+             patch('netbox_ops.backups.BackupManager') as manager, \
+             patch('netbox_ops.tui.concurrent.futures.ThreadPoolExecutor', ImmediatePool), \
+             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn: captured.append(fn)):
+            manager.return_value.quick_list.return_value = [entry]
+            manager.return_value.describe_one.return_value = entry
+            menu._backups()
+            self.assertEqual(len(captured), 1)
+            captured[0](lambda *args: None)
+            manager.return_value.restore.assert_called_once_with(
+                'combined', entry.path, only='db', progress=unittest.mock.ANY)
+
     def test_full_cli_restore_only_options(self):
         parser=build_parser()
         for only in ('db','media','all'):
