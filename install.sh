@@ -35,7 +35,7 @@ confirm_python_install() {
     local response=''
     if [[ ! -t 0 ]]; then
         echo 'Python installation requires an interactive terminal; no changes were made.' >&2
-        return 1
+        return 2
     fi
     read -r -p "Python ${PYTHON_PACKAGE_VERSION} is available. Install it now? [y/N] " response || return 1
     case "${response,,}" in
