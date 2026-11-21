@@ -78,12 +78,13 @@ class Platform040Tests(unittest.TestCase):
             discover_service_units('rhel', runner)
 
     def test_debian_json_override_and_cluster_port(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir='/root') as temp:
             path = Path(temp) / 'config.json'
             path.write_text(json.dumps({'services': {'netbox': 'netbox-custom.service'},
                                         'backup': {'postgres_port': 5433,
                                                    'directory': temp + '/backup',
                                                    'media_directory': temp + '/media'}}))
+            path.chmod(0o600)
             with patch('netbox_ops.config.default_units', return_value={
                 **DEFAULT_UNITS, 'redis': 'redis-server.service',
                 'postgresql': 'postgresql@16-main.service'}):
@@ -93,9 +94,10 @@ class Platform040Tests(unittest.TestCase):
             self.assertEqual(config.postgres_port, 5433)
 
     def test_debian_postgresql_meta_unit_is_rejected_when_cluster_exists(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir='/root') as temp:
             path = Path(temp)/'config.json'
             path.write_text(json.dumps({'services': {'postgresql':'postgresql.service'}}))
+            path.chmod(0o600)
             with patch('netbox_ops.config.default_units', return_value=DEFAULT_UNITS.copy()), \
                  patch('netbox_ops.config.detect_platform') as d, \
                  patch('netbox_ops.config.has_postgres_clusters', return_value=True):
@@ -112,11 +114,12 @@ class Platform040Tests(unittest.TestCase):
         self.assertEqual(profile['postgresql'], 'postgresql-16.service')
 
     def test_multiple_clusters_can_be_resolved_by_explicit_unit(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir='/root') as temp:
             path = Path(temp)/'config.json'
             path.write_text(json.dumps({'services': {
                 'postgresql': 'postgresql@16-main.service'},
                 'backup': {'postgres_port': 5432}}))
+            path.chmod(0o600)
             with patch('netbox_ops.config.default_units', side_effect=PlatformError('Multiple PostgreSQL clusters')), \
                  patch('netbox_ops.config.discover_service_units', return_value={
                      **DEFAULT_UNITS, 'redis': 'redis-server.service'}), \

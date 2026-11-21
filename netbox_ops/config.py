@@ -1,8 +1,11 @@
 """Root-managed local configuration. Media backups never include application secrets."""
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,7 +54,73 @@ def _absolute_safe_path(value: object, label: str) -> Path:
     return path
 
 
+def _secure_config_text(path: Path) -> str | None:
+    """Read a root-controlled regular file, without following any symlink."""
+    path = Path(path)
+    if path == Path('/') or '..' in path.parts:
+        raise ConfigError(f'{path}: configuration path must not be root or contain traversal')
+    # Keep supporting relative --config paths, but only from trusted directories.
+    if not path.is_absolute():
+        path = Path.cwd() / path
+
+    directory_fd = None
+    try:
+        directory_fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_info = os.fstat(directory_fd)
+        if root_info.st_uid != 0 or root_info.st_mode & 0o022:
+            raise ConfigError(f'{path}: unsafe configuration directory: /')
+        # Opening each directory relative to its parent's fd prevents a
+        # path-based check/open race and disallows symlinks in any component.
+        for component in path.parent.parts[1:]:
+            try:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                  dir_fd=directory_fd)
+            except FileNotFoundError:
+                return None  # Missing config retains the built-in defaults.
+            try:
+                info = os.fstat(next_fd)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise ConfigError(f'{path}: unsafe configuration directory: {component}')
+            except BaseException:
+                os.close(next_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0) | os.O_NONBLOCK
+        try:
+            file_fd = os.open(path.name, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        try:
+            info = os.fstat(file_fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ConfigError(f'{path}: configuration must be a regular file')
+            if info.st_uid != 0:
+                raise ConfigError(f'{path}: configuration must be owned by root')
+            if info.st_mode & 0o077:
+                raise ConfigError(f'{path}: configuration must not be accessible by group or others')
+            with os.fdopen(file_fd, 'r', encoding='utf-8') as stream:
+                file_fd = -1
+                return stream.read()
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+    except ConfigError:
+        raise
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ConfigError(f'{path}: symbolic links or non-directories are not allowed') from exc
+        raise ConfigError(f'{path}: cannot read configuration: {exc.strerror}') from exc
+    except UnicodeError as exc:
+        raise ConfigError(f'{path}: configuration must be valid UTF-8') from exc
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
 def load_config(path: Path = CONFIG_PATH) -> Configuration:
+    raw_config = _secure_config_text(path)
     # Explicit unit overrides always win. Discovery is cached per process to
     # avoid a systemctl probe on every menu refresh.
     try:
@@ -59,18 +128,18 @@ def load_config(path: Path = CONFIG_PATH) -> Configuration:
     except PlatformError as exc:
         # With an explicit configuration, defer discovery until we know which
         # units are actually omitted; fully pinned configurations remain usable.
-        if not path.exists():
+        if raw_config is None:
             raise ConfigError(str(exc)) from exc
         units = discover_service_units(detect_platform().family, skip_postgres=True)
         discovery_error = exc
     else:
         discovery_error = None
-    if not path.exists():
+    if raw_config is None:
         port = (postgres_cluster_port(units['postgresql'])
                 if detect_platform().family == 'debian' else None)
         return Configuration(units, postgres_port=port)
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = json.loads(raw_config)
         if not isinstance(data, dict) or set(data) - {'services', 'backup'}:
             raise ValueError('top-level keys: only services and backup are supported')
         overrides = data.get('services', {})

@@ -31,8 +31,9 @@ class BackupCliTests(unittest.TestCase):
         manager.return_value.restore.assert_not_called()
 
     def test_config_rejects_unknown_backup_fields(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(dir='/root') as folder:
             p = Path(folder) / 'cfg.json'
             p.write_text(json.dumps({'backup': {'unknown': True}}))
+            p.chmod(0o600)
             with self.assertRaises(ConfigError):
                 load_config(p)
