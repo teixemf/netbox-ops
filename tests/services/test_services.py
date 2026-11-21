@@ -23,72 +23,6 @@ GOOD_SYSTEMD_RESPONSE = '\n'.join([
     'UnitFileState=enabled']) + '\n'
 
 
-class I18nTests(unittest.TestCase):
-    def test_key_parity(self):
-        pt = json.loads((CATALOGUE_DIR / 'pt.json').read_text())
-        en = json.loads((CATALOGUE_DIR / 'en.json').read_text())
-        self.assertEqual(set(pt), set(en))
-        for key in pt:
-            self.assertTrue(pt[key])
-            self.assertTrue(en[key])
-
-    def test_translation(self):
-        self.assertIn('Gerir', Translator('pt')('menu_2'))
-        self.assertIn('Manage', Translator('en')('menu_2'))
-
-    def test_menu_language_switch_and_stub(self):
-        answers = iter(['l', '2', '3', '0'])
-        with patch('builtins.input', side_effect=lambda *_: next(answers)):
-            with redirect_stdout(io.StringIO()) as output:
-                rc = interactive_menu(Translator('pt'))
-        self.assertEqual(rc, 0)
-        self.assertIn('Language changed to English', output.getvalue())
-        self.assertIn('[NOT IMPLEMENTED] updates check', output.getvalue())
-
-
-class CliParserTests(unittest.TestCase):
-    def test_every_menu_action_has_cli_parser(self):
-        parser = build_parser()
-        self.assertEqual(len(MENU_ACTIONS), 7)
-        for _, group, action, _ in MENU_ACTIONS:
-            argv = [group] + ([action] if action else [])
-            if group == 'restore':
-                argv.extend(['--file', '/tmp/example.dump'])
-            args = parser.parse_args(argv)
-            self.assertEqual(args.command, group)
-            if action:
-                self.assertEqual(args.action, action)
-
-    def test_stubs_do_not_read_config_or_invoke_systemd(self):
-        parser = build_parser()
-        with patch('netbox_ops.cli.load_config', side_effect=AssertionError('must not load')):
-            with patch('netbox_ops.cli.SystemdServices', side_effect=AssertionError('must not run')):
-                for argv in (['updates', 'check'], ['upgrade', 'netbox', '--version', '5.0.0'],
-                             ['upgrade', 'plugins', '--plugin', 'example'],
-                             ['upgrade', 'stack', '--plugins', 'all'], ['self-upgrade']):
-                    with redirect_stdout(io.StringIO()):
-                        self.assertEqual(dispatch(parser.parse_args(argv), Translator('pt')), 3)
-
-    def test_restarts_default_to_netbox_and_rq(self):
-        parser = build_parser()
-        args = parser.parse_args(['services', 'restart', '--yes'])
-        mock_sys = MagicMock()
-        with patch('netbox_ops.cli.load_config', return_value=Configuration(DEFAULT_UNITS)):
-            with patch('netbox_ops.cli.SystemdServices', return_value=mock_sys):
-                with patch('netbox_ops.cli.perform_restart', return_value=0) as restart:
-                    dispatch(args, Translator('pt'))
-        self.assertEqual(tuple(restart.call_args.args[1]), ('netbox', 'netbox-rq'))
-
-    def test_restarts_all_only_when_explicit(self):
-        parser = build_parser()
-        args = parser.parse_args(['services', 'restart', '--all', '--yes', '--allow-critical'])
-        with patch('netbox_ops.cli.load_config', return_value=Configuration(DEFAULT_UNITS)):
-            with patch('netbox_ops.cli.SystemdServices'):
-                with patch('netbox_ops.cli.perform_restart', return_value=0) as restart:
-                    dispatch(args, Translator('pt'))
-        self.assertEqual(tuple(restart.call_args.args[1]), SERVICE_NAMES)
-
-
 class ServiceTests(unittest.TestCase):
     def test_status_reads_only_systemd(self):
         runner = MagicMock(return_value=subprocess.CompletedProcess([], 0, GOOD_SYSTEMD_RESPONSE, ''))
@@ -326,28 +260,3 @@ class LifecycleAndBatchTests(unittest.TestCase):
             with self.assertRaises(ServiceError):
                 perform_service_batch(manager, 'disable', ['netbox'])
         manager.disable.assert_not_called()
-
-
-class ConfigurationTests(unittest.TestCase):
-    def test_default_mapping(self):
-        with tempfile.TemporaryDirectory() as temp:
-            config = load_config(Path(temp) / 'missing.json')
-        self.assertEqual(config.units['postgresql'], 'postgresql.service')
-
-    def test_local_unit_overrides(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / 'config.json'
-            path.write_text(json.dumps({'services': {'postgresql': 'postgresql-16.service'}}))
-            config = load_config(path)
-        self.assertEqual(config.units['postgresql'], 'postgresql-16.service')
-
-    def test_invalid_config_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / 'config.json'
-            path.write_text(json.dumps({'services': {'postgresql': '--dangerous'}}))
-            with self.assertRaises(ConfigError):
-                load_config(path)
-
-
-if __name__ == '__main__':
-    unittest.main()

@@ -18,7 +18,7 @@ from netbox_ops.i18n import Translator
 from netbox_ops.backups import BackupManager
 from netbox_ops.tui import CursesMenu
 from netbox_ops.cli import build_parser, dispatch
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 def result(text: str = '', rc: int = 0) -> subprocess.CompletedProcess[str]:
@@ -163,7 +163,7 @@ class Platform040Tests(unittest.TestCase):
         self.assertIn('postgresql.service',output.getvalue())
 
     def test_install_script_requires_python312_on_both_families(self):
-        root=Path(__file__).resolve().parents[1]
+        root=Path(__file__).resolve().parents[2]
         installer=(root/'install.sh').read_text()
         upgrade=(root/'upgrade.sh').read_text()
         self.assertIn('FAMILY=debian',installer)
@@ -173,7 +173,7 @@ class Platform040Tests(unittest.TestCase):
         self.assertIn('3.12',upgrade)
 
     def test_source_compiles_with_python312_grammar(self):
-        root=Path(__file__).resolve().parents[1]
+        root=Path(__file__).resolve().parents[2]
         for source in (root/'netbox_ops').rglob('*.py'):
             with self.subTest(source=source.name):
                 ast.parse(source.read_text(), filename=str(source), feature_version=(3,12))

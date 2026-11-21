@@ -16,7 +16,7 @@ from netbox_ops.i18n import Translator
 from netbox_ops.journal import JournalPanel
 from netbox_ops.services import ServiceState
 from netbox_ops.tui import CursesMenu
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 class RestoreTagTests(unittest.TestCase):

@@ -19,7 +19,7 @@ from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.services import ServiceState, ServiceVersionCache
 from netbox_ops.tui import CursesMenu, action_enabled
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 class BackupPerformanceTests(unittest.TestCase):
