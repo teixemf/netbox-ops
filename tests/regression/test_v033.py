@@ -33,7 +33,7 @@ class V033Tests(unittest.TestCase):
             on_progress('running',0,1,'netbox','')
             on_progress('done',1,1,'netbox','active')
             return [('netbox','active')],None
-        with patch('netbox_ops.cli.perform_service_batch',side_effect=perform),\
+        with patch('netbox_ops.tui.perform_service_batch',side_effect=perform),\
              patch.object(m,'_show_lines') as show:
             m._execute_batch(MagicMock(),'restart',['netbox'])
         show.assert_not_called()
@@ -50,7 +50,7 @@ class V033Tests(unittest.TestCase):
             on_progress('running',0,1,'redis','')
             on_progress('error',0,1,'redis','denied')
             return [],'redis: denied'
-        with patch('netbox_ops.cli.perform_service_batch',side_effect=perform),\
+        with patch('netbox_ops.tui.perform_service_batch',side_effect=perform),\
              patch.object(m,'_show_lines') as show:
             m._execute_batch(MagicMock(),'restart',['redis'])
         show.assert_not_called()
