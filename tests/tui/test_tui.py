@@ -71,8 +71,8 @@ class RestartSafetyTests(unittest.TestCase):
         self.assertFalse(CursesMenu(FakeScreen([27]), Translator('pt'))._confirm(['netbox']))
 
     def test_cancelled_manage_action_never_executes_systemctl(self):
-        # Select first service; open action selector; cancel confirmation; Esc twice.
-        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27])
+        # Mark first service; attempt disabled action; clear marks and return.
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [ServiceState(n, f'{n}.service', 'loaded',
