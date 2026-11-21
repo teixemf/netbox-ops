@@ -59,14 +59,59 @@ jobs:
           cloud-localds seed.img user-data meta-data
 
           cleanup() {
+            local status=$?
+            if (( status != 0 )); then
+              echo "QEMU status at failure:"
+              if [[ -f vm.pid ]]; then
+                ps -o pid,stat,etime,cmd -p "$(cat vm.pid)" || true
+              fi
+              if [[ -f serial.log ]]; then
+                echo "Last guest console messages:"
+                tail -n 100 serial.log || true
+              fi
+            fi
             if [[ -f vm.pid ]]; then
               kill "$(cat vm.pid)" 2>/dev/null || true
             fi
-            if [[ "$?" != 0 && -f serial.log ]]; then
-              tail -n 80 serial.log || true
-            fi
           }
           trap cleanup EXIT
+          qmp() {
+            python3 - "$1" <<'PY'
+          import json
+          import socket
+          import sys
+          sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          sock.settimeout(5)
+          sock.connect("qmp.sock")
+          with sock.makefile("rwb") as stream:
+              greeting = json.loads(stream.readline())
+              if "QMP" not in greeting:
+                  raise RuntimeError("QMP greeting not received")
+              for name in ("qmp_capabilities", sys.argv[1]):
+                  stream.write((json.dumps({"execute": name}) + "\n").encode())
+                  stream.flush()
+                  while True:
+                      response = json.loads(stream.readline())
+                      if "return" in response or "error" in response:
+                          break
+                  if "error" in response:
+                      raise RuntimeError(response["error"])
+              print(json.dumps(response["return"]))
+          PY
+          }
+
+          wait_for_qemu_exit() {
+            local pid="$1" limit="$2" state
+            for (( i=0; i<limit; i++ )); do
+              state=$(ps -o stat= -p "$pid" 2>/dev/null || true)
+              if [[ -z "$state" || "$state" == Z* ]]; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+
 
           if [[ ! -c /dev/kvm ]]; then
             echo '::error::KVM is unavailable'
@@ -81,6 +126,7 @@ jobs:
             -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
             -device virtio-net-pci,netdev=net0 \
             -display none -serial file:serial.log -monitor none \
+            -qmp unix:qmp.sock,server=on,wait=off \
             -daemonize -pidfile vm.pid
 
           ssh_opts=(-i ./build_key -p 2222 -o BatchMode=yes -o ConnectTimeout=3 \
@@ -106,22 +152,20 @@ jobs:
           # authorized keys, SSH host keys and instance cache before publishing.
           ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 \
             'sudo cloud-init clean --logs --machine-id && sudo rm -rf /home/ubuntu/.ssh /root/.ssh && sudo rm -f /etc/ssh/ssh_host_* && sudo sync && sudo fstrim -v / && sudo test ! -e /etc/ssh/ssh_host_ed25519_key && sudo test ! -e /home/ubuntu/.ssh/authorized_keys'
-          ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo poweroff' || true
+          ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo systemctl poweroff --no-block' || true
 
           vm_pid=$(cat vm.pid)
-          stopped=false
-          for i in {1..90}; do
-            state=$(ps -o stat= -p "$vm_pid" 2>/dev/null || true)
-            if [[ -z "$state" || "$state" == Z* ]]; then
-              stopped=true
-              break
+          if ! wait_for_qemu_exit "$vm_pid" 30; then
+            echo "::warning::QEMU is still running after guest poweroff; requesting ACPI shutdown"
+            ps -o pid,stat,etime,cmd -p "$vm_pid" || true
+            qmp query-status || true
+            qmp system_powerdown || true
+            if ! wait_for_qemu_exit "$vm_pid" 90; then
+              echo '::error::Guest shutdown could not be confirmed; refusing to publish the image'
+              exit 1
             fi
-            sleep 1
-          done
-          if [[ "$stopped" != true ]]; then
-            echo '::error::Guest did not shut down cleanly'
-            exit 1
           fi
+          echo 'PASS: QEMU exited after guest shutdown'
 
           started=$SECONDS
           qemu-img convert -c -O qcow2 overlay.qcow2 ubuntu-22.04-poc-baseline.qcow2
@@ -192,14 +236,58 @@ jobs:
           sudo chmod a+rw /dev/kvm
 
           cleanup() {
+            local status=$?
+            if (( status != 0 )); then
+              echo 'Verification guest diagnostics:'
+              if [[ -f vm.pid ]]; then
+                ps -o pid,stat,etime,cmd -p "$(cat vm.pid)" || true
+              fi
+              if [[ -f serial.log ]]; then
+                tail -n 100 serial.log || true
+              fi
+            fi
             if [[ -f vm.pid ]]; then
               kill "$(cat vm.pid)" 2>/dev/null || true
             fi
-            if [[ -f serial.log ]]; then
-              tail -n 80 serial.log || true
-            fi
           }
-          trap cleanup ERR EXIT
+          trap cleanup EXIT
+
+          qmp() {
+            python3 - "$1" <<'PY'
+          import json
+          import socket
+          import sys
+          sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          sock.settimeout(5)
+          sock.connect("qmp.sock")
+          with sock.makefile("rwb") as stream:
+              greeting = json.loads(stream.readline())
+              if "QMP" not in greeting:
+                  raise RuntimeError("QMP greeting not received")
+              for name in ("qmp_capabilities", sys.argv[1]):
+                  stream.write((json.dumps({"execute": name}) + "\n").encode())
+                  stream.flush()
+                  while True:
+                      response = json.loads(stream.readline())
+                      if "return" in response or "error" in response:
+                          break
+                  if "error" in response:
+                      raise RuntimeError(response["error"])
+              print(json.dumps(response["return"]))
+          PY
+          }
+
+          wait_for_qemu_exit() {
+            local pid="$1" limit="$2" state
+            for (( i=0; i<limit; i++ )); do
+              state=$(ps -o stat= -p "$pid" 2>/dev/null || true)
+              if [[ -z "$state" || "$state" == Z* ]]; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
 
           for attempt in 1 2; do
             started=$SECONDS
@@ -229,6 +317,7 @@ jobs:
               -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
               -device virtio-net-pci,netdev=net0 \
               -display none -serial file:serial.log -monitor none \
+            -qmp unix:qmp.sock,server=on,wait=off \
               -daemonize -pidfile vm.pid
 
             ssh_opts=(-i "./key-$attempt" -p 2222 -o BatchMode=yes \
@@ -256,22 +345,20 @@ jobs:
             fi
             echo "PASS: Boot $attempt validated in $((SECONDS-started)) s"
 
-            ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo poweroff' || true
+            ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo systemctl poweroff --no-block' || true
             vm_pid=$(cat vm.pid)
-            stopped=false
-            for i in {1..90}; do
-              state=$(ps -o stat= -p "$vm_pid" 2>/dev/null || true)
-              if [[ -z "$state" || "$state" == Z* ]]; then
-                stopped=true
-                break
+            if ! wait_for_qemu_exit "$vm_pid" 30; then
+              echo "::warning::Boot $attempt did not stop promptly; requesting ACPI shutdown"
+              ps -o pid,stat,etime,cmd -p "$vm_pid" || true
+              qmp query-status || true
+              qmp system_powerdown || true
+              if ! wait_for_qemu_exit "$vm_pid" 90; then
+                echo "::error::Boot $attempt did not shut down cleanly"
+                exit 1
               fi
-              sleep 1
-            done
-            if [[ "$stopped" != true ]]; then
-              echo "::error::Boot $attempt failed to shut down"
-              exit 1
             fi
-            rm -f "overlay-$attempt.qcow2" vm.pid
+            echo "PASS: QEMU exited after boot $attempt"
+            rm -f "overlay-$attempt.qcow2" vm.pid qmp.sock
           done
 
           test "$base_hash" = "$(sha256sum ubuntu-22.04-poc-baseline.qcow2 | cut -d' ' -f1)"
