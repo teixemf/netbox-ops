@@ -50,23 +50,40 @@ select_python() {
         return 0
     fi
 
-    # Prefer versioned interpreters from standard system locations. This also
-    # handles installations whose /usr/local/bin is absent from root's PATH.
-    for candidate in /usr/bin/python3.[0-9]* /usr/local/bin/python3.[0-9]*; do
-        if [[ -x "${candidate}" ]] && python_is_supported "${candidate}"; then
+    # Look in PATH (including versioned executables) and conventional
+    # installation directories. Never traverse /opt recursively.
+    local -a candidates=()
+    local directory path
+    local -A seen=()
+    local -a directories=()
+    local path_entry
+    IFS=':' read -r -a directories <<< "${PATH:-}"
+    directories+=(/usr/bin /usr/local/bin /opt/python/bin /opt/python3/bin /opt/local/bin)
+    for directory in "${directories[@]}"; do
+        [[ -n "${directory}" && -d "${directory}" ]] || continue
+        for path in "${directory}"/python3 "${directory}"/python3.[0-9]*; do
+            [[ -x "${path}" && ! -d "${path}" ]] || continue
+            [[ -z "${seen["$path"]:-}" ]] || continue
+            seen["$path"]=1
+            candidates+=("$path")
+        done
+    done
+    # Conventional version-specific installation prefixes under /opt.
+    for path in /opt/python3.[0-9]*/bin/python3.[0-9]* /opt/python/3.[0-9]*/bin/python3.[0-9]*; do
+        [[ -x "${path}" && ! -d "${path}" ]] || continue
+        [[ -z "${seen["$path"]:-}" ]] || continue
+        seen["$path"]=1
+        candidates+=("$path")
+    done
+    for candidate in "${candidates[@]}"; do
+        if python_is_supported "${candidate}"; then
             PYTHON="${candidate}"
             return 0
         fi
     done
-    # Other installations can provide a compatible default Python in PATH.
-    candidate="$(command -v python3 2>/dev/null || true)"
-    if [[ -n "${candidate}" ]] && python_is_supported "${candidate}"; then
-        PYTHON="${candidate}"
-        return 0
-    fi
     echo 'Error: Python 3.12 or newer was not found.' >&2
-    python_installation_guidance
     return 1
+
 }
 
 PRECHECK_VENV=''

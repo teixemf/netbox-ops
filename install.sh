@@ -3,6 +3,20 @@
 set -euo pipefail
 
 
+python_not_found_message() {
+    cat >&2 <<'MESSAGE'
+No compatible Python version (3.12 or newer) was found.
+A compatible version was also unavailable in the currently configured software repositories.
+To continue installing netbox-ops, install Python 3.12 or newer manually from a safe and trusted source.
+
+If a compatible Python is already installed but was not detected automatically,
+specify its interpreter path using PYTHON_BIN.
+
+Example:
+  sudo PYTHON_BIN=/path/to/python3.12 /opt/netbox-ops/install.sh
+MESSAGE
+}
+
 # The installer only offers packages already available in configured OS repositories.
 # It never adds repositories or changes the system's default Python interpreter.
 apt_has_candidate() {
@@ -118,7 +132,7 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
     . "${ROOT}/upgrade.sh"
     if ! (select_python >/dev/null 2>&1); then
         if ! install_python_if_requested "${FAMILY}"; then
-            echo 'No compatible Python installed. See README.md for supported alternatives.' >&2
+            python_not_found_message
             exit 1
         fi
     fi

@@ -58,6 +58,35 @@ class PythonPreflightTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Python 3.12 or newer', result.stderr)
 
+
+    def test_detects_versioned_python_in_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            interpreter = directory / 'python3.15'
+            self.fake_python(interpreter, '3.15')
+            result = self.bash(
+                'select_python\nprintf "%s\\n" "$PYTHON"',
+                PATH=str(directory) + os.pathsep + os.environ['PATH'],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(interpreter))
+
+    def test_explicit_python_bin_overrides_path_detection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            interpreter = directory / 'custom-python'
+            self.fake_python(interpreter, '3.12')
+            (directory / 'python3.15').write_text(
+                '#!/bin/sh\necho 3.15\n', encoding='utf-8')
+            (directory / 'python3.15').chmod(0o755)
+            result = self.bash(
+                'select_python\nprintf "%s\\n" "$PYTHON"',
+                PYTHON_BIN=str(interpreter),
+                PATH=str(directory) + os.pathsep + os.environ['PATH'],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(interpreter))
+
     def test_missing_venv_does_not_touch_existing_environment(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
