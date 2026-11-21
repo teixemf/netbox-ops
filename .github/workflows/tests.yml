@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  unittest:
+    name: Python ${{ matrix.python }} / unittest
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13', '3.14', '3.15']
+    # Tests validate root-owned backup paths (0700); keep UID 0 inside a disposable container.
+    container:
+      image: python:${{ matrix.python }}-bookworm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check Bash syntax
+        run: bash -n install.sh upgrade.sh
+      - name: Run unit and regression tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Ruff
+        run: python -m pip install ruff==0.17.6
+      - name: Check Python code
+        run: ruff check .
