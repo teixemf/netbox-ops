@@ -116,7 +116,9 @@ if [[ "$mode" == build ]]; then
     sudo tar -xzf /home/ubuntu/source.tar.gz -C /opt/netbox-ops &&
     sudo chown -R root:root /opt/netbox-ops &&
     sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh prepare'
-  ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh sanitize' || true
+  # Require a successful credential cleanup before creating a portable image.
+  ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh sanitize'
+  qmp_powerdown
   stop_vm
   qemu-img convert -c -O qcow2 overlay-build.qcow2 netbox-ubuntu24.qcow2
   qemu-img check netbox-ubuntu24.qcow2
