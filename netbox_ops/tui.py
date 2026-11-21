@@ -937,7 +937,7 @@ class CursesMenu:
             self.stdscr.timeout(200)
 
     def _manage(self) -> None:
-        """Manage selected units, with an always-visible log panel and bottom actions."""
+        """Manage marked services with operations above the journal preview."""
         try:
             config = load_config(self.config_path)
             systemd = SystemdServices(config)
@@ -954,7 +954,7 @@ class CursesMenu:
         refreshed = time.monotonic()
         for state in states:
             self.versions.request(state.name)
-        operations = ACTIONS + ('live',)
+        operations = ACTIONS
         movement = (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k'),
                     curses.KEY_LEFT, curses.KEY_RIGHT)
         panel = JournalPanel(systemd)
@@ -969,137 +969,154 @@ class CursesMenu:
                     except ServiceError:
                         pass
                     refreshed = time.monotonic()
-                preview = states[index] if focus is not None else None
+                if states:
+                    index = min(index, len(states) - 1)
+                preview = states[index] if states and focus is not None else None
                 if preview and panel.name != preview.name:
                     panel.select(preview.name)
                 frame = self._frame(self.t('tui_manage_title'), self.t('nbo_manage_hint_035'))
                 if frame:
                     h, w = frame
-                    split = max(34, min(44, w//3))
-                    label_list = ([self.t('action_'+a) for a in ACTIONS] +
-                                  [f'{self.t("nbo_live_action")}: {"ON" if panel.live else "OFF"}'])
-                    positions = self._backup_action_positions(label_list, w - 10)
+                    split = max(31, min(44, w // 3))
+                    labels = [self.t('action_' + action) for action in operations]
+                    positions = self._backup_action_positions(labels, w - 10)
                     action_rows = max(row for _, row in positions) + 1
-                    actions_y = h - 5 - action_rows
-                    actions_top = actions_y - 1
-                    top_bottom = min(15, actions_top - 2)
-                    self._paint(3, 2, split - 3, max(1, top_bottom - 2))
-                    self._paint(3, split + 1, w - split - 4, max(1, top_bottom - 2))
+                    # Reserve the service list and operation bar first. On
+                    # short terminals the journal preview disappears entirely.
+                    actions_y = max(10, min(13 if h >= 27 else 11,
+                                             h - 3 - action_rows))
+                    self._paint(3, 2, split - 3, max(1, actions_y - 4))
+                    self._paint(3, split + 1, w - split - 4, max(1, actions_y - 4))
                     self._put(3, 3, self.t('nbo_services_label'), 'section')
-                    self._put(3, split+2, self.t('nbo_detail_label'), 'section')
+                    self._put(3, split + 2, self.t('nbo_detail_label'), 'section')
                     for i, state in enumerate(states):
-                        y=5+i
-                        selected = focus=='services' and index==i
+                        y = 5 + i
+                        if y >= actions_y:
+                            break
+                        selected = focus == 'services' and index == i
                         if selected:
-                            self._put(y, 3, ' '*(split-5), 'selected')
+                            self._put(y, 3, ' ' * (split - 5), 'selected')
                         self._put(y, 4, f"[{'x' if state.name in chosen else ' '}] {state.name:<13}",
                                   'selected' if selected else '')
                         self._put(y, 24, '●' if state.healthy else '○',
                                   'selected' if selected else state_style(state))
-                    self._put(11, 4, f'{self.t("nbo_chosen")}: {len(chosen)}','muted')
+                    if actions_y > 12:
+                        self._put(11, 4, f'{self.t("nbo_chosen")}: {len(chosen)}', 'muted')
                     if preview is not None:
-                        x=split+2
+                        x = split + 2
                         version = self.versions.get(preview.name)
-                        self._put(5,x,preview.unit,'title')
-                        self._put(6,x,f'{self.t("tui_col_state")}: {preview.active} ({preview.substate})', state_style(preview))
-                        self._put(7,x,f'{self.t("tui_col_startup")}: {preview.enabled}    PID: {preview.main_pid}','muted')
-                        self._put(9,x,f'CPU: {self.cpu_display.get(preview.name,"—")}    '
-                                      f'RAM: {self._human_size(preview.memory_current)}','section')
-                        self._put(10,x,f'{self.t("nbo_service_version")}: {version or "—"}','muted')
-                        self._put(11,x,f'{self.t("nbo_service_uptime")}: {self._uptime(preview.uptime_seconds)}','muted')
-                    else:
-                        self._put(5, split+2, self.t('nbo_select_to_preview'), 'muted')
-                    log_title_y=top_bottom+1
-                    self._put(log_title_y,3,(self.t('nbo_live_logs_title') if panel.live else self.t('nbo_logs_title')),'section')
-                    if preview:
-                        self._put(log_title_y,min(42,w-30),f'{preview.unit}    '
-                                  f'{self.t("nbo_live_action")}: {"ON" if panel.live else "OFF"}',
-                                  'success' if panel.live else 'muted')
-                    logs_y=log_title_y+1
-                    logs_height=max(0,actions_top-logs_y-2)
-                    self._paint(logs_y,2,w-4,logs_height+1)
-                    if preview is None:
-                        self._put(logs_y+1,4,self.t('nbo_select_to_preview'),'muted')
-                    else:
-                        self._render_journal(panel,logs_y+1,max(0,logs_height-1),4,w-10)
-                    self._put(actions_top,3,'─'*(w-7),'muted')
-                    self._put(actions_y,3,self.t('nbo_actions_label'),'section')
-                    targets=[s for s in states if s.name in chosen]
+                        props = (
+                            (5, preview.unit, 'title'),
+                            (6, f'{self.t("tui_col_state")}: {preview.active} ({preview.substate})',
+                             state_style(preview)),
+                            (7, f'{self.t("tui_col_startup")}: {preview.enabled}    PID: {preview.main_pid}', 'muted'),
+                            (9, f'CPU: {self.cpu_display.get(preview.name, "—")}    '
+                             f'RAM: {self._human_size(preview.memory_current)}', 'section'),
+                            (10, f'{self.t("nbo_service_version")}: {version or "—"}', 'muted'),
+                            (11, f'{self.t("nbo_service_uptime")}: {self._uptime(preview.uptime_seconds)}', 'muted'),
+                        )
+                        for y, value, style in props:
+                            if y < actions_y - 1:
+                                self._put(y, x, value, style)
+                    elif 5 < actions_y - 1:
+                        self._put(5, split + 2, self.t('nbo_select_to_preview'), 'muted')
+
+                    self._put(actions_y - 1, 3, '─' * (w - 7), 'muted')
+                    self._put(actions_y, 3, self.t('nbo_actions_label'), 'section')
+                    targets = [s for s in states if s.name in chosen]
                     for i, action in enumerate(operations):
-                        ax,row=positions[i]
-                        enabled=(preview is not None if action=='live'
-                                 else any(action_enabled(action,state) for state in targets))
-                        style=('selected' if focus=='actions' and operation==i and enabled
-                               else ('title' if enabled else 'muted'))
-                        self._put(actions_y+1+row,4+ax,
-                                  f'[{label_list[i]}]' if enabled else f' {label_list[i]} ',style)
+                        ax, row = positions[i]
+                        enabled = any(action_enabled(action, state) for state in targets)
+                        style = ('selected' if focus == 'actions' and operation == i and enabled
+                                 else ('title' if enabled else 'muted'))
+                        self._put(actions_y + 1 + row, 4 + ax,
+                                  f'[{labels[i]}]' if enabled else f' {labels[i]} ', style)
+
+                    log_title_y = actions_y + action_rows + 3
+                    if log_title_y <= h - 4:
+                        self._put(log_title_y, 3,
+                                  self.t('nbo_live_logs_title') if panel.live
+                                  else self.t('nbo_logs_title'), 'section')
+                        if preview is not None:
+                            self._put(log_title_y, min(42, max(28, w // 2)),
+                                      f'[{self.t("nbo_live_action")}: '
+                                      f'{"ON" if panel.live else "OFF"}]',
+                                      'success' if panel.live else 'muted')
+                        logs_y = log_title_y + 1
+                        logs_height = max(0, h - 3 - logs_y)
+                        if logs_height:
+                            self._paint(logs_y, 2, w - 4, logs_height)
+                            if preview is None:
+                                self._put(logs_y + 1, 4, self.t('nbo_select_to_preview'), 'muted')
+                            else:
+                                self._render_journal(panel, logs_y + 1,
+                                                     max(0, logs_height - 1), 4, w - 10)
                     self.stdscr.refresh()
-                key=self.stdscr.getch()
+                key = self.stdscr.getch()
                 if key == 3:
                     return
                 if key == 27:
-                    if focus is not None:
-                        focus=None
+                    if chosen:
+                        chosen.clear()
+                    elif focus is not None:
+                        focus = None
                     else:
                         return
-                elif key in (curses.KEY_F5,ord('r'),ord('R')):
-                    refreshed=0
+                elif key in (curses.KEY_F5, ord('r'), ord('R')):
+                    refreshed = 0
                     if panel.name:
                         panel.refresh()
-                elif key in (ord('l'),ord('L')) and preview:
+                elif key in (ord('l'), ord('L')) and preview:
                     panel.set_live(not panel.live)
-                elif key==9:
-                    focus = 'actions' if focus=='services' else 'services'
+                elif key == 9:
+                    focus = 'services' if focus == 'actions' else 'actions'
                 elif key in movement:
                     if focus is None:
-                        focus='services'
-                        index=len(states)-1 if key in (curses.KEY_UP,ord('k')) else 0
-                    elif focus=='services':
-                        index=move_selection(index,key,len(states))
+                        focus = 'services'
+                        index = len(states) - 1 if key in (curses.KEY_UP, ord('k')) else 0
+                    elif focus == 'services':
+                        index = move_selection(index, key, len(states))
                     else:
-                        operation=(operation+(1 if key in (curses.KEY_RIGHT,curses.KEY_DOWN,ord('j')) else -1))%len(operations)
-                elif focus=='services' and key==32:
-                    name=states[index].name
+                        operation = (operation + (1 if key in (
+                            curses.KEY_RIGHT, curses.KEY_DOWN, ord('j')) else -1)) % len(operations)
+                elif focus == 'services' and key == 32 and states:
+                    name = states[index].name
                     if name in chosen:
                         chosen.remove(name)
                     else:
                         chosen.add(name)
-                elif key in (10,13,curses.KEY_ENTER):
-                    if focus=='services':
-                        self._expanded_logs(systemd,states[index],panel)
+                elif key in (10, 13, curses.KEY_ENTER):
+                    if focus == 'services' and states:
+                        self._expanded_logs(systemd, states[index], panel)
                         self.stdscr.timeout(150)
-                        refreshed=0
-                    elif focus=='actions':
-                        action=operations[operation]
-                        if action=='live':
-                            if preview:
-                                panel.set_live(not panel.live)
-                            continue
-                        targets=[s for s in states if s.name in chosen]
-                        eligible=[s.name for s in targets if action_enabled(action,s)]
-                        skipped=[s.name for s in targets if s.name not in eligible]
+                        refreshed = 0
+                    elif focus == 'actions':
+                        action = operations[operation]
+                        targets = [s for s in states if s.name in chosen]
+                        eligible = [s.name for s in targets if action_enabled(action, s)]
+                        skipped = [s.name for s in targets if s.name not in eligible]
                         if not eligible:
                             self._show_lines(self.t('tui_error_title'),
-                                             [(self.t('nbo_no_applicable'),'muted')])
+                                             [(self.t('nbo_no_applicable'), 'muted')])
                             self.stdscr.timeout(150)
                             continue
-                        if os.geteuid()!=0:
+                        if os.geteuid() != 0:
                             self._show_lines(self.t('tui_error_title'),
-                                             [(self.t('root_required_actions'),'failure')])
+                                             [(self.t('root_required_actions'), 'failure')])
                             self.stdscr.timeout(150)
                             continue
-                        confirmed=(self._confirm_action(action,eligible,skipped=skipped)
-                                   if skipped else self._confirm_action(action,eligible))
+                        confirmed = (self._confirm_action(action, eligible, skipped=skipped)
+                                     if skipped else self._confirm_action(action, eligible))
                         if confirmed:
-                            self._execute_batch(systemd,action,eligible)
+                            self._execute_batch(systemd, action, eligible)
                             try:
-                                states=systemd.status(SERVICE_NAMES)
+                                states = systemd.status(SERVICE_NAMES)
                                 self._update_cpu(states)
                             except ServiceError:
                                 pass
                             if panel.name:
                                 panel.refresh()
-                            refreshed=time.monotonic()
+                            refreshed = time.monotonic()
                         self.stdscr.timeout(150)
         finally:
             panel.close()
