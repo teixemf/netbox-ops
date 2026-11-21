@@ -1,0 +1,74 @@
+name: Publish reusable NetBox VM baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Prepare and publish a versioned QCOW2
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    steps:
+      - name: Check out integration scripts from dev
+        uses: actions/checkout@v5
+        with:
+          ref: dev
+          persist-credentials: false
+
+      - name: Require an unused baseline version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/ci/netbox-vm-baseline.env
+          if [[ ! "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]; then
+            echo '::error::Invalid baseline version tag'
+            exit 1
+          fi
+          if gh release view "$BASELINE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Baseline $BASELINE_TAG already exists. Bump the version before refreshing."
+            exit 1
+          fi
+
+      - name: Check shell syntax
+        run: bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh
+
+      - name: Install virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+
+      - name: Build credential-free migrated NetBox baseline
+        run: bash scripts/ci/netbox-vm-host.sh build
+
+      - name: Publish immutable-version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/ci/netbox-vm-baseline.env
+          cd "$RUNNER_TEMP/netbox-ci"
+          sha256sum -c SHA256SUMS.txt
+          bytes=$(stat -c %s netbox-ubuntu24.qcow2)
+          if (( bytes >= 2147483648 )); then
+            echo '::error::Baseline exceeds GitHub Releases 2 GiB asset limit'
+            exit 1
+          fi
+          source_commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          gh release create "$BASELINE_TAG" \
+            netbox-ubuntu24.qcow2 SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$source_commit" \
+            --prerelease --latest=false \
+            --title "NetBox CI baseline $BASELINE_TAG" \
+            --notes "Test-only Ubuntu 24.04 with NetBox 4.7.3, PostgreSQL 16, Redis, nginx and a migrated schema. The DB role has NOLOGIN and no password. No netbox-ops checkout, runtime secrets or SSH keys."
+          echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Source commit: $source_commit" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA256: $(cut -d' ' -f1 SHA256SUMS.txt)" >> "$GITHUB_STEP_SUMMARY"
