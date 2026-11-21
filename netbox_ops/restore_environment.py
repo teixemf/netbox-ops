@@ -186,6 +186,7 @@ def netbox_runtime(cfg: Configuration, runner=subprocess.run) -> NetBoxRuntime:
 # It changes in-memory Django settings only; it cannot apply migrations.
 DJANGO_STAGE_CHECK = """
 import io
+import os
 import sys
 
 stage = os.environ.pop('NBO_STAGE_DATABASE')
