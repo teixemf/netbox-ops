@@ -1458,7 +1458,10 @@ class CursesMenu:
                             self._put(5, 4, self.t('nbo_backup_select_preview'), 'muted')
                     else:
                         kind_label = self.t('nbo_kind_' + preview.kind)
+                        # Keep the filename visible even when terminal height
+                        # forces less important metadata to be hidden.
                         props = [
+                            self.t('nbo_name') + ': ' + preview.path.name,
                             self.t('nbo_type') + ': ' + kind_label,
                             self.t('nbo_date') + ': ' + self._pretty_date(detail.created) + ' UTC',
                             self.t('nbo_size') + ': ' + self._human_size(preview.size),
@@ -1471,7 +1474,6 @@ class CursesMenu:
                             self.t('nbo_kind_contents_' + preview.kind),
                             self.t('nbo_purpose') + ': ' + (self.t('nbo_pre_restore')
                              if detail.purpose == 'pre_restore' else self.t('nbo_manual')),
-                            self.t('nbo_name') + ': ' + preview.path.name,
                         ]
                         y = 5
                         for j, value in enumerate(props):
@@ -1480,8 +1482,8 @@ class CursesMenu:
                                 if y >= action_y - 1:
                                     break
                                 self._put(y, 4, line,
-                                          'failure' if j == 4 and ready and detail.legacy
-                                          else ('title' if j == 7 else 'muted'))
+                                          'failure' if j == 5 and ready and detail.legacy
+                                          else ('title' if j == 0 else 'muted'))
                                 y += 1
 
                     if pane:
