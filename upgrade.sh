@@ -74,15 +74,14 @@ preflight_python() {
         echo 'Error: Could not create a temporary directory for the Python check.' >&2
         return 1
     }
-    if ! "${PYTHON}" -m venv "${PRECHECK_VENV}" >/dev/null 2>&1; then
+    if ! "${PYTHON}" -m venv --without-pip "${PRECHECK_VENV}" >/dev/null 2>&1; then
         echo 'Error: Python could not create a temporary virtual environment.' >&2
-        echo 'Check venv/ensurepip support, directory permissions, and free disk space.' >&2
+        echo 'Check venv support, directory permissions, and free disk space.' >&2
         echo 'Install the matching venv package from your OS repositories, if needed and available.' >&2
         return 1
     fi
-    if ! "${PRECHECK_VENV}/bin/python" -m pip --version >/dev/null 2>&1; then
-        echo 'Error: pip is unavailable in the new virtual environment.' >&2
-        echo 'Install the matching venv/pip support from your OS repositories, if available.' >&2
+    if ! "${PRECHECK_VENV}/bin/python" -c 'import sys' >/dev/null 2>&1; then
+        echo 'Error: Python is not usable in the new virtual environment.' >&2
         return 1
     fi
     cleanup_preflight
@@ -105,20 +104,13 @@ if [[ "${VENV}" == '/' || -L "${VENV}" ]]; then
     exit 1
 fi
 
-for f in requirements.txt local_requirements.txt; do
-    [[ -f "${ROOT}/${f}" ]] || { printf 'Error: Missing file: %s\n' "${f}" >&2; exit 1; }
-done
-
 select_python || exit 1
 trap cleanup_preflight EXIT
 preflight_python || exit 1
 
 printf 'Rebuilding %s using %s\n' "${VENV}" "${PYTHON}"
 rm -rf -- "${VENV}"
-"${PYTHON}" -m venv "${VENV}"
-"${VENV}/bin/python" -m pip --disable-pip-version-check --no-input install \
-    -r "${ROOT}/requirements.txt" \
-    -r "${ROOT}/local_requirements.txt"
+"${PYTHON}" -m venv --without-pip "${VENV}"
 "${VENV}/bin/python" -m compileall -q "${ROOT}/netbox_ops" "${ROOT}/netbox_ops.py"
 "${VENV}/bin/python" "${ROOT}/netbox_ops.py" --version
 printf 'Virtual environment rebuilt successfully.\n'
