@@ -28,6 +28,13 @@ Run the relevant tests before merging. The standard test command is:
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
+Run Ruff to check basic Python code quality:
+
+```bash
+python -m pip install ruff==0.17.6
+ruff check .
+```
+
 Run the complete suite in an isolated development environment when elevated permissions are required. CI should pass before merging.
 
 Changes involving backups, restores, upgrades, installation, permissions, or services deserve extra care. Test destructive operations only in disposable, non-production environments. Clearly document any important testing limitation; do not claim untested restore or upgrade paths are production-ready.

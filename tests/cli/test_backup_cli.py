@@ -1,15 +1,11 @@
 """Offline tests: no systemd or PostgreSQL changes."""
 import io
 import json
-import os
-import stat
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from netbox_ops.backups import BackupError, BackupManager, _validate_archive
 from netbox_ops.config import DEFAULT_UNITS, Configuration, ConfigError, load_config
 from netbox_ops.cli import build_parser, perform_backup_action
 from netbox_ops.i18n import Translator
