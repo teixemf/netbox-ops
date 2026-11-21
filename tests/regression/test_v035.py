@@ -109,7 +109,7 @@ class JournalUiTests(unittest.TestCase):
             menu._manage()
         shown=' '.join(v for _,_,v,_ in screen.writes)
         self.assertIn('ÚLTIMOS LOGS',shown)
-        self.assertIn('Live log: OFF',shown)
+        self.assertIn('L: Live log OFF',shown)
         self.assertIn('Iniciar',shown)
         self.assertIn('Desactivar',shown)
         # Service actions are above the read-only log preview.
@@ -125,7 +125,7 @@ class JournalUiTests(unittest.TestCase):
         systemd = MagicMock()
         systemd.status.return_value = self.states
         systemd.logs.return_value = ['journal entry']
-        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \\
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
              patch('netbox_ops.tui.load_config'):
             menu._manage()
         focused = screen.frames[1]
@@ -140,7 +140,7 @@ class JournalUiTests(unittest.TestCase):
         systemd = MagicMock()
         systemd.status.return_value = self.states
         systemd.logs.return_value = ['journal entry']
-        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \\
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
              patch('netbox_ops.tui.load_config'):
             menu._manage()
         focused = screen.frames[3]
