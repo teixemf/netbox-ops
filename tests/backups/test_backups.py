@@ -206,7 +206,7 @@ class FileBackupTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, 'Invalid backup kind'):
                 self.ops.backup('full')
         with patch('netbox_ops.backups._require_root'):
-            with self.assertRaisesRegex(BackupError, 'FileNotFoundError|No such file'):
+            with self.assertRaises(FileNotFoundError):
                 self.ops.restore('full', self.base / 'missing.full.tar.gz', only='db')
 
     def test_db_restore_preserves_previous_database(self):
