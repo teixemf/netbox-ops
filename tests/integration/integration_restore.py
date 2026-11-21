@@ -332,7 +332,7 @@ class RealRestoreTests(unittest.TestCase):
 
     def test_missing_files_and_wrong_archive_types_do_not_change_live_data(self):
         media_backup = self.manager.backup('media').path
-        full_backup = self.manager.backup('combined').path
+        combined_backup = self.manager.backup('combined').path
         self._change_to_b()
         expected_media = self._media_state()
         for kind, source in (
@@ -346,7 +346,7 @@ class RealRestoreTests(unittest.TestCase):
                 self._assert_failed_restore_unchanged(expected_media)
         for kind, source in (
             ('db', media_backup),
-            ('media', full_backup),
+            ('media', combined_backup),
             ('combined', media_backup),
         ):
             with self.subTest(wrong_kind=kind):
