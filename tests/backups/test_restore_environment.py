@@ -131,7 +131,7 @@ class ServiceEnvironmentTests(unittest.TestCase):
             netbox_runtime(self.cfg, runner=self._runner(self._unit(User='root')))
         with self.assertRaisesRegex(RuntimeErrorSafe, 'locate'):
             netbox_runtime(
-                self.cfg, runner=self._runner(self._unit(WorkingDirectory=str(self.root)))
+                self.cfg, runner=self._runner(self._unit(WorkingDirectory=str(self.root / 'absent')))
             )
 
     def test_service_errors_never_reveal_credentials(self):
