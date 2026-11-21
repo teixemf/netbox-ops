@@ -1,4 +1,4 @@
-"""v0.3.4: backup inventory has a single detail pane and bottom actions."""
+"""Backup inventory layout, marked-target safety, and automatic refresh."""
 from __future__ import annotations
 
 import curses
@@ -48,11 +48,10 @@ class BackupView034Tests(unittest.TestCase):
 
     def test_action_bar_single_row_wide_terminal_and_wraps_narrow(self):
         labels = [Translator('pt')('nbo_act_' + action) for action in
-                  ('create', 'restore', 'verify', 'delete',
-                   'select_all', 'refresh')]
+                  ('create', 'verify', 'restore', 'delete', 'select_all')]
         wide = CursesMenu._backup_action_positions(labels, 145)
         self.assertEqual({y for x, y in wide}, {0})
-        self.assertEqual(len(wide), 6)
+        self.assertEqual(len(wide), 5)
         narrow = CursesMenu._backup_action_positions(labels, 45)
         self.assertGreater(max(y for _, y in narrow), 0)
         for i, (x, y) in enumerate(narrow):
@@ -170,7 +169,7 @@ class BackupView034Tests(unittest.TestCase):
         contents = ' '.join(text for _, _, text, _ in screen.frames[-2])
         self.assertIn('OPERAÇÕES SOBRE BACKUPS', contents)
         self.assertIn('[Criar]', contents)
-        self.assertIn('[Actualizar]', contents)
+        self.assertNotIn('[Actualizar]', contents)
         self.assertTrue(all(0 <= y < 21 for y, x, text, attr in screen.frames[-2]))
 
     def test_metadata_cached_per_file_and_cursor_changes_do_not_verify(self):
@@ -185,8 +184,8 @@ class BackupView034Tests(unittest.TestCase):
     def test_legacy_restore_is_disabled(self):
         path = self.directory / 'netbox-files-20261120T120000Z.files.tar.gz'
         path.write_bytes(b'legacy')
-        menu, screen = self.menu([curses.KEY_UP, 9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10,
-                                  27, 27, 27])
+        menu, screen = self.menu([curses.KEY_UP, 32, 9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10,
+                                  27, 27, 27, 27])
         with patch.object(menu, '_choose') as choose, \
              patch.object(menu, '_confirm_token') as confirm, \
              patch.object(menu, '_show_lines') as show:
