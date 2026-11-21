@@ -26,6 +26,7 @@ from .config import Configuration
 from .netbox_version import read_netbox_version
 from .platform import pg_binary, PlatformError
 from .services import ExclusiveLock, SystemdServices, write_audit
+from .restore_environment import RuntimeErrorSafe, check_staged_migrations
 
 FORMAT = 1
 KINDS = ('db', 'media', 'full')
@@ -518,13 +519,11 @@ def _terminate(name: str, cfg: Configuration | None = None) -> None:
          f"WHERE datname = '{name}' AND pid <> pg_backend_pid()", cfg=cfg)
 
 
-def _django_check() -> None:
-    python = Path('/opt/netbox/venv/bin/python')
-    manage = Path('/opt/netbox/netbox/manage.py')
-    if not python.is_file() or not manage.is_file():
-        raise BackupError('NetBox venv/manage.py unavailable: cannot verify migration compatibility')
-    _run(['runuser', '-u', 'netbox', '--', str(python), str(manage), 'migrate', '--check'],
-         timeout=300)
+def _django_check(cfg: Configuration, staged_name: str) -> None:
+    try:
+        check_staged_migrations(cfg, staged_name)
+    except RuntimeErrorSafe as exc:
+        raise BackupError(str(exc)) from exc
 
 
 def _services_stop_for_restore(systemd: SystemdServices) -> list[str]:
@@ -991,6 +990,10 @@ class BackupManager:
                 swapped = False
                 try:
                     systemd = SystemdServices(self.cfg)
+                    if staged_name:
+                        # The active database is still untouched and services are running.
+                        _progress(progress, 'verify_application', 3, total)
+                        _django_check(self.cfg, staged_name)
                     _progress(progress, 'stop_services', 3, total)
                     old_services = _services_stop_for_restore(systemd)
                     _progress(progress, 'stop_services', 4, total)
@@ -1017,8 +1020,6 @@ class BackupManager:
                     if restore_media:
                         old_files_undo = _replace_artifacts(self.cfg, stage)
                     _progress(progress, 'replace', 6, total)
-                    _progress(progress, 'verify_application', 6, total)
-                    _django_check()
                     _progress(progress, 'restart_services', 7, total)
                     _services_restart_after(systemd, old_services)
                     if old_files_undo:
