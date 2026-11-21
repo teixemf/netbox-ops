@@ -83,7 +83,7 @@ class NewBackupTests(unittest.TestCase):
         with tarfile.open(archive,'r:gz') as f:
             self.assertEqual({x['id'] for x in json.load(f.extractfile('manifest.json'))['artifacts']}, {'media'})
 
-    def test_full_restore_only_media_never_stages_database(self):
+    def test_combined_restore_only_media_never_stages_database(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
             full = self.manager.backup('combined').path
@@ -100,7 +100,7 @@ class NewBackupTests(unittest.TestCase):
         rename.assert_not_called()
         self.assertEqual(len(self.manager.list_backups('db')),0)
 
-    def test_full_restore_only_db_never_replaces_media(self):
+    def test_combined_restore_only_db_never_replaces_media(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
             full = self.manager.backup('combined').path
@@ -119,7 +119,7 @@ class NewBackupTests(unittest.TestCase):
         replace.assert_not_called()
         self.assertEqual(len(self.manager.list_backups('media')),0)
 
-    def test_full_restore_all_combines_db_and_media(self):
+    def test_combined_restore_all_combines_db_and_media(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
             full = self.manager.backup('combined').path
