@@ -213,6 +213,16 @@ class BackupView034Tests(unittest.TestCase):
         refreshed = ' '.join(text for _, _, text, _ in screen.frames[3])
         self.assertIn('Marked targets: none', refreshed)
 
+    def test_escape_clears_marks_then_leaves_action_focus_then_exits(self):
+        menu, _ = self.menu([curses.KEY_DOWN, 32, 9, 27, 27, 27], lang='en')
+        self.run_menu(menu)
+
+    def test_management_hints_fit_eighty_column_terminals(self):
+        for lang in ('en', 'pt'):
+            for key in ('nbo_backup_hint_034', 'nbo_manage_hint_035'):
+                with self.subTest(lang=lang, key=key):
+                    self.assertLessEqual(len(Translator(lang)(key)), 77)
+
     def test_backup_actions_require_explicit_marks(self):
         menu, _ = self.menu([27], lang='en')
         for action in ('restore', 'delete', 'verify'):
