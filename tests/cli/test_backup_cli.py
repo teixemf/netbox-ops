@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from netbox_ops.config import DEFAULT_UNITS, Configuration, ConfigError, load_config
-from netbox_ops.cli import build_parser, perform_backup_action
+from netbox_ops.cli import build_parser, confirm_restore, perform_backup_action
 from netbox_ops.i18n import Translator
 
 
@@ -30,6 +30,16 @@ class BackupCliTests(unittest.TestCase):
         with patch('sys.stderr', new_callable=io.StringIO):
             with self.assertRaises(SystemExit):
                 parser.parse_args(['backup', 'full'])
+
+    def test_restore_confirmation_tokens_for_both_archive_names(self):
+        for kind in ('combined', 'full'):
+            token = f'RESTORE {kind.upper()} DB'
+            with self.subTest(kind=kind), \
+                 patch('builtins.input', return_value=token) as answer, \
+                 patch('sys.stdout', new_callable=io.StringIO):
+                self.assertTrue(confirm_restore(
+                    kind, Path('/tmp/archive.tar.gz'), Translator('en'), only='db'))
+            self.assertIn(token, answer.call_args.args[0])
 
     def test_no_restore_when_only_yes(self):
         import contextlib
