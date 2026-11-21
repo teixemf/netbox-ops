@@ -83,27 +83,27 @@ class NewBackupTests(unittest.TestCase):
         with tarfile.open(archive,'r:gz') as f:
             self.assertEqual({x['id'] for x in json.load(f.extractfile('manifest.json'))['artifacts']}, {'media'})
 
-    def test_full_restore_only_media_never_stages_database(self):
+    def test_combined_restore_only_media_never_stages_database(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
-            full = self.manager.backup('full').path
+            full = self.manager.backup('combined').path
         self.file.write_bytes(b'changed')
         with patches[0], patches[1], patches[2], patches[3], \
              patch('netbox_ops.backups._preflight_db') as preflight, \
              patch('netbox_ops.backups._stage_db') as stage, \
              patch('netbox_ops.backups._rename_db') as rename:
-            restored = self.manager.restore('full', full, only='media')
-        self.assertEqual(restored.kind,'full')
+            restored = self.manager.restore('combined', full, only='media')
+        self.assertEqual(restored.kind,'combined')
         self.assertEqual(self.file.read_bytes(), b'original upload')
         preflight.assert_not_called()
         stage.assert_not_called()
         rename.assert_not_called()
         self.assertEqual(len(self.manager.list_backups('db')),0)
 
-    def test_full_restore_only_db_never_replaces_media(self):
+    def test_combined_restore_only_db_never_replaces_media(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
-            full = self.manager.backup('full').path
+            full = self.manager.backup('combined').path
         self.file.write_bytes(b'changed')
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch('netbox_ops.backups._check_dump'), \
@@ -112,17 +112,17 @@ class NewBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._rename_db') as rename, \
              patch('netbox_ops.backups._terminate'), \
              patch('netbox_ops.backups._replace_artifacts') as replace:
-            restored = self.manager.restore('full',full, only='db')
+            restored = self.manager.restore('combined',full, only='db')
         self.assertIn('Previous database',restored.detail)
         self.assertEqual(self.file.read_bytes(), b'changed')
         self.assertEqual(rename.call_count,2)
         replace.assert_not_called()
         self.assertEqual(len(self.manager.list_backups('media')),0)
 
-    def test_full_restore_all_combines_db_and_media(self):
+    def test_combined_restore_all_combines_db_and_media(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
-            full = self.manager.backup('full').path
+            full = self.manager.backup('combined').path
         self.file.write_bytes(b'changed')
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch('netbox_ops.backups._check_dump'), \
@@ -130,7 +130,7 @@ class NewBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._stage_db',side_effect=lambda cfg, p: 'nbo_stage_fake' if p.is_file() else (_ for _ in ()).throw(AssertionError('Staged dump missing'))), \
              patch('netbox_ops.backups._rename_db') as rename, \
              patch('netbox_ops.backups._terminate'):
-            self.manager.restore('full',full,only='all')
+            self.manager.restore('combined',full,only='all')
         self.assertEqual(self.file.read_bytes(),b'original upload')
         self.assertEqual(rename.call_count,2)
         self.assertEqual(len(self.manager.list_backups('media')),1)
@@ -169,13 +169,14 @@ class NewBackupTests(unittest.TestCase):
     def test_legacy_full_is_marked_incompatible(self):
         patches=self.patch_io()
         with patches[0],patches[1],patches[2],patches[4]:
-            full=self.manager.backup('full').path
+            full=self.manager.backup('combined').path
         # Rewrite manifest to pretend the old package backed up credentials.
         altered=self.backups/'legacy.full.tar.gz'
         with tarfile.open(full,'r:gz') as src, tarfile.open(altered,'w:gz') as dst:
             for member in src:
                 if member.name=='manifest.json':
                     meta=json.load(src.extractfile(member))
+                    meta['kind'] = 'full'
                     meta['artifacts'].append({'id':'ldap','kind':'file'})
                     payload=json.dumps(meta).encode()
                     member.size=len(payload)
@@ -196,6 +197,52 @@ class NewBackupTests(unittest.TestCase):
 
 
 class NewCliAndTuiTests(unittest.TestCase):
+    def test_tui_creates_combined_backup(self):
+        screen = FakeScreen([ord('c'), 27])
+        menu = CursesMenu(screen, Translator('en'))
+        captured = []
+        with patch('netbox_ops.tui.load_config'), \
+             patch('netbox_ops.backups.BackupManager') as manager, \
+             patch.object(menu, '_choose', return_value=2) as choose, \
+             patch.object(menu, '_confirm_token', return_value=True) as confirm, \
+             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn: captured.append(fn)):
+            manager.return_value.quick_list.return_value = []
+            menu._backups()
+            self.assertEqual(len(captured), 1)
+            captured[0](lambda *args: None)
+            manager.return_value.backup.assert_called_once_with(
+                'combined', progress=unittest.mock.ANY)
+            self.assertIn('Combined', choose.call_args.args[1][2][0])
+            confirm.assert_called_once()
+
+    def test_combined_restore_menu_selects_only_db(self):
+        entry = BackupEntry(Path('/tmp/backup.combined.tar.gz'), 'combined',
+                            '2026-11-20T10:00:00+00:00', 1024, '4.4.1')
+        menu = CursesMenu(FakeScreen([
+            curses.KEY_DOWN, 32, -1, ord('r'), curses.KEY_DOWN, 10,
+            *(ord(c) for c in 'RESTORE COMBINED DB'), 10, 27, 27, 27
+        ]), Translator('en'))
+        captured = []
+        class ImmediatePool:
+            def __init__(self, **kwargs): pass
+            def submit(self, fn, *args):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_result(fn(*args))
+                return future
+            def shutdown(self, **kwargs): pass
+        with patch('netbox_ops.tui.load_config'), \
+             patch('netbox_ops.backups.BackupManager') as manager, \
+             patch('netbox_ops.tui.concurrent.futures.ThreadPoolExecutor', ImmediatePool), \
+             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn: captured.append(fn)):
+            manager.return_value.quick_list.return_value = [entry]
+            manager.return_value.describe_one.return_value = entry
+            menu._backups()
+            self.assertEqual(len(captured), 1)
+            captured[0](lambda *args: None)
+            manager.return_value.restore.assert_called_once_with(
+                'combined', entry.path, only='db', progress=unittest.mock.ANY)
+
     def test_full_cli_restore_only_options(self):
         parser=build_parser()
         for only in ('db','media','all'):

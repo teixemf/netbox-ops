@@ -1593,7 +1593,7 @@ class CursesMenu:
                               f'{self.t("nbo_backup_count")}: {len(entries)}   '
                               f'{self.t("nbo_chosen")}: {len(chosen)}', 'section')
                     show_tag = w >= 95
-                    header = (f'{"":4}{self.t("nbo_type"):^7} {self.t("nbo_date"):^16} '
+                    header = (f'{"":4}{self.t("nbo_type"):^8} {self.t("nbo_date"):^16} '
                               f'{self.t("nbo_size"):^10} ')
                     if show_tag:
                         header += f'{self.t("nbo_tag_header"):^12} '
@@ -1612,7 +1612,8 @@ class CursesMenu:
                         selected = i == cursor and focus != 'actions'
                         if selected:
                             self._put(row, 3, ' ' * (w - 6), 'selected')
-                        content = (f"[{'x' if item.path in chosen else ' '}] {item.kind:<7} "
+                        display_kind = 'combined' if item.kind == 'full' else item.kind
+                        content = (f"[{'x' if item.path in chosen else ' '}] {display_kind:<8} "
                                    f'{self._pretty_date(item.created):<16} '
                                    f'{self._human_size(item.size):>10} ')
                         if show_tag:
@@ -1695,10 +1696,12 @@ class CursesMenu:
                     # Continue through the same safe confirmation handlers as shortcuts.
                 if key in (ord('c'),ord('C')):
                     self.stdscr.timeout(-1)
-                    types = [('DB / PostgreSQL',''),('Media / uploads',''),('Full / DB + media','')]
+                    types = [(self.t('nbo_create_kind_db'), ''),
+                             (self.t('nbo_create_kind_media'), ''),
+                             (self.t('nbo_create_kind_combined'), '')]
                     i = self._choose(self.t('nbo_create_title'), types, self.t('tui_back_hint'))
                     if isinstance(i,int):
-                        kind = ('db','media','full')[i]
+                        kind = ('db','media','combined')[i]
                         if self._confirm_token(self.t('nbo_create_title'),
                                                self.t('nbo_confirm_create',kind=kind), 'CREATE'):
                             self._run_backup_job(self.t('nbo_create_title'),
@@ -1722,7 +1725,7 @@ class CursesMenu:
                         continue
                     self.stdscr.timeout(-1)
                     only = 'all'
-                    if entry.kind == 'full':
+                    if entry.kind in ('combined', 'full'):
                         only = self._choose_restore_scope(entry)
                         if only is None:
                             self.stdscr.timeout(120)
@@ -1737,7 +1740,7 @@ class CursesMenu:
                                 self.t('nbo_unknown_version_warning'), 'ACCEPT UNKNOWN VERSION'):
                             self.stdscr.timeout(120)
                             continue
-                    token = f'RESTORE {entry.kind.upper()}' + (f' {only.upper()}' if entry.kind=='full' else '')
+                    token = f'RESTORE {entry.kind.upper()}' + (f' {only.upper()}' if entry.kind in ('combined', 'full') else '')
                     notice = (f'{entry.path.name} | {self._pretty_date(entry.created)} | '
                               f'{self._human_size(entry.size)}. '+self.t('nbo_restore_warning'))
                     if self._confirm_token(self.t('nbo_restore_choose'),notice,token):

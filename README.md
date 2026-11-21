@@ -51,7 +51,10 @@ sudo netbox-ops --version
 sudo netbox-ops platform
 sudo netbox-ops services status
 sudo netbox-ops backup list
+sudo netbox-ops backup combined
 ```
+
+New `combined` backups contain the PostgreSQL database and NetBox media files, not the entire NetBox installation. The CLI also supports separate `db` and `media` backups. Older `full` archives remain listed, verifiable, and restorable without conversion; new combined archives use the `.combined.tar.gz` extension and `kind=combined` metadata. Historical archives keep their original `.full.tar.gz` filename and `kind=full` metadata. Use `backup verify --kind full --file PATH` or `restore full --file PATH` for an older archive. Both `restore full` and `restore combined` support `--only db`, `--only media`, or `--only all`. Restores still require the existing safety checks and explicit confirmations.
 
 Review `config.example.json` and the configuration stored under `/etc/netbox-ops` before performing operations. Backups are stored under `/var/lib/netbox-ops/backups` by default.
 

@@ -147,7 +147,17 @@ class RealRestoreTests(unittest.TestCase):
         self.assertEqual(self._marker(), 'A')
         self.assertEqual(self._media_state()['photo'], self.media_a)
 
-        original = self.manager.backup(kind).path
+        if kind == 'full':
+            # Build a historical archive with the original manifest kind.
+            from netbox_ops.backups import _create_archive, _db_dump
+            self.cfg.backup_directory.mkdir(mode=0o700, exist_ok=True)
+            dump = self.root / 'historical-db.dump'
+            _db_dump(self.cfg, dump)
+            original = self.cfg.backup_directory / (
+                'netbox-full-20261120T120000Z-abc123.full.tar.gz')
+            _create_archive(self.cfg, original, 'full', dump)
+        else:
+            original = self.manager.backup(kind).path
         original_digest = hashlib.sha256(original.read_bytes()).hexdigest()
         self.manager.verify(kind, original)
         self._change_to_b()
@@ -171,8 +181,8 @@ class RealRestoreTests(unittest.TestCase):
                    side_effect=check_staged_database) as django:
             report = self.manager.restore(kind, original, only=only)
 
-        restores_db = kind == 'db' or (kind == 'full' and only != 'media')
-        restores_media = kind == 'media' or (kind == 'full' and only != 'db')
+        restores_db = kind == 'db' or (kind in ('combined', 'full') and only != 'media')
+        restores_media = kind == 'media' or (kind in ('combined', 'full') and only != 'db')
         self.assertEqual(report.kind, kind)
         self.assertEqual(self._marker(), expected_db)
         self.assertEqual(
@@ -230,15 +240,24 @@ class RealRestoreTests(unittest.TestCase):
     def test_restore_media(self):
         self._exercise_restore('media', 'all', 'B', 'A')
 
-    def test_restore_full(self):
+    def test_restore_combined(self):
+        self._exercise_restore('combined', 'all', 'A', 'A')
+
+    def test_restore_combined_database_only(self):
+        self._exercise_restore('combined', 'db', 'A', 'B')
+
+    def test_restore_combined_media_only(self):
+        self._exercise_restore('combined', 'media', 'B', 'A')
+
+
+    def test_restore_historical_full(self):
         self._exercise_restore('full', 'all', 'A', 'A')
 
-    def test_restore_full_database_only(self):
+    def test_restore_historical_full_database_only(self):
         self._exercise_restore('full', 'db', 'A', 'B')
 
-    def test_restore_full_media_only(self):
+    def test_restore_historical_full_media_only(self):
         self._exercise_restore('full', 'media', 'B', 'A')
-
 
     def _assert_failed_restore_unchanged(self, expected_media):
         self.assertEqual(self._marker(), 'B')
@@ -292,10 +311,10 @@ class RealRestoreTests(unittest.TestCase):
             self.manager.restore('db', corrupt, accept_unknown=True)
         self._assert_failed_restore_unchanged(expected_media)
 
-    def test_corrupted_media_and_full_archives_are_rejected(self):
+    def test_corrupted_media_and_combined_archives_are_rejected(self):
         cases = (
             ('media', 'payload/media/uploads/photo.bin'),
-            ('full', 'database/netbox.dump'),
+            ('combined', 'database/netbox.dump'),
         )
         sources = [
             (kind, self._corrupt_archive_member(
@@ -313,13 +332,13 @@ class RealRestoreTests(unittest.TestCase):
 
     def test_missing_files_and_wrong_archive_types_do_not_change_live_data(self):
         media_backup = self.manager.backup('media').path
-        full_backup = self.manager.backup('full').path
+        combined_backup = self.manager.backup('combined').path
         self._change_to_b()
         expected_media = self._media_state()
         for kind, source in (
             ('db', self.root / 'nonexistent.dump'),
             ('media', self.root / 'nonexistent.media.tar.gz'),
-            ('full', self.root / 'nonexistent.full.tar.gz'),
+            ('combined', self.root / 'nonexistent.combined.tar.gz'),
         ):
             with self.subTest(missing=kind):
                 with self.assertRaises(FileNotFoundError):
@@ -327,8 +346,8 @@ class RealRestoreTests(unittest.TestCase):
                 self._assert_failed_restore_unchanged(expected_media)
         for kind, source in (
             ('db', media_backup),
-            ('media', full_backup),
-            ('full', media_backup),
+            ('media', combined_backup),
+            ('combined', media_backup),
         ):
             with self.subTest(wrong_kind=kind):
                 with self.assertRaises(BackupError):
@@ -338,7 +357,7 @@ class RealRestoreTests(unittest.TestCase):
     def test_missing_media_directory_leaves_no_partial_backup(self):
         self.assertEqual(self._marker(), 'A')
         shutil.rmtree(self.media)
-        for kind in ('media', 'full'):
+        for kind in ('media', 'combined'):
             with self.subTest(kind=kind):
                 with self.assertRaisesRegex(BackupError, 'Media directory|Required artifact'):
                     self.manager.backup(kind)
@@ -353,7 +372,7 @@ class RealRestoreTests(unittest.TestCase):
         absent = 'nbo_missing_' + uuid.uuid4().hex[:12]
         bad_config = dataclasses.replace(self.cfg, database=absent)
         manager = BackupManager(bad_config)
-        for kind in ('db', 'full'):
+        for kind in ('db', 'combined'):
             with self.subTest(kind=kind):
                 with self.assertRaises(BackupError):
                     manager.backup(kind)

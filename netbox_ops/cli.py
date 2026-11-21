@@ -57,12 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     backup = top.add_parser('backup', help='Create PostgreSQL, artifact or integrated archives.')
     backup_commands = backup.add_subparsers(dest='action', required=True)
-    for operation in ('db', 'media', 'full'):
+    for operation in ('db', 'media', 'combined'):
         backup_commands.add_parser(operation, help='Create a protected, timestamped backup.')
     listed = backup_commands.add_parser('list', help='List local backup archives.')
-    listed.add_argument('--kind', choices=('db', 'media', 'full', 'legacy'))
+    listed.add_argument('--kind', choices=('db', 'media', 'combined', 'full', 'legacy'))
     verified = backup_commands.add_parser('verify', help='Verify a backup archive and its checksums.')
-    verified.add_argument('--kind', choices=('db', 'media', 'full', 'legacy'), required=True)
+    verified.add_argument('--kind', choices=('db', 'media', 'combined', 'full', 'legacy'), required=True)
     verified.add_argument('--file', type=Path, required=True)
 
     deleted = backup_commands.add_parser('delete', help='Delete one local backup, with explicit confirmation.')
@@ -72,10 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     restore = top.add_parser('restore', help='Restore a verified backup (disruptive).')
     restore_commands = restore.add_subparsers(dest='action', required=True)
-    for operation in ('db', 'media', 'full'):
+    for operation in ('db', 'media', 'combined', 'full'):
         command = restore_commands.add_parser(operation, help='Restore an archive of this type.')
         command.add_argument('--file', type=Path, required=True)
-        if operation == 'full':
+        if operation in ('combined', 'full'):
             command.add_argument('--only', choices=('db', 'media', 'all'), default='all',
                                  help='Restore only DB, only media, or both (default).')
         command.add_argument('--yes', action='store_true', help='Noninteractive restore confirmation.')
@@ -186,7 +186,7 @@ def not_implemented(t: Translator, name: str) -> int:
 
 
 def confirm_restore(kind: str, source: Path, t: Translator, only: str = 'all') -> bool:
-    token = f'RESTORE {kind.upper()}' + (f' {only.upper()}' if kind == 'full' else '')
+    token = f'RESTORE {kind.upper()}' + (f' {only.upper()}' if kind in ('combined', 'full') else '')
     print(t('backup_restore_warning', kind=kind, path=str(source)))
     try:
         return input(t('backup_restore_confirmation', token=token)) == token
@@ -403,11 +403,11 @@ def interactive_menu(t: Translator, config_path: Path = CONFIG_PATH) -> int:
             if (group, action) == ('services', 'manage'):
                 menu_manage(t, config_path)
             elif (group, action) == ('backup', 'manage'):
-                print('  1) Backup DB     2) Backup media     3) Backup full')
+                print('  1) Backup DB     2) Backup media     3) Backup combined')
                 print('  4) List backups (CLI restore/delete requires explicit file and confirmation)')
                 option = input(t('prompt')).strip()
                 if option in ('1', '2', '3'):
-                    kind = {'1': 'db', '2': 'media', '3': 'full'}[option]
+                    kind = {'1': 'db', '2': 'media', '3': 'combined'}[option]
                     if input(f'Create {kind} backup? [yes/NO] ').lower() == 'yes':
                         perform_backup_action('backup', kind, cfg, t)
                 elif option == '4':
