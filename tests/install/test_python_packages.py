@@ -19,7 +19,7 @@ class PythonPackageInstallTests(unittest.TestCase):
         (bin_dir / 'apt-cache').write_text(
             '#!/bin/bash\n'
             'if [[ "$1" == policy ]]; then\n'
-            '  if [[ "$2" == python3.12-venv && "$APT_VENV_AVAILABLE" == 0 ]]; then\n'
+            '  if [[ "$2" == *-venv && "$APT_VENV_AVAILABLE" == 0 ]]; then\n'
             '    printf "Candidate: (none)\\n"\n'
             '  else\n'
             '    printf "Candidate: 3.12.3-1\\n"\n'
@@ -77,7 +77,7 @@ class PythonPackageInstallTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('UNEXPECTED_PROMPT', result.stdout)
-            self.assertIn('not both available', result.stderr)
+            self.assertIn('No compatible Python packages', result.stderr)
             self.assertFalse((directory / 'calls.log').exists())
 
     def test_dnf_confirmed_install(self):
