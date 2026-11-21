@@ -4,8 +4,6 @@ from __future__ import annotations
 import curses
 import io
 import json
-import os
-import stat
 import subprocess
 import tarfile
 import tempfile
@@ -13,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from netbox_ops.backups import BackupEntry, BackupError, BackupManager, BackupReport
-from netbox_ops.cli import build_parser, dispatch
+from netbox_ops.backups import BackupEntry, BackupError, BackupManager
+from netbox_ops.cli import build_parser
 from netbox_ops.config import Configuration, DEFAULT_UNITS, load_config
 from netbox_ops.i18n import Translator
 from netbox_ops.services import SystemdServices

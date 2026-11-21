@@ -12,7 +12,7 @@ from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, Co
 from .i18n import LANGUAGES, Translator
 from .menu import MENU_ACTIONS
 from .services import (CRITICAL_SERVICES, ExclusiveLock, ServiceError, SystemdServices,
-                       challenge, order_services, perform_service_batch, write_audit)
+                       challenge, order_services, perform_service_batch as perform_service_batch, write_audit)
 
 
 

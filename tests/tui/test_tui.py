@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import curses
-import io
 import unittest
-from dataclasses import replace
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from netbox_ops.i18n import Translator
@@ -130,7 +127,8 @@ class NewServiceTuiTests(unittest.TestCase):
 
     def test_main_menu_escape_then_q_exits(self):
         menu = CursesMenu(FakeScreen([27, ord('q')]), Translator('pt'))
-        systemd=MagicMock(); systemd.status.return_value=[]
+        systemd=MagicMock()
+        systemd.status.return_value=[]
         with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices',return_value=systemd), \
              patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups:
             backups.return_value.storage_stats.return_value=(0,0,0)

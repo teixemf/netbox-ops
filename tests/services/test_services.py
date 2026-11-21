@@ -1,20 +1,14 @@
 from __future__ import annotations
 
 import io
-import json
 import subprocess
-import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from netbox_ops.cli import (MENU_ACTIONS, build_parser, dispatch, interactive_menu,
-                            perform_restart, perform_service_action, perform_service_batch,
-                            order_services, challenge)
-from netbox_ops.config import (CONFIG_PATH, DEFAULT_UNITS, SERVICE_NAMES,
-                               Configuration, ConfigError, load_config)
-from netbox_ops.i18n import CATALOGUE_DIR, Translator
+from netbox_ops.cli import build_parser, dispatch, perform_restart, perform_service_action, perform_service_batch, order_services, challenge
+from netbox_ops.config import DEFAULT_UNITS, Configuration
+from netbox_ops.i18n import Translator
 from netbox_ops.services import ServiceError, SystemdServices
 
 

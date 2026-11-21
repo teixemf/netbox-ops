@@ -297,7 +297,6 @@ def _validate_archive(path: Path, kind: str, cfg: Configuration, extract_dir: Pa
             raise BackupError('Duplicate artifact in manifest')
         if set(declared) != {'media'}:
             raise BackupError('Only media-only archives are accepted. Legacy config backups cannot be restored.')
-        included = set()
         total_bytes = 0
         members = archive.getmembers()
         if len(members) > MAX_MEMBERS:

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
-from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, load_config
+from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
 from .journal import JournalPanel
 from .menu import MENU_ACTIONS

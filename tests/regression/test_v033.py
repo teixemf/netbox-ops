@@ -1,7 +1,6 @@
 """v0.3.3: chosen palette, round Braille donut, no redundant results page."""
 from __future__ import annotations
 
-import curses
 import unittest
 from unittest.mock import patch, MagicMock
 from netbox_ops.tui import CursesMenu

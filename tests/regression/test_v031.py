@@ -8,13 +8,11 @@ import curses
 import json
 import tempfile
 import unittest
-from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import subprocess
 
 from netbox_ops import __version__
-from netbox_ops.backups import BackupManager, BackupEntry
+from netbox_ops.backups import BackupManager
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.services import ServiceState, ServiceVersionCache
@@ -66,7 +64,7 @@ class BackupPerformanceTests(unittest.TestCase):
     def test_metadata_cache_once_for_same_selection(self):
         with patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
-            archive = self.manager.backup('media').path
+            self.manager.backup('media').path
         screen = FakeScreen([curses.KEY_DOWN, -1, curses.KEY_UP, curses.KEY_DOWN, 27,27],
                             dimensions=(30,125))
         menu = CursesMenu(screen, Translator('pt'))
