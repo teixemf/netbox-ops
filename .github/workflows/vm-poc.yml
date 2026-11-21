@@ -1,0 +1,145 @@
+name: VM PoC - Ubuntu 22.04
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vm-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Inspect runner and KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CPU cores: $(nproc)"
+          free -h
+          df -h /
+          lscpu | grep -E 'Architecture:|Virtualization:|Hypervisor vendor:' || true
+          if [[ ! -c /dev/kvm ]]; then
+            echo '::error::/dev/kvm is missing; KVM acceleration is unavailable'
+            exit 1
+          fi
+          ls -l /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          echo 'PASS: KVM device is accessible'
+
+      - name: Install QEMU tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils cloud-image-utils
+          qemu-system-x86_64 --version
+
+      - name: Boot and verify Ubuntu 22.04
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vm-poc"
+          cd "$RUNNER_TEMP/vm-poc"
+
+          image='ubuntu-22.04-server-cloudimg-amd64.img'
+          base_url='https://cloud-images.ubuntu.com/releases/jammy/release'
+          download_start=$SECONDS
+          curl -fL --retry 3 --retry-delay 2 -sS -o "$image" "$base_url/$image"
+          curl -fL --retry 3 --retry-delay 2 -sS -o SHA256SUMS "$base_url/SHA256SUMS"
+          grep -F " *$image" SHA256SUMS | sha256sum -c -
+          original_hash=$(sha256sum "$image" | cut -d' ' -f1)
+          download_seconds=$((SECONDS - download_start))
+          qemu-img info "$image"
+
+          prepare_start=$SECONDS
+          qemu-img create -f qcow2 -F qcow2 -b "$PWD/$image" overlay.qcow2
+          ssh-keygen -q -t ed25519 -N '' -f vm_key
+          cat > user-data <<EOF
+          #cloud-config
+          users:
+            - default
+          ssh_authorized_keys:
+            - $(cat vm_key.pub)
+          ssh_pwauth: false
+          write_files:
+            - path: /etc/netbox-ops-poc
+              content: ubuntu-22.04-cloud-init
+          EOF
+          cat > meta-data <<EOF
+          instance-id: netbox-ops-poc-$GITHUB_RUN_ID
+          local-hostname: netbox-ops-poc
+          EOF
+          cloud-localds seed.img user-data meta-data
+          prepare_seconds=$((SECONDS - prepare_start))
+
+          cleanup() {
+            status=$?
+            if [[ "$status" -ne 0 && -f serial.log ]]; then
+              echo 'Last guest console messages:'
+              tail -n 80 serial.log || true
+            fi
+            if [[ -f vm.pid ]]; then
+              kill "$(cat vm.pid)" 2>/dev/null || true
+            fi
+            rm -f overlay.qcow2
+          }
+          trap cleanup EXIT
+
+          boot_start=$SECONDS
+          qemu-system-x86_64 \
+            -machine q35,accel=kvm -cpu host -smp 2 -m 2048 \
+            -drive file=overlay.qcow2,format=qcow2,if=virtio \
+            -drive file=seed.img,format=raw,if=virtio \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
+            -device virtio-net-pci,netdev=net0 \
+            -display none -serial file:serial.log -monitor none \
+            -daemonize -pidfile vm.pid
+
+          ssh_opts=(-i ./vm_key -p 2222 -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile=./known_hosts -o ConnectTimeout=3)
+          ready=false
+          for i in {1..90}; do
+            if ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 true 2>/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 3
+          done
+          if [[ "$ready" != true ]]; then
+            echo '::error::Guest SSH was not ready within 270 seconds'
+            exit 1
+          fi
+          boot_seconds=$((SECONDS - boot_start))
+          timeout 180 ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo cloud-init status --wait'
+
+          test_start=$SECONDS
+          ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 \
+            'set -eu; . /etc/os-release; test "$VERSION_ID" = 22.04; test "$(cat /etc/netbox-ops-poc)" = ubuntu-22.04-cloud-init; echo "PASS: $PRETTY_NAME and cloud-init marker"'
+          test_seconds=$((SECONDS - test_start))
+
+          rss_kib=$(ps -o rss= -p "$(cat vm.pid)" | xargs)
+          cpu_percent=$(ps -o %cpu= -p "$(cat vm.pid)" | xargs)
+          overlay_size=$(du -h overlay.qcow2 | cut -f1)
+          test "$original_hash" = "$(sha256sum "$image" | cut -d' ' -f1)"
+          echo 'PASS: Original QCOW2 image unchanged'
+          df -h /
+
+          {
+            echo '## Ubuntu 22.04 QEMU/KVM smoke test'
+            echo '| Check | Result |'
+            echo '| --- | --- |'
+            echo '| KVM accelerated boot | PASS |'
+            echo '| Guest OS and cloud-init marker | PASS |'
+            echo '| Original QCOW2 hash unchanged | PASS |'
+            echo "| Download and checksum | ${download_seconds} s |"
+            echo "| Prepare VM | ${prepare_seconds} s |"
+            echo "| Boot until SSH | ${boot_seconds} s |"
+            echo "| Guest checks | ${test_seconds} s |"
+            echo "| QEMU RSS sample | ${rss_kib} KiB |"
+            echo "| QEMU CPU sample | ${cpu_percent}% |"
+            echo "| Overlay size | ${overlay_size} |"
+          } >> "$GITHUB_STEP_SUMMARY"

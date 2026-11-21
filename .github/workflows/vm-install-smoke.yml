@@ -1,0 +1,107 @@
+name: VM smoke test - netbox-ops install
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install QEMU tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Boot Ubuntu 24.04 and test installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vm-install"
+          cd "$RUNNER_TEMP/vm-install"
+          cleanup() {
+            status=$?
+            if (( status != 0 )) && [[ -f serial.log ]]; then tail -n 100 serial.log; fi
+            if [[ -f vm.pid ]]; then kill "$(cat vm.pid)" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
+          test -c /dev/kvm || { echo '::error::KVM unavailable'; exit 1; }
+          sudo chmod a+rw /dev/kvm
+          image=ubuntu-24.04-server-cloudimg-amd64.img
+          url=https://cloud-images.ubuntu.com/releases/noble/release
+          curl -fLsS --retry 3 -o "$image" "$url/$image"
+          curl -fLsS --retry 3 -o SHA256SUMS "$url/SHA256SUMS"
+          grep -F " *$image" SHA256SUMS | sha256sum -c -
+          qemu-img create -f qcow2 -F qcow2 -b "$PWD/$image" overlay.qcow2
+          ssh-keygen -q -t ed25519 -N '' -f vm_key
+          cat > user-data <<EOF
+          #cloud-config
+          users:
+            - default
+          ssh_authorized_keys:
+            - $(cat vm_key.pub)
+          ssh_pwauth: false
+          EOF
+          cat > meta-data <<EOF
+          instance-id: netbox-ops-install-$GITHUB_RUN_ID
+          local-hostname: netbox-ops-install
+          EOF
+          cloud-localds seed.img user-data meta-data
+          qemu-system-x86_64 \
+            -machine q35,accel=kvm -cpu host -smp 2 -m 2048 \
+            -drive file=overlay.qcow2,format=qcow2,if=virtio \
+            -drive file=seed.img,format=raw,if=virtio \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
+            -device virtio-net-pci,netdev=net0 \
+            -display none -serial file:serial.log -monitor none \
+            -daemonize -pidfile vm.pid
+          ssh_opts=(-i ./vm_key -p 2222 -o BatchMode=yes -o ConnectTimeout=3 \
+            -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./known_hosts)
+          ready=false
+          for i in {1..90}; do
+            if ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 true 2>/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 3
+          done
+          if [[ "$ready" != true ]]; then
+            echo '::error::Guest SSH was not ready within 270 seconds'
+            exit 1
+          fi
+          timeout 180 ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo cloud-init status --wait'
+          tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.github \
+            --exclude=venv --exclude=__pycache__ -czf source.tar.gz .
+          scp -i ./vm_key -P 2222 -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./known_hosts \
+            source.tar.gz ubuntu@127.0.0.1:/home/ubuntu/source.tar.gz
+          timeout 600 ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'set -eu
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3.12-venv postgresql-client
+            sudo install -d -o root -g root -m 0755 /opt/netbox-ops
+            sudo tar -xzf /home/ubuntu/source.tar.gz -C /opt/netbox-ops
+            sudo chown -R root:root /opt/netbox-ops
+            sudo bash /opt/netbox-ops/install.sh
+            sudo test -x /usr/local/sbin/netbox-ops
+            sudo test -L /usr/sbin/netbox-ops
+            sudo test -x /opt/netbox-ops/venv/bin/python
+            sudo test "$(sudo stat -c %a /etc/netbox-ops)" = 700
+            sudo test "$(sudo stat -c %a /etc/netbox-ops/config.json)" = 600
+            sudo test "$(sudo stat -c %a /var/lib/netbox-ops/backups)" = 700
+            sudo /usr/local/sbin/netbox-ops --version
+            sudo /usr/local/sbin/netbox-ops --help >/dev/null
+            echo "PASS: netbox-ops installed and CLI started on Ubuntu 24.04"
+          '
+          {
+            echo '## netbox-ops install smoke test'
+            echo '| Check | Result |'
+            echo '| --- | --- |'
+            echo '| Ubuntu VM, QEMU/KVM and cloud-init | PASS |'
+            echo '| install.sh, venv, launcher and permissions | PASS |'
+            echo '| CLI --version and --help | PASS |'
+            echo ''
+            echo 'NetBox itself is not installed; no backup or restore is tested.'
+          } >> "$GITHUB_STEP_SUMMARY"
