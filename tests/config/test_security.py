@@ -20,6 +20,10 @@ class SecureConfigTests(unittest.TestCase):
         self.path = self.directory / 'config.json'
         self.path.write_text('{"services": {}}', encoding='utf-8')
         self.path.chmod(0o600)
+        self.units_patch = patch('netbox_ops.config.default_units',
+                                return_value=DEFAULT_UNITS.copy())
+        self.units_patch.start()
+        self.addCleanup(self.units_patch.stop)
 
     def test_accepts_root_owned_0600_and_0400(self):
         for mode in (0o600, 0o400):
@@ -103,8 +107,10 @@ class SecureConfigTests(unittest.TestCase):
 
     def test_explicit_overrides_work_when_discovery_fails(self):
         from netbox_ops.platform import PlatformError
-        self.path.write_text(json.dumps({'services': {'postgresql': 'postgresql@16-main.service'}}),
-                             encoding='utf-8')
+        self.path.write_text(json.dumps({
+            'services': {'postgresql': 'postgresql@16-main.service'},
+            'backup': {'postgres_port': 5432},
+        }), encoding='utf-8')
         self.path.chmod(0o600)
         with patch('netbox_ops.config.default_units', side_effect=PlatformError('ambiguous service')):
             cfg = load_config(self.path)

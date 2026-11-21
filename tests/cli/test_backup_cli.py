@@ -34,7 +34,6 @@ class BackupCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/root') as folder:
             p = Path(folder) / 'cfg.json'
             p.write_text(json.dumps({'backup': {'unknown': True}}))
-            path.chmod(0o600)
             p.chmod(0o600)
             with self.assertRaises(ConfigError):
                 load_config(p)
