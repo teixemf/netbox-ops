@@ -1,23 +1,23 @@
-# Testes do netbox-ops
+# netbox-ops Tests
 
-Os testes utilizam `unittest` (biblioteca standard) e não devem requerer serviços systemd ou PostgreSQL reais. Alguns verificam permissões de directórios pertencentes a `root`, pelo que a suite completa deve correr num ambiente descartável com UID 0 (por exemplo, um contentor de CI), nunca directamente num servidor de produção.
+The tests use Python's standard-library `unittest` framework and do not require real systemd or PostgreSQL services. Some tests verify root-owned directory permissions, so the complete suite must run in a disposable environment with UID 0 (for example, a CI container), **never directly on a production server**.
 
-## Executar toda a suite
+## Run the full test suite
 
-A partir da raiz do repositório, com Python 3.12 ou superior:
+From the repository root, using Python 3.12 or later:
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Para reproduzir o ambiente completo da CI localmente, a partir de uma máquina de desenvolvimento com Docker:
+To reproduce the full CI environment locally on a development machine with Docker:
 
 ```bash
 docker run --rm -v "$PWD:/workspace" -w /workspace python:3.12-bookworm \
   python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-## Executar testes de um domínio
+## Run tests for a specific domain
 
 ```bash
 python -m unittest tests.backups.test_backups -v
@@ -25,16 +25,16 @@ python -m unittest tests.services.test_services -v
 python -m unittest tests.tui.test_tui -v
 ```
 
-## Organização
+## Directory layout
 
-- `backups/`: criação, validação e restauro de backups.
-- `cli/`: comandos, parsing e confirmações da CLI.
-- `config/`: validação e carregamento da configuração.
-- `i18n/`: traduções e chaves de idioma.
-- `install/`: instalação e ligações simbólicas.
-- `services/`: operações e salvaguardas de serviços systemd.
-- `tui/`: navegação, apresentação e operações na TUI.
-- `helpers/`: objectos simulados partilhados pelos testes.
-- `regression/`: testes históricos por versão, mantidos temporariamente com os seus nomes para preservar o contexto.
+- `backups/`: backup creation, validation, and restore.
+- `cli/`: CLI commands, argument parsing, and confirmation prompts.
+- `config/`: configuration validation and loading.
+- `i18n/`: translations and locale key coverage.
+- `install/`: installation and symbolic link handling.
+- `services/`: systemd service operations and safeguards.
+- `tui/`: navigation, rendering, and TUI operations.
+- `helpers/`: reusable simulated objects for tests.
+- `regression/`: historical version-specific regression tests, temporarily kept under their original names for traceability.
 
-Os testes de regressão por versão poderão ser movidos gradualmente para o respectivo domínio em PRs futuras. Não se deve mudar as asserções no mesmo commit que reorganiza ficheiros.
+Version-specific regression tests can be gradually moved to their respective domains in future PRs. Avoid changing assertions in the same commit that moves test files.
