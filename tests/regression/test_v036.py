@@ -61,8 +61,8 @@ class BackupFix036Tests(unittest.TestCase):
             self.assertEqual([x.name for x in self.manager.list_backups()],
                              ['new.dump', 'old.dump'])
 
-    def test_full_only_db_stages_existing_extracted_dump_before_db_operations(self):
-        # A real full TAR archive is built; DB and service actions are mocked.
+    def test_combined_only_db_stages_existing_extracted_dump_before_db_operations(self):
+        # A real combined TAR archive is built; DB and service actions are mocked.
         with patch('netbox_ops.backups._db_dump',
                    side_effect=lambda cfg, path: path.write_bytes(b'PGDMP' + b'x' * 96)), \
              patch('netbox_ops.backups._check_dump'), \
