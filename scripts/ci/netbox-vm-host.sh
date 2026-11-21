@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Build a secret-free NetBox VM and check two disposable boots from its QCOW2.
+set -euo pipefail
+mode=$1
+workdir="$RUNNER_TEMP/netbox-ci"
+mkdir -p "$workdir"
+cd "$workdir"
+cleanup() {
+  status=$?
+  if (( status != 0 )); then
+    if [[ -f serial.log ]]; then tail -n 100 serial.log || true; fi
+  fi
+  if [[ -f vm.pid ]]; then kill "$(cat vm.pid)" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+test -c /dev/kvm || { echo '::error::KVM unavailable'; exit 1; }
+sudo chmod a+rw /dev/kvm
+qmp_powerdown() {
+  python3 - <<'PY'
+import json
+import socket
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.settimeout(5)
+    sock.connect("qmp.sock")
+    with sock.makefile("rwb") as f:
+        if "QMP" not in json.loads(f.readline()):
+            raise RuntimeError("QMP unavailable")
+        for command in ("qmp_capabilities", "system_powerdown"):
+            f.write((json.dumps({"execute": command}) + "\n").encode())
+            f.flush()
+            while True:
+                response = json.loads(f.readline())
+                if "return" in response or "error" in response:
+                    break
+            if "error" in response:
+                raise RuntimeError(response["error"])
+PY
+}
+wait_for_exit() {
+  local pid=$1 limit=$2 state
+  for (( i=0; i<limit; i++ )); do
+    state=$(ps -o stat= -p "$pid" 2>/dev/null || true)
+    if [[ -z "$state" || "$state" == Z* ]]; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+stop_vm() {
+  local pid
+  pid=$(cat vm.pid)
+  if ! wait_for_exit "$pid" 45; then
+    echo '::warning::Requesting ACPI shutdown via QMP'
+    qmp_powerdown
+    wait_for_exit "$pid" 90 || { echo '::error::VM shutdown failed'; return 1; }
+  fi
+  rm -f vm.pid qmp.sock
+}
+boot_vm() {
+  local disk=$1 attempt=$2
+  rm -f vm.pid qmp.sock serial.log
+  ssh-keygen -q -t ed25519 -N '' -f "key-$attempt"
+  cat > user-data <<EOF
+#cloud-config
+users:
+  - default
+ssh_authorized_keys:
+  - $(cat "key-$attempt.pub")
+ssh_pwauth: false
+EOF
+  cat > meta-data <<EOF
+instance-id: netbox-ci-$GITHUB_RUN_ID-$attempt
+local-hostname: netbox-ci-$attempt
+EOF
+  cloud-localds seed.img user-data meta-data
+  qemu-system-x86_64 \
+    -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
+    -drive file="$disk",format=qcow2,if=virtio,discard=unmap \
+    -drive file=seed.img,format=raw,if=virtio \
+    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    -display none -serial file:serial.log -monitor none \
+    -qmp unix:qmp.sock,server=on,wait=off \
+    -daemonize -pidfile vm.pid
+  ssh_opts=(-i "./key-$attempt" -p 2222 -o BatchMode=yes -o ConnectTimeout=3 \
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=./known-$attempt")
+  ready=false
+  for i in $(seq 1 90); do
+    if ssh ${ssh_opts[@]} ubuntu@127.0.0.1 true 2>/dev/null; then
+      ready=true
+      break
+    fi
+    sleep 3
+  done
+  [[ "$ready" == true ]] || { echo '::error::VM SSH timeout'; return 1; }
+  timeout 240 ssh ${ssh_opts[@]} ubuntu@127.0.0.1 'sudo cloud-init status --wait'
+}
+ssh_guest() {
+  timeout 2400 ssh ${ssh_opts[@]} ubuntu@127.0.0.1 "$@"
+}
+if [[ "$mode" == build ]]; then
+  started=$SECONDS
+  image=ubuntu-24.04-server-cloudimg-amd64.img
+  url=https://cloud-images.ubuntu.com/releases/noble/release
+  curl -fLsS --retry 3 -o "$image" "$url/$image"
+  curl -fLsS --retry 3 -o SHA256SUMS "$url/SHA256SUMS"
+  grep -F " *$image" SHA256SUMS | sha256sum -c -
+  qemu-img create -f qcow2 -F qcow2 -b "$PWD/$image" overlay-build.qcow2
+  qemu-img resize overlay-build.qcow2 12G
+  boot_vm overlay-build.qcow2 build
+  tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.github \
+    --exclude=venv --exclude=__pycache__ -czf source.tar.gz .
+  scp -i ./key-build -P 2222 -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./known-build \
+    source.tar.gz ubuntu@127.0.0.1:/home/ubuntu/source.tar.gz
+  ssh_guest 'sudo install -d -o root -g root -m 0755 /opt/netbox-ops &&
+    sudo tar -xzf /home/ubuntu/source.tar.gz -C /opt/netbox-ops &&
+    sudo chown -R root:root /opt/netbox-ops &&
+    sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh prepare'
+  # Require a successful credential cleanup before creating a portable image.
+  ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh sanitize'
+  qmp_powerdown
+  stop_vm
+  qemu-img convert -c -O qcow2 overlay-build.qcow2 netbox-ubuntu24.qcow2
+  qemu-img check netbox-ubuntu24.qcow2
+  sha256sum netbox-ubuntu24.qcow2 > SHA256SUMS.txt
+  {
+    echo '## NetBox baseline build'
+    echo "Image size: $(stat -c %s netbox-ubuntu24.qcow2) bytes"
+    echo "Build duration: $((SECONDS-started)) seconds"
+    echo 'Contains no NetBox secrets or build-time SSH keys.'
+  } >> "$GITHUB_STEP_SUMMARY"
+  echo "PASS: reusable NetBox baseline built in $((SECONDS-started)) s"
+elif [[ "$mode" == verify ]]; then
+  sha256sum -c SHA256SUMS.txt
+  base_hash=$(sha256sum netbox-ubuntu24.qcow2 | cut -d' ' -f1)
+  for attempt in 1 2; do
+    started=$SECONDS
+    qemu-img create -f qcow2 -F qcow2 -b "$PWD/netbox-ubuntu24.qcow2" "overlay-$attempt.qcow2"
+    boot_vm "overlay-$attempt.qcow2" "$attempt"
+    ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-guest.sh provision'
+    if (( attempt == 1 )); then
+      ssh_guest 'sudo touch /var/tmp/ci-isolation-marker'
+    else
+      ssh_guest 'sudo test ! -e /var/tmp/ci-isolation-marker'
+    fi
+    test "$(sha256sum netbox-ubuntu24.qcow2 | cut -d' ' -f1)" = "$base_hash"
+    ssh_guest 'sudo systemctl poweroff --no-block' || true
+    stop_vm
+    echo "PASS: isolated NetBox boot $attempt in $((SECONDS-started)) s"
+  done
+  sha256sum -c SHA256SUMS.txt
+  {
+    echo '## Reusable NetBox baseline verified'
+    echo 'Two isolated boots succeeded: NetBox HTTP, PostgreSQL, Redis, nginx, RQ and netbox-ops.'
+    echo 'The base image hash remained unchanged; the second boot has no marker from the first.'
+  } >> "$GITHUB_STEP_SUMMARY"
+else
+  echo "Usage: $0 build|verify" >&2
+  exit 2
+fi
