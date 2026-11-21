@@ -12,4 +12,16 @@ docker run --rm -v "$PWD:/workspace:ro" -w /workspace rockylinux:9 \
   bash tests/integration/run_postgres.sh
 ```
 
-The same script will later accept the integration unittest command as arguments. The smoke check deliberately uses PostgreSQL's SQL_ASCII `template0` and a UTF8 application database, matching the regression scenario in issue #24. No NetBox installation, systemd, external services, or credentials are required.
+To execute the real backup integration tests, append this command to either Docker invocation:
+
+```bash
+python3 -m unittest discover -s tests/integration -p 'integration_*.py' -v
+```
+
+The GitHub Actions smoke workflow runs it in both containers. The suite creates disposable
+databases and media directories and uses real `pg_dump`/`pg_restore` for backups and data
+verification. Only systemd, audit output and the NetBox version are mocked. No NetBox
+installation or credentials are required.
+
+Integration files use the `integration_*.py` pattern so the existing `test_*.py` unit
+test job remains independent. The smoke check deliberately uses PostgreSQL's SQL_ASCII `template0` and a UTF8 application database, matching the regression scenario in issue #24. No NetBox installation, systemd, external services, or credentials are required.

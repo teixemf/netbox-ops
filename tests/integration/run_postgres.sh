@@ -19,11 +19,11 @@ case "${ID:-}:${VERSION_ID:-}" in
     echo 'Installing distribution PostgreSQL packages on Ubuntu 22.04...'
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq --no-install-recommends postgresql postgresql-client util-linux
+    apt-get install -y -qq --no-install-recommends postgresql postgresql-client util-linux python3
     ;;
   rocky:9|rocky:9.*)
     echo 'Installing distribution PostgreSQL packages on Rocky Linux 9...'
-    dnf install -y --setopt=install_weak_deps=False postgresql postgresql-server util-linux
+    dnf install -y --setopt=install_weak_deps=False postgresql postgresql-server util-linux python3
     ;;
   *)
     echo "ERROR: Unsupported container: ${ID:-unknown} ${VERSION_ID:-unknown}" >&2
@@ -139,5 +139,6 @@ echo 'PASS: real pg_dump/pg_restore, staging, UTF8/SQL_ASCII, and cleanup.'
 
 # Later stages may pass a Python unittest command, using this same local cluster.
 if (( $# > 0 )); then
+  export NBO_CI_PG_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1
   "$@"
 fi

@@ -19,10 +19,12 @@ jobs:
             image: rockylinux:9
     steps:
       - uses: actions/checkout@v5
-      - name: Run PostgreSQL smoke test
+      - name: Run PostgreSQL smoke and backup tests
         run: |
           docker run --rm \
             --volume "$PWD:/workspace:ro" \
             --workdir /workspace \
             "${{ matrix.image }}" \
-            bash tests/integration/run_postgres.sh
+            bash tests/integration/run_postgres.sh \
+              python3 -m unittest discover -s tests/integration \
+              -p 'integration_*.py' -v
