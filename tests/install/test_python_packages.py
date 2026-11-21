@@ -31,7 +31,7 @@ class PythonPackageInstallTests(unittest.TestCase):
         (bin_dir / 'dnf').write_text(
             '#!/bin/bash\n'
             'if [[ "$1" == -q ]]; then\n'
-            '  [[ "$DNF_PACKAGES_AVAILABLE" == 1 ]]\n'
+            '  [[ "$DNF_PACKAGES_AVAILABLE" == 1 ]] && printf "python3.12-3.12.3.x86_64\\n"\n'
             'else\n'
             '  printf "dnf %s\\n" "$*" >> "$PACKAGE_LOG"\n'
             'fi\n', encoding='utf-8')

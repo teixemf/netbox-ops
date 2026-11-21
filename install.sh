@@ -11,6 +11,12 @@ apt_has_candidate() {
     [[ -n "${candidate}" && "${candidate}" != '(none)' ]]
 }
 
+dnf_has_candidate() {
+    local matches
+    matches="$(dnf -q repoquery --available "$1" 2>/dev/null)" || return 1
+    [[ -n "${matches//[[:space:]]/}" ]]
+}
+
 confirm_python_install() {
     local response=''
     if [[ ! -t 0 ]]; then
@@ -40,8 +46,8 @@ install_python_if_requested() {
             ;;
         rhel)
             if ! command -v dnf >/dev/null 2>&1 ||
-               ! dnf -q repoquery --available python3.12 >/dev/null 2>&1 ||
-               ! dnf -q repoquery --available python3.12-pip >/dev/null 2>&1; then
+               ! dnf_has_candidate python3.12 ||
+               ! dnf_has_candidate python3.12-pip; then
                 echo 'Python 3.12 and python3.12-pip are not both available in the configured DNF repositories.' >&2
                 return 1
             fi
