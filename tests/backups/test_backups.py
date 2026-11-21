@@ -109,7 +109,7 @@ class FileBackupTests(unittest.TestCase):
         with self.assertRaisesRegex(BackupError, '0700'):
             self.ops.backup('media')
 
-    def test_files_restore_undoes_changes_on_django_failure(self):
+    def test_media_restore_skips_django_migration_check(self):
         with patch('netbox_ops.backups.write_audit'), patch('netbox_ops.backups._version', return_value='4.4.1'):
             source = self.ops.backup('media').path
         self.configfile.write_text('before restore')
@@ -117,13 +117,12 @@ class FileBackupTests(unittest.TestCase):
         systemd = MagicMock()
         systemd.status.return_value = []
         with patch('netbox_ops.backups.SystemdServices', return_value=systemd), \
-             patch('netbox_ops.backups._django_check', side_effect=BackupError('invalid settings')), \
+             patch('netbox_ops.backups._django_check', side_effect=AssertionError('must skip migration check')), \
              patch('netbox_ops.backups.write_audit'), \
              patch('netbox_ops.backups._version', return_value='4.4.1'):
-            with self.assertRaisesRegex(BackupError, 'invalid settings'):
-                self.ops.restore('media', source)
+            self.ops.restore('media', source)
         self.assertEqual(self.configfile.read_text(), 'before restore')
-        self.assertEqual(self.photo.read_text(), 'before file')
+        self.assertEqual(self.photo.read_text(), 'original')
 
     def test_full_backup_restarts_services_after_archive_failure(self):
         active = MagicMock()
@@ -185,7 +184,7 @@ class FileBackupTests(unittest.TestCase):
         self.assertEqual(rename.call_args_list[1].args[1], 'netbox')
         self.assertEqual(len(self.ops.list_backups('db')), 1)
 
-    def test_failed_migrations_trigger_db_rollback(self):
+    def test_failed_migrations_leave_active_database_unchanged(self):
         source = self.base / 'external.dump'
         source.write_bytes(b'PGDMP_FAKE_ARCHIVE')
         systemd = MagicMock()
@@ -198,14 +197,19 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._preflight_db'), \
              patch('netbox_ops.backups._stage_db', return_value='nbo_stage_fake'), \
              patch('netbox_ops.backups._rename_db') as rename, \
-             patch('netbox_ops.backups._terminate'), \
-             patch('netbox_ops.backups._django_check', side_effect=BackupError('migration mismatch')), \
+             patch('netbox_ops.backups._terminate') as terminate, \
+             patch('netbox_ops.backups._drop_db') as drop, \
+             patch('netbox_ops.backups._django_check', side_effect=BackupError('migration mismatch')) as django, \
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
             with self.assertRaisesRegex(BackupError, 'migration mismatch'):
                 self.ops.restore('db', source, accept_unknown=True)
-        self.assertEqual(rename.call_count, 4)
-        self.assertEqual(rename.call_args_list[3].args[1], 'netbox')
+        django.assert_called_once_with(self.cfg, 'nbo_stage_fake')
+        rename.assert_not_called()
+        terminate.assert_not_called()
+        systemd.stop.assert_not_called()
+        drop.assert_called_once_with('nbo_stage_fake', cfg=self.cfg)
+        self.assertEqual(self.ops.list_backups('db'), [])
 
     def test_db_archive_format_guard_precedes_psql(self):
         bad = self.base / 'bad.dump'
