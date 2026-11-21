@@ -24,14 +24,6 @@ from tests.helpers.fake_screen import FakeScreen
 
 class NewBackupTests(unittest.TestCase):
     def setUp(self):
-        # Test privileged flows without running the test process as root.
-        root_guard = patch('netbox_ops.backups._require_root')
-        root_guard.start()
-        self.addCleanup(root_guard.stop)
-        # File locking is tested separately; do not access global /run paths here.
-        lock_guard = patch('netbox_ops.backups.ExclusiveLock')
-        lock_guard.start()
-        self.addCleanup(lock_guard.stop)
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         self.root = Path(d.name)

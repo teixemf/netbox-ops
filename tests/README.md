@@ -1,6 +1,6 @@
 # Testes do netbox-ops
 
-Os testes utilizam `unittest` (biblioteca standard) e não devem requerer serviços systemd ou PostgreSQL reais.
+Os testes utilizam `unittest` (biblioteca standard) e não devem requerer serviços systemd ou PostgreSQL reais. Alguns verificam permissões de directórios pertencentes a `root`, pelo que a suite completa deve correr num ambiente descartável com UID 0 (por exemplo, um contentor de CI), nunca directamente num servidor de produção.
 
 ## Executar toda a suite
 
@@ -8,6 +8,13 @@ A partir da raiz do repositório, com Python 3.12 ou superior:
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+Para reproduzir o ambiente completo da CI localmente, a partir de uma máquina de desenvolvimento com Docker:
+
+```bash
+docker run --rm -v "$PWD:/workspace" -w /workspace python:3.12-bookworm \
+  python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 ## Executar testes de um domínio

@@ -9,10 +9,10 @@ jobs:
   unittest:
     name: Python 3.12 / unittest
     runs-on: ubuntu-latest
+    # Tests validate root-owned backup paths (0700); keep UID 0 inside a disposable container.
+    container:
+      image: python:3.12-bookworm
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
       - name: Run unit and regression tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
