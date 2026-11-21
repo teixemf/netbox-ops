@@ -77,7 +77,7 @@ assert metadata['sha256'] == hashlib.sha256(dump.read_bytes()).hexdigest(), 'Che
 with dump.open('rb') as stream:
     assert stream.read(5) == b'PGDMP', 'Not a PostgreSQL custom-format dump'
 PY
-pg_restore --list "$backup_file" | grep -q 'django_migrations' ||
+pg_restore --list "$backup_file" | grep 'django_migrations' >/dev/null ||
   fail 'NetBox migration table is missing from the backup'
 systemctl is-active --quiet netbox.service netbox-rq.service ||
   fail 'NetBox services stopped during the backup'
