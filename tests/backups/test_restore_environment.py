@@ -225,7 +225,7 @@ class StagedMigrationTests(unittest.TestCase):
                     'import os\n'
                     'class Settings:\n'
                     '    DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql",\n'
-                    '                            "NAME": os.environ["NBO_ACTIVE_DATABASE"]}}\n'
+                    '                            "NAME": "netbox"}}\n'
                     'settings = Settings()\n'
                 ),
                 'django/db/migrations/__init__.py': '',
