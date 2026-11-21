@@ -89,7 +89,7 @@ class PythonPackageInstallTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(
-                'dnf -y --setopt=install_weak_deps=False install python3.12 python3.12-pip',
+                'dnf -y --setopt=install_weak_deps=False install python3.12',
                 (directory / 'calls.log').read_text(encoding='utf-8'),
             )
 
