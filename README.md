@@ -32,7 +32,7 @@ The installer looks for compatible Python versions in `/usr/bin` and `/usr/local
 sudo PYTHON_BIN=/path/to/python3.13 /opt/netbox-ops/install.sh
 ```
 
-Before rebuilding an existing environment, `upgrade.sh` checks that the chosen interpreter can create a temporary virtual environment with pip. The installer never installs Python packages through the system package manager or adds external repositories.
+Before rebuilding an existing environment, `upgrade.sh` checks that the chosen interpreter can create a temporary virtual environment with pip. When no compatible Python interpreter is found and `PYTHON_BIN` is not set, `install.sh` can offer to install Python 3.12 and its virtual-environment support from the repositories already configured on the system. It prompts before installing anything; a declined or non-interactive run makes no package changes. When the packages are unavailable, it stops with guidance (Ubuntu 22.04 does not provide Python 3.12 in its standard repositories). The installer never adds external repositories or changes the system default Python. `upgrade.sh` does not offer to install system packages.
 
 ## Getting started
 

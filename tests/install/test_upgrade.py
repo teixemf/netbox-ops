@@ -36,7 +36,7 @@ class PythonPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             interpreter = Path(temp) / 'python'
             for version, accepted in [('3.11', False), ('3.12', True),
-                                      ('3.13', True), ('3.14', True), ('4.0', False)]:
+                                      ('3.13', True), ('3.14', True), ('3.15', True), ('4.0', False)]:
                 with self.subTest(version=version):
                     self.fake_python(interpreter, version)
                     result = self.bash(f'python_is_supported "{interpreter}"')
