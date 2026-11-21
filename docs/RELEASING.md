@@ -77,7 +77,7 @@ Use this path only for a high-priority regression or security issue in the relea
 
 1. Record an Issue privately for sensitive vulnerabilities or publicly for ordinary bugs.
 2. Branch **from `main`** using `hotfix/<issue-number>-<description>`.
-3. Make the smallest safe fix, add a regression test, and open a PR **to `main`** with explicit risk/rollback notes.
+3. Make the smallest safe fix, add a regression test, **bump `__version__` to the next patch version**, update current-version documentation and `CHANGELOG.md`, and open a PR **to `main`** with explicit risk/rollback notes.
 4. Require CI and review (or documented solo self-review). Do not bypass safety checks merely because the issue is urgent.
 5. Merge via PR, publish an incremented patch version/tag/GitHub Release, and document the impact.
 6. **Forward-port the fix into `dev` through a separate PR** (merge `main` back to `dev` or cherry-pick the hotfix onto a branch based on `dev`); run CI and avoid duplicate changes.
