@@ -37,6 +37,28 @@ def make_main_items(t: Translator) -> list[tuple[str, str, tuple[str, ...]]]:
     return items
 
 
+def move_action_focus(index: int, key: int, positions: Sequence[tuple[int, int]]) -> int:
+    """Move across the displayed action rows without wrapping horizontally."""
+    if not positions or not 0 <= index < len(positions):
+        return index
+
+    x, row = positions[index]
+    if key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+        direction = -1 if key == curses.KEY_LEFT else 1
+        choices = [(i, px) for i, (px, py) in enumerate(positions)
+                   if py == row and (px - x) * direction > 0]
+        if choices:
+            return min(choices, key=lambda item: abs(item[1] - x))[0]
+    elif key in (curses.KEY_UP, curses.KEY_DOWN, ord('k'), ord('j')):
+        direction = -1 if key in (curses.KEY_UP, ord('k')) else 1
+        target_row = row + direction
+        choices = [(i, px) for i, (px, py) in enumerate(positions)
+                   if py == target_row]
+        if choices:
+            return min(choices, key=lambda item: (abs(item[1] - x), item[0]))[0]
+    return index
+
+
 def move_selection(index: int, key: int, count: int) -> int:
     if count < 1:
         return 0
@@ -1083,8 +1105,7 @@ class CursesMenu:
                     elif focus == 'services':
                         index = move_selection(index, key, len(states))
                     else:
-                        operation = (operation + (1 if key in (
-                            curses.KEY_RIGHT, curses.KEY_DOWN, ord('j')) else -1)) % len(operations)
+                        operation = move_action_focus(operation, key, positions)
                 elif focus == 'services' and key == 32 and states:
                     name = states[index].name
                     if name in chosen:
@@ -1661,8 +1682,7 @@ class CursesMenu:
                              curses.KEY_LEFT,curses.KEY_RIGHT,
                              curses.KEY_HOME,curses.KEY_END,curses.KEY_NPAGE,curses.KEY_PPAGE):
                     if focus == 'actions':
-                        step = -1 if key in (curses.KEY_UP,ord('k'),curses.KEY_LEFT) else 1
-                        action_index = (action_index+step) % len(backup_actions)
+                        action_index = move_action_focus(action_index, key, positions)
                     elif entries:
                         focus = 'backups'
                         if cursor is None:
