@@ -109,8 +109,8 @@ class PythonPackageInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             result = self.run_bash(
-                'confirm_python_install() { return 0; }\\n'
-                'apt-get() { return 9; }\\n'
+                'confirm_python_install() { return 0; }\n'
+                'apt-get() { return 9; }\n'
                 'install_python_if_requested debian', directory,
             )
             self.assertEqual(result.returncode, 3)
