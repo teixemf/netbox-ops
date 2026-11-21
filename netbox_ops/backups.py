@@ -484,9 +484,56 @@ def _sidecar_manifest(path: Path) -> dict | None:
     return data
 
 
+def _stage_database_options(cfg: Configuration) -> list[str]:
+    """Read the live database's encoding and locale, not template0 defaults."""
+    if not DB_ID.fullmatch(cfg.database):
+        raise BackupError('Unsafe database identifier')
+    # to_jsonb avoids referencing columns absent from older PostgreSQL versions.
+    details = _sql(
+        "SELECT json_build_object("
+        "'encoding', pg_encoding_to_char(d.encoding), "
+        "'collate', d.datcollate, 'ctype', d.datctype, "
+        "'provider', to_jsonb(d)->>'datlocprovider', "
+        "'icu_locale', COALESCE(to_jsonb(d)->>'daticulocale', "
+        "to_jsonb(d)->>'datlocale')) "
+        f"FROM pg_database AS d WHERE d.datname = '{cfg.database}'",
+        cfg=cfg,
+    )
+    try:
+        settings = json.loads(details)
+    except (ValueError, TypeError) as exc:
+        raise BackupError('Cannot read active database locale settings') from exc
+    if not isinstance(settings, dict):
+        raise BackupError('Cannot read active database locale settings')
+    encoding = settings.get('encoding')
+    collate = settings.get('collate')
+    ctype = settings.get('ctype')
+    provider = settings.get('provider') or 'c'  # PostgreSQL before version 15.
+    if (not isinstance(encoding, str) or not re.fullmatch(r'[A-Z0-9_]+', encoding)
+            or not all(isinstance(v, str) and v and chr(0) not in v
+                       for v in (collate, ctype))):
+        raise BackupError('Invalid active database encoding or locale')
+    args = ['--encoding', encoding, '--lc-collate', collate, '--lc-ctype', ctype]
+    if provider == 'i':
+        icu_locale = settings.get('icu_locale')
+        if not isinstance(icu_locale, str) or not icu_locale or chr(0) in icu_locale:
+            raise BackupError('Invalid active database ICU locale')
+        args.extend(['--locale-provider', 'icu', '--icu-locale', icu_locale])
+    elif provider == 'b':
+        builtin_locale = settings.get('icu_locale')
+        if not isinstance(builtin_locale, str) or not builtin_locale or chr(0) in builtin_locale:
+            raise BackupError('Invalid active database builtin locale')
+        args.extend(['--locale-provider', 'builtin', '--builtin-locale', builtin_locale])
+    elif provider != 'c':
+        raise BackupError('Unsupported active database locale provider')
+    return args
+
+
 def _stage_db(cfg: Configuration, dump: Path) -> str:
+    options = _stage_database_options(cfg)
     stage = 'nbo_stage_' + uuid.uuid4().hex[:16]
-    _pg('createdb', '--owner', cfg.database_owner, '--template', 'template0', stage, timeout=120, cfg=cfg)
+    _pg('createdb', '--owner', cfg.database_owner, '--template', 'template0',
+        *options, stage, timeout=120, cfg=cfg)
     try:
         with dump.open('rb') as src:
             _pg('pg_restore', '--no-owner', '--no-acl', '--role', cfg.database_owner,
