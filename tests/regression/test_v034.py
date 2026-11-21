@@ -13,7 +13,7 @@ from netbox_ops.backups import BackupManager
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.tui import CursesMenu
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 class BackupView034Tests(unittest.TestCase):

@@ -10,7 +10,7 @@ from pathlib import Path
 class InstallerLinkTests(unittest.TestCase):
     @staticmethod
     def link_fragment() -> str:
-        install_script = Path(__file__).resolve().parents[1] / 'install.sh'
+        install_script = Path(__file__).resolve().parents[2] / 'install.sh'
         contents = install_script.read_text(encoding='utf-8')
         return contents.split('LINK=/usr/sbin/netbox-ops\n', 1)[1].split('\nprintf ', 1)[0].replace('TARGET=/usr/local/sbin/netbox-ops\n', '')
 

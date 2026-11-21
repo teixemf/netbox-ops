@@ -14,7 +14,7 @@ from netbox_ops.cli import build_parser
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.tui import CursesMenu
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 class BackupFix036Tests(unittest.TestCase):

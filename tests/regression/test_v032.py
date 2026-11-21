@@ -15,7 +15,7 @@ from netbox_ops.tui import CursesMenu
 from netbox_ops.i18n import Translator
 from netbox_ops.backups import BackupManager, BackupEntry, BackupError
 from netbox_ops.config import Configuration, DEFAULT_UNITS
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 class V032Tests(unittest.TestCase):
     def test_netbox_version_from_release_yaml_not_django(self):

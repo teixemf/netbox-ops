@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 from netbox_ops.tui import CursesMenu
 from netbox_ops.i18n import Translator
 from netbox_ops.services import ServiceError
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 class AutoAcknowledgeScreen(FakeScreen):
     def getch(self):
