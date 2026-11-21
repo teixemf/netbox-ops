@@ -1593,7 +1593,7 @@ class CursesMenu:
                               f'{self.t("nbo_backup_count")}: {len(entries)}   '
                               f'{self.t("nbo_chosen")}: {len(chosen)}', 'section')
                     show_tag = w >= 95
-                    header = (f'{"":4}{self.t("nbo_type"):^7} {self.t("nbo_date"):^16} '
+                    header = (f'{"":4}{self.t("nbo_type"):^8} {self.t("nbo_date"):^16} '
                               f'{self.t("nbo_size"):^10} ')
                     if show_tag:
                         header += f'{self.t("nbo_tag_header"):^12} '
