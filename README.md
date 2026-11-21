@@ -18,11 +18,21 @@ It brings common administration tasks into one terminal-based tool, designed for
 ## Requirements
 
 - RHEL-family or Debian-family Linux with a local NetBox installation
-- Python **3.12** with `venv` support
+- Python **3.12 or newer** (Python 3.x), with working `venv` and `pip` support
 - systemd and PostgreSQL client tools
 - A terminal with Python `curses` support
 
 The application uses a separate Python virtual environment and does not modify NetBox's Python environment.
+
+Install Python from your distribution's official repositories when a compatible version and matching `venv` package are available. On older releases, including Ubuntu 22.04 (which ships Python 3.10 by default), the official repositories may not provide Python 3.12 or newer. In that case, consider upgrading the operating system or installing a separate Python from a trusted source. Do not replace the system's default Python.
+
+The installer detects compatible versioned Python executables and `python3` on `PATH`, plus conventional locations in `/usr/bin`, `/usr/local/bin`, and selected `/opt` installation prefixes (without recursively scanning `/opt`). To choose an interpreter explicitly, set `PYTHON_BIN`:
+
+```bash
+sudo PYTHON_BIN=/path/to/python3.13 /opt/netbox-ops/install.sh
+```
+
+Before rebuilding an existing environment, `upgrade.sh` checks that the chosen interpreter can create a temporary virtual environment with pip. When no compatible Python interpreter is found and `PYTHON_BIN` is not set, `install.sh` can offer to install an available Python 3.12 or newer release and its virtual-environment support from the repositories already configured on the system. It prompts before installing anything; a declined or non-interactive run makes no package changes. When the packages are unavailable, it stops with guidance (Ubuntu 22.04 does not provide Python 3.12 in its standard repositories). The installer never adds external repositories or changes the system default Python. `upgrade.sh` does not offer to install system packages.
 
 ## Getting started
 

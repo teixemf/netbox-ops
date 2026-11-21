@@ -162,15 +162,16 @@ class Platform040Tests(unittest.TestCase):
         self.assertIn('debian',output.getvalue())
         self.assertIn('postgresql.service',output.getvalue())
 
-    def test_install_script_requires_python312_on_both_families(self):
+    def test_install_script_supports_python312_or_newer_on_both_families(self):
         root=Path(__file__).resolve().parents[2]
         installer=(root/'install.sh').read_text()
         upgrade=(root/'upgrade.sh').read_text()
         self.assertIn('FAMILY=debian',installer)
         self.assertIn('FAMILY=rhel',installer)
-        self.assertIn('python3.12',upgrade)
+        self.assertIn('python3.12',installer)
+        self.assertIn('python_is_supported',upgrade)
+        self.assertIn('>= 12',upgrade)
         self.assertIn('PYTHON_BIN',upgrade)
-        self.assertIn('3.12',upgrade)
 
     def test_source_compiles_with_python312_grammar(self):
         root=Path(__file__).resolve().parents[2]

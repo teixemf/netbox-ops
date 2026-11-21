@@ -7,11 +7,15 @@ on:
 
 jobs:
   unittest:
-    name: Python 3.12 / unittest
+    name: Python ${{ matrix.python }} / unittest
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13', '3.14', '3.15']
     # Tests validate root-owned backup paths (0700); keep UID 0 inside a disposable container.
     container:
-      image: python:3.12-bookworm
+      image: python:${{ matrix.python }}-bookworm
     steps:
       - uses: actions/checkout@v5
       - name: Run unit and regression tests
