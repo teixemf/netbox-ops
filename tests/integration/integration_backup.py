@@ -142,13 +142,13 @@ class RealBackupTests(unittest.TestCase):
         systemd = MagicMock()
         systemd.status.return_value = []
         with patch('netbox_ops.backups.SystemdServices', return_value=systemd):
-            report = self.manager.backup('full')
+            report = self.manager.backup('combined')
         systemd.status.assert_called_once_with(['netbox', 'netbox-rq'])
         systemd.stop.assert_not_called()
         systemd.start.assert_not_called()
         self._check_permissions(report.path)
-        manifest = self.manager.verify('full', report.path)
-        self.assertEqual(manifest['kind'], 'full')
+        manifest = self.manager.verify('combined', report.path)
+        self.assertEqual(manifest['kind'], 'combined')
         self.assertEqual(set(manifest['files']), {
             'database/netbox.dump',
             'payload/media/readme.txt', 'payload/media/uploads/photo.bin',
@@ -166,7 +166,7 @@ class RealBackupTests(unittest.TestCase):
         extracted.write_bytes(dump_bytes)
         self._verify_dump_data(extracted)
         self.assertFalse(list(self.cfg.backup_directory.glob('.nbo-build-*')))
-        self.assertEqual(self.manager.list_backups('full'), [report.path])
+        self.assertEqual(self.manager.list_backups('combined'), [report.path])
 
 
 if __name__ == '__main__':
