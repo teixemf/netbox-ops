@@ -111,9 +111,9 @@ class PythonPreflightTests(unittest.TestCase):
             interpreter.write_text(
                 '#!/bin/sh\n'
                 'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
-                '    mkdir -p "$3/bin"\n'
-                '    printf "#!/bin/sh\\nexit 1\\n" > "$3/bin/python"\n'
-                '    chmod +x "$3/bin/python"\n'
+                '    mkdir -p "$4/bin"\n'
+                '    printf "#!/bin/sh\\nexit 1\\n" > "$4/bin/python"\n'
+                '    chmod +x "$4/bin/python"\n'
                 '    exit 0\n'
                 'fi\n'
                 'exit 1\n', encoding='utf-8'
