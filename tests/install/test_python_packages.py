@@ -89,7 +89,7 @@ class PythonPackageInstallTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(
-                'dnf -y --setopt=install_weak_deps=False install python3.12 python3.12-pip',
+                'dnf -y --setopt=install_weak_deps=False install python3.12',
                 (directory / 'calls.log').read_text(encoding='utf-8'),
             )
 
@@ -104,6 +104,26 @@ class PythonPackageInstallTests(unittest.TestCase):
             self.assertNotIn('UNEXPECTED_PROMPT', result.stdout)
             self.assertFalse((directory / 'calls.log').exists())
 
+
+    def test_apt_install_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            result = self.run_bash(
+                'confirm_python_install() { return 0; }\n'
+                'apt-get() { return 9; }\n'
+                'install_python_if_requested debian', directory,
+            )
+            self.assertEqual(result.returncode, 3)
+            self.assertIn('Python package installation failed', result.stderr)
+            self.assertFalse((directory / 'calls.log').exists())
+
+    def test_unsupported_distribution_does_not_install_packages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            result = self.run_bash('install_python_if_requested unknown', directory)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Cannot offer automatic Python installation', result.stderr)
+            self.assertFalse((directory / 'calls.log').exists())
 
     def test_confirmation_decline_has_distinct_status(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -67,11 +67,9 @@ install_python_if_requested() {
                 fi
                 ;;
             rhel)
-                support="${interpreter}-pip"
                 if command -v dnf >/dev/null 2>&1 &&
-                   dnf_has_candidate "${interpreter}" &&
-                   dnf_has_candidate "${support}"; then
-                    install_command=(dnf -y --setopt=install_weak_deps=False install "${interpreter}" "${support}")
+                   dnf_has_candidate "${interpreter}"; then
+                    install_command=(dnf -y --setopt=install_weak_deps=False install "${interpreter}")
                 else
                     continue
                 fi

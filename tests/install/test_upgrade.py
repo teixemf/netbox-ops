@@ -104,16 +104,16 @@ class PythonPreflightTests(unittest.TestCase):
             self.assertEqual((existing / 'keep-me').read_text(), 'preserved')
             self.assertEqual(list(root.glob('.venv-check.*')), [])
 
-    def test_pip_failure_does_not_touch_existing_environment(self):
+    def test_unusable_python_does_not_touch_existing_environment(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             interpreter = root / 'python'
             interpreter.write_text(
                 '#!/bin/sh\n'
                 'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
-                '    mkdir -p "$3/bin"\n'
-                '    printf "#!/bin/sh\\nexit 1\\n" > "$3/bin/python"\n'
-                '    chmod +x "$3/bin/python"\n'
+                '    mkdir -p "$4/bin"\n'
+                '    printf "#!/bin/sh\\nexit 1\\n" > "$4/bin/python"\n'
+                '    chmod +x "$4/bin/python"\n'
                 '    exit 0\n'
                 'fi\n'
                 'exit 1\n', encoding='utf-8'
@@ -127,7 +127,7 @@ class PythonPreflightTests(unittest.TestCase):
                 'trap cleanup_preflight EXIT\npreflight_python',
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('pip is unavailable', result.stderr)
+            self.assertIn('Python is not usable', result.stderr)
             self.assertEqual((existing / 'keep-me').read_text(), 'preserved')
             self.assertEqual(list(root.glob('.venv-check.*')), [])
 
@@ -137,8 +137,6 @@ class PythonPreflightTests(unittest.TestCase):
             root = Path(temp)
             script = root / 'upgrade.sh'
             shutil.copyfile(UPGRADE, script)
-            (root / 'requirements.txt').write_text('', encoding='utf-8')
-            (root / 'local_requirements.txt').write_text('', encoding='utf-8')
             interpreter = root / 'python'
             self.fake_python(interpreter, '3.12')
             existing = root / 'venv'
@@ -159,8 +157,6 @@ class PythonPreflightTests(unittest.TestCase):
             root = Path(temp)
             script = root / 'upgrade.sh'
             shutil.copyfile(UPGRADE, script)
-            (root / 'requirements.txt').write_text('', encoding='utf-8')
-            (root / 'local_requirements.txt').write_text('', encoding='utf-8')
             (root / 'netbox_ops').mkdir()
             (root / 'netbox_ops' / '__init__.py').write_text('', encoding='utf-8')
             (root / 'netbox_ops.py').write_text('print("test-version")\n', encoding='utf-8')
@@ -178,7 +174,7 @@ class PythonPreflightTests(unittest.TestCase):
             self.assertEqual(list(root.glob('.venv-check.*')), [])
 
     @unittest.skipUnless(sys.version_info >= (3, 12), 'Requires Python 3.12+')
-    def test_real_python_can_create_venv_with_pip_without_touching_existing(self):
+    def test_real_python_can_create_venv_without_pip_or_touching_existing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             existing = root / 'venv'
@@ -191,6 +187,7 @@ class PythonPreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((existing / 'keep-me').read_text(), 'preserved')
             self.assertEqual(list(root.glob('.venv-check.*')), [])
+            self.assertFalse((existing / 'bin' / 'pip').exists())
 
 
 if __name__ == '__main__':
