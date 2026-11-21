@@ -88,9 +88,9 @@ jobs:
             sudo test -x /usr/local/sbin/netbox-ops
             sudo test -L /usr/sbin/netbox-ops
             sudo test -x /opt/netbox-ops/venv/bin/python
-            sudo test "$(stat -c %a /etc/netbox-ops)" = 700
-            sudo test "$(stat -c %a /etc/netbox-ops/config.json)" = 600
-            sudo test "$(stat -c %a /var/lib/netbox-ops/backups)" = 700
+            sudo test "$(sudo stat -c %a /etc/netbox-ops)" = 700
+            sudo test "$(sudo stat -c %a /etc/netbox-ops/config.json)" = 600
+            sudo test "$(sudo stat -c %a /var/lib/netbox-ops/backups)" = 700
             sudo /usr/local/sbin/netbox-ops --version
             sudo /usr/local/sbin/netbox-ops --help >/dev/null
             echo "PASS: netbox-ops installed and CLI started on Ubuntu 24.04"
