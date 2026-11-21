@@ -1,9 +1,12 @@
 """Real restore integration tests on disposable PostgreSQL and media."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import io
 import os
 import re
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -11,7 +14,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from netbox_ops.backups import BackupManager, _pg, _sql
+from netbox_ops.backups import BackupError, BackupManager, _drop_db, _pg, _sql, _stage_db
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 
 
@@ -235,6 +238,200 @@ class RealRestoreTests(unittest.TestCase):
 
     def test_restore_full_media_only(self):
         self._exercise_restore('full', 'media', 'B', 'A')
+
+
+    def _assert_failed_restore_unchanged(self, expected_media):
+        self.assertEqual(self._marker(), 'B')
+        self.assertEqual(self._media_state(), expected_media)
+        self.assertEqual(
+            _sql("SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'",
+                 cfg=self.cfg), '0',
+        )
+        self.assertEqual(
+            _sql("SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_prev_%'",
+                 cfg=self.cfg), '0',
+        )
+        self.assertFalse(list(self.cfg.backup_directory.glob('.nbo-restore-*')))
+        self.assertFalse(list(self.cfg.backup_directory.glob('.nbo-build-*')))
+        self.assertFalse(list(self.root.glob('.netbox-ops-restore-*')))
+        for kind in ('db', 'media'):
+            self.assertFalse(any(
+                self.manager.backup_purpose(path) == 'pre_restore'
+                for path in self.manager.list_backups(kind)
+            ))
+        self.systemd.stop.assert_not_called()
+        self.systemd.start.assert_not_called()
+
+    def _corrupt_archive_member(self, original, member_name):
+        """Retain the original manifest but change one payload byte."""
+        modified = self.root / ('corrupted-' + original.name)
+        changed = False
+        with tarfile.open(original, 'r:gz') as source, \
+                tarfile.open(modified, 'w:gz') as target:
+            for member in source:
+                if not member.isfile():
+                    target.addfile(member)
+                    continue
+                content = source.extractfile(member).read()
+                if member.name == member_name:
+                    self.assertTrue(content)
+                    content = bytes([content[0] ^ 0xff]) + content[1:]
+                    changed = True
+                target.addfile(member, io.BytesIO(content))
+        self.assertTrue(changed)
+        return modified
+
+    def test_corrupted_database_dump_is_rejected_without_changes(self):
+        valid = self.manager.backup('db').path
+        corrupt = self.root / 'corrupt.dump'
+        # A PGDMP header alone must not be accepted as a valid custom dump.
+        corrupt.write_bytes(valid.read_bytes()[:5] + b'not-a-valid-dump')
+        self._change_to_b()
+        expected_media = self._media_state()
+        with self.assertRaises(BackupError):
+            self.manager.restore('db', corrupt, accept_unknown=True)
+        self._assert_failed_restore_unchanged(expected_media)
+
+    def test_corrupted_media_and_full_archives_are_rejected(self):
+        cases = (
+            ('media', 'payload/media/uploads/photo.bin'),
+            ('full', 'database/netbox.dump'),
+        )
+        sources = [
+            (kind, self._corrupt_archive_member(
+                self.manager.backup(kind).path, member,
+            ))
+            for kind, member in cases
+        ]
+        self._change_to_b()
+        expected_media = self._media_state()
+        for kind, source in sources:
+            with self.subTest(kind=kind):
+                with self.assertRaises(BackupError):
+                    self.manager.restore(kind, source)
+                self._assert_failed_restore_unchanged(expected_media)
+
+    def test_missing_files_and_wrong_archive_types_do_not_change_live_data(self):
+        media_backup = self.manager.backup('media').path
+        full_backup = self.manager.backup('full').path
+        self._change_to_b()
+        expected_media = self._media_state()
+        for kind, source in (
+            ('db', self.root / 'nonexistent.dump'),
+            ('media', self.root / 'nonexistent.media.tar.gz'),
+            ('full', self.root / 'nonexistent.full.tar.gz'),
+        ):
+            with self.subTest(missing=kind):
+                with self.assertRaises(FileNotFoundError):
+                    self.manager.restore(kind, source)
+                self._assert_failed_restore_unchanged(expected_media)
+        for kind, source in (
+            ('db', media_backup),
+            ('media', full_backup),
+            ('full', media_backup),
+        ):
+            with self.subTest(wrong_kind=kind):
+                with self.assertRaises(BackupError):
+                    self.manager.restore(kind, source)
+                self._assert_failed_restore_unchanged(expected_media)
+
+    def test_missing_media_directory_leaves_no_partial_backup(self):
+        self.assertEqual(self._marker(), 'A')
+        shutil.rmtree(self.media)
+        for kind in ('media', 'full'):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(BackupError, 'Media directory|Required artifact'):
+                    self.manager.backup(kind)
+                self.assertFalse(self.manager.list_backups(kind))
+                self.assertFalse(list(self.cfg.backup_directory.glob('.nbo-build-*')))
+                self.assertEqual(self._marker(), 'A')
+        self.systemd.stop.assert_not_called()
+        self.systemd.start.assert_not_called()
+
+    def test_failed_real_pg_dump_cleans_partial_backups(self):
+        # Missing DB causes the real pg_dump command to fail on both distros.
+        absent = 'nbo_missing_' + uuid.uuid4().hex[:12]
+        bad_config = dataclasses.replace(self.cfg, database=absent)
+        manager = BackupManager(bad_config)
+        for kind in ('db', 'full'):
+            with self.subTest(kind=kind):
+                with self.assertRaises(BackupError):
+                    manager.backup(kind)
+                self.assertFalse(manager.list_backups(kind))
+                self.assertFalse(list(self.cfg.backup_directory.glob('.nbo-build-*')))
+                self.assertEqual(self._marker(), 'A')
+        self.assertFalse(list(self.cfg.backup_directory.glob('*.json')))
+        self.systemd.stop.assert_not_called()
+        self.systemd.start.assert_not_called()
+
+    def test_real_staging_failure_removes_stage_and_preserves_live_data(self):
+        # A valid PostgreSQL dump without django_migrations fails after a real
+        # createdb/pg_restore, before any live DB swap or service stop.
+        source_db = 'nbo_source_' + uuid.uuid4().hex[:12]
+        _pg('createdb', '--owner', self.owner, '--template', 'template0',
+            '--encoding', 'UTF8', '--lc-collate', 'C', '--lc-ctype', 'C',
+            source_db, cfg=self.cfg)
+        _sql('CREATE TABLE ci_marker (id integer PRIMARY KEY, marker text); '
+             "INSERT INTO ci_marker VALUES (1, 'A')", source_db, cfg=self.cfg)
+        broken = self.root / 'no-migrations.dump'
+        with broken.open('wb') as output:
+            _pg('pg_dump', '--format=custom', '--no-owner', '--no-acl',
+                '--dbname', source_db, stdout=output, cfg=self.cfg)
+        self._change_to_b()
+        expected_media = self._media_state()
+        with self.assertRaisesRegex(BackupError, 'no django_migrations'):
+            self.manager.restore('db', broken, accept_unknown=True)
+        self._assert_failed_restore_unchanged(expected_media)
+
+    def test_failed_django_check_drops_real_stage_before_changes(self):
+        source = self.manager.backup('db').path
+        self._change_to_b()
+        expected_media = self._media_state()
+        staged = []
+
+        def reject_migrations(cfg, stage):
+            staged.append(stage)
+            self.assertEqual(self._marker(stage), 'A')
+            self.assertEqual(self._marker(), 'B')
+            raise BackupError('Django migration check failed')
+
+        with patch('netbox_ops.backups._django_check',
+                   side_effect=reject_migrations):
+            with self.assertRaisesRegex(BackupError, 'Django migration check failed'):
+                self.manager.restore('db', source)
+        self.assertEqual(len(staged), 1)
+        self._assert_failed_restore_unchanged(expected_media)
+
+    def test_utf8_staging_in_sql_ascii_cluster_real_postgres(self):
+        # Regression #24: query the actual cluster settings and stage a real dump.
+        self.assertEqual(
+            _sql("SELECT pg_encoding_to_char(encoding) "
+                 "FROM pg_database WHERE datname = 'template0'", cfg=self.cfg),
+            'SQL_ASCII',
+        )
+        source = self.manager.backup('db').path
+        live_settings = _sql(
+            "SELECT pg_encoding_to_char(encoding) || ':' || datcollate || ':' || datctype "
+            f"FROM pg_database WHERE datname = '{self.database}'",
+            cfg=self.cfg,
+        )
+        self.assertEqual(live_settings, 'UTF8:C:C')
+        stage = _stage_db(self.cfg, source)
+        try:
+            self.assertEqual(self._marker(stage), 'A')
+            self.assertEqual(
+                _sql("SELECT pg_encoding_to_char(encoding) || ':' || datcollate || ':' "
+                     "|| datctype FROM pg_database "
+                     f"WHERE datname = '{stage}'", cfg=self.cfg),
+                live_settings,
+            )
+            self.assertEqual(self._marker(), 'A')
+        finally:
+            _drop_db(stage, cfg=self.cfg)
+        self.assertEqual(
+            _sql("SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'",
+                 cfg=self.cfg), '0',
+        )
 
 
 if __name__ == '__main__':
