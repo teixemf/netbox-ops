@@ -66,7 +66,6 @@ install_python_if_requested() {
         return 1
     fi
 }
-
 # Allow isolated tests to source the helpers without running a privileged installer.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
