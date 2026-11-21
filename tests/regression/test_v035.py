@@ -98,7 +98,7 @@ class JournalUiTests(unittest.TestCase):
                                                   'enabled','200',0,1024**2,1)
                                      for n in ('netbox-rq','nginx','postgresql','redis')]]
 
-    def test_manage_has_logs_and_bottom_horizontal_operations(self):
+    def test_manage_has_operations_above_logs(self):
         screen=FakeScreen([curses.KEY_DOWN,-1,27,27],dimensions=(44,165))
         menu=CursesMenu(screen,Translator('pt'))
         systemd=MagicMock()
@@ -109,15 +109,45 @@ class JournalUiTests(unittest.TestCase):
             menu._manage()
         shown=' '.join(v for _,_,v,_ in screen.writes)
         self.assertIn('ÚLTIMOS LOGS',shown)
-        self.assertIn('Live log: OFF',shown)
+        self.assertIn('L: Live log OFF',shown)
         self.assertIn('Iniciar',shown)
         self.assertIn('Desactivar',shown)
-        # Footer operations appear lower than the log panel, not above it.
+        # Service actions are above the read-only log preview.
         log_lines=[y for y,x,v,_ in screen.writes if 'ÚLTIMOS LOGS' in v]
         action_lines=[y for y,x,v,_ in screen.writes if 'OPERAÇÕES SOBRE SERVIÇOS' in v]
         self.assertTrue(log_lines and action_lines)
-        self.assertGreater(min(action_lines), min(log_lines))
+        self.assertLess(min(action_lines), min(log_lines))
         systemd.logs.assert_called_once_with('netbox',50)
+
+    def test_disabled_service_action_has_visible_focus(self):
+        screen = FakeScreen([9, 27, 27], dimensions=(24, 80))
+        menu = CursesMenu(screen, Translator('en'))
+        systemd = MagicMock()
+        systemd.status.return_value = self.states
+        systemd.logs.return_value = ['journal entry']
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'):
+            menu._manage()
+        focused = screen.frames[1]
+        self.assertTrue(any(text == '›' for _, _, text, _ in focused))
+        self.assertIn('Marked targets: none',
+                      ' '.join(text for _, _, text, _ in focused))
+
+    def test_service_marked_target_remains_clear_when_preview_moves(self):
+        screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 27, 27, 27],
+                            dimensions=(40, 130))
+        menu = CursesMenu(screen, Translator('en'))
+        systemd = MagicMock()
+        systemd.status.return_value = self.states
+        systemd.logs.return_value = ['journal entry']
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'):
+            menu._manage()
+        focused = screen.frames[3]
+        summaries = [text for _, _, text, _ in focused if 'Marked targets:' in text]
+        self.assertEqual(summaries, ['Marked targets: netbox'])
+        self.assertIn('netbox-rq.service',
+                      ' '.join(text for _, _, text, _ in focused))
 
     def test_enter_from_manage_opens_expanded_log_view(self):
         screen=FakeScreen([curses.KEY_DOWN, 10, 27, 27, 27],dimensions=(44,145))

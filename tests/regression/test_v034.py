@@ -1,4 +1,4 @@
-"""v0.3.4: backup inventory has a single detail pane and bottom actions."""
+"""Backup inventory layout, marked-target safety, and automatic refresh."""
 from __future__ import annotations
 
 import curses
@@ -48,11 +48,10 @@ class BackupView034Tests(unittest.TestCase):
 
     def test_action_bar_single_row_wide_terminal_and_wraps_narrow(self):
         labels = [Translator('pt')('nbo_act_' + action) for action in
-                  ('create', 'restore', 'verify', 'delete',
-                   'select_all', 'refresh')]
+                  ('create', 'verify', 'restore', 'delete', 'select_all')]
         wide = CursesMenu._backup_action_positions(labels, 145)
         self.assertEqual({y for x, y in wide}, {0})
-        self.assertEqual(len(wide), 6)
+        self.assertEqual(len(wide), 5)
         narrow = CursesMenu._backup_action_positions(labels, 45)
         self.assertGreater(max(y for _, y in narrow), 0)
         for i, (x, y) in enumerate(narrow):
@@ -144,12 +143,104 @@ class BackupView034Tests(unittest.TestCase):
         delete.assert_called_once()
         self.assertEqual(set(delete.call_args.args[0]), set(self.files[1:]))
 
-    def test_refresh_action_on_bar_reloads_inventory_once(self):
-        keys = [9, *(curses.KEY_RIGHT for _ in range(5)), 10, 27, 27]
-        menu, _ = self.menu(keys)
+    def test_f5_refresh_remains_available_without_refresh_button(self):
+        menu, screen = self.menu([curses.KEY_DOWN, curses.KEY_F5, 27, 27])
         with patch.object(self.manager, 'quick_list', wraps=self.manager.quick_list) as ls:
             self.run_menu(menu)
         self.assertEqual(ls.call_count, 2)
+        self.assertNotIn('[Actualizar]', ' '.join(text for _, _, text, _ in screen.writes))
+
+    def test_focused_but_unmarked_backup_cannot_be_modified(self):
+        menu, _ = self.menu([curses.KEY_DOWN, ord('v'), ord('d'), ord('r'),
+                             27, 27], lang='en')
+        with patch.object(self.manager, 'verify') as verify, \
+             patch.object(self.manager, 'delete_backups') as delete, \
+             patch.object(menu, '_confirm_token') as confirm, \
+             patch.object(menu, '_run_backup_job') as job:
+            self.run_menu(menu)
+        verify.assert_not_called()
+        delete.assert_not_called()
+        confirm.assert_not_called()
+        job.assert_not_called()
+
+    def test_disabled_action_still_shows_keyboard_focus(self):
+        menu, screen = self.menu([9, curses.KEY_RIGHT, 27, 27], lang='en')
+        self.run_menu(menu)
+        focused = screen.frames[2]
+        self.assertTrue(any(text == '›' for _, _, text, _ in focused))
+        self.assertIn('Marked targets: none',
+                      ' '.join(text for _, _, text, _ in focused))
+
+    def test_marked_target_summary_is_independent_of_preview(self):
+        menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_DOWN,
+                                  27, 27, 27], lang='en')
+        self.run_menu(menu)
+        focused = screen.frames[3]
+        summaries = [text for _, _, text, _ in focused if 'Marked targets:' in text]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn(self.files[2].name, summaries[0])
+        self.assertNotIn(self.files[1].name, summaries[0])
+
+    def test_delete_confirmation_lists_targets_and_can_scroll(self):
+        names = [f'backup-{index}.dump' for index in range(5)]
+        screen = FakeScreen([curses.KEY_DOWN, 27], dimensions=(16, 72))
+        menu = CursesMenu(screen, Translator('en'))
+        self.assertFalse(menu._confirm_token('Delete', 'Delete these backups?',
+                                             'DELETE 5 BACKUPS', target_names=names))
+        first = ' '.join(text for _, _, text, _ in screen.frames[0])
+        scrolled = ' '.join(text for _, _, text, _ in screen.frames[1])
+        self.assertIn('1. backup-0.dump', first)
+        self.assertIn('2. backup-1.dump', scrolled)
+        self.assertNotIn('1. backup-0.dump', scrolled)
+        self.assertIn('2-4/5', scrolled)
+
+    def test_refresh_clears_mark_when_same_path_is_replaced(self):
+        menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_F5,
+                                  27, 27], lang='en')
+        original = self.manager.quick_list
+        count = 0
+
+        def listing():
+            nonlocal count
+            count += 1
+            if count == 2:
+                self.files[2].write_bytes(b'PGDMP-changed')
+            return original()
+
+        with patch.object(self.manager, 'quick_list', side_effect=listing):
+            self.run_menu(menu)
+        self.assertEqual(count, 2)
+        refreshed = ' '.join(text for _, _, text, _ in screen.frames[3])
+        self.assertIn('Marked targets: none', refreshed)
+
+    def test_escape_clears_marks_then_leaves_action_focus_then_exits(self):
+        menu, _ = self.menu([curses.KEY_DOWN, 32, 9, 27, 27, 27], lang='en')
+        self.run_menu(menu)
+
+    def test_management_hints_fit_eighty_column_terminals(self):
+        for lang in ('en', 'pt'):
+            for key in ('nbo_backup_hint_034', 'nbo_manage_hint_035'):
+                with self.subTest(lang=lang, key=key):
+                    self.assertLessEqual(len(Translator(lang)(key)), 77)
+
+    def test_backup_actions_require_explicit_marks(self):
+        menu, _ = self.menu([27], lang='en')
+        for action in ('restore', 'delete', 'verify'):
+            self.assertFalse(menu._backup_action_enabled(action, 3, 0, True))
+        self.assertTrue(menu._backup_action_enabled('restore', 3, 1, True))
+        self.assertFalse(menu._backup_action_enabled('restore', 3, 2, True))
+        self.assertTrue(menu._backup_action_enabled('verify', 3, 2, False))
+        self.assertTrue(menu._backup_action_enabled('delete', 3, 2, False))
+
+    def test_automatic_refresh_keeps_marked_backup_and_focus(self):
+        menu, screen = self.menu([curses.KEY_DOWN, 32, -1, 27, 27, 27])
+        now = iter([0, 1, 2, 11, 12, 13, 14, 15, 16])
+        with patch('netbox_ops.tui.time.monotonic', side_effect=lambda: next(now)), \
+             patch.object(self.manager, 'quick_list', wraps=self.manager.quick_list) as ls:
+            self.run_menu(menu)
+        self.assertEqual(ls.call_count, 2)
+        rendered = ' '.join(text for _, _, text, _ in screen.frames[3])
+        self.assertIn('[x]', rendered)
 
     def test_single_marked_restore_enter_reaches_confirmation_not_popup(self):
         menu, screen = self.menu([curses.KEY_DOWN, 32, 9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10,
@@ -170,7 +261,7 @@ class BackupView034Tests(unittest.TestCase):
         contents = ' '.join(text for _, _, text, _ in screen.frames[-2])
         self.assertIn('OPERAÇÕES SOBRE BACKUPS', contents)
         self.assertIn('[Criar]', contents)
-        self.assertIn('[Actualizar]', contents)
+        self.assertNotIn('[Actualizar]', contents)
         self.assertTrue(all(0 <= y < 21 for y, x, text, attr in screen.frames[-2]))
 
     def test_metadata_cached_per_file_and_cursor_changes_do_not_verify(self):
@@ -185,8 +276,8 @@ class BackupView034Tests(unittest.TestCase):
     def test_legacy_restore_is_disabled(self):
         path = self.directory / 'netbox-files-20261120T120000Z.files.tar.gz'
         path.write_bytes(b'legacy')
-        menu, screen = self.menu([curses.KEY_UP, 9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10,
-                                  27, 27, 27])
+        menu, screen = self.menu([curses.KEY_UP, 32, 9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10,
+                                  27, 27, 27, 27])
         with patch.object(menu, '_choose') as choose, \
              patch.object(menu, '_confirm_token') as confirm, \
              patch.object(menu, '_show_lines') as show:

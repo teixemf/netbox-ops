@@ -234,8 +234,8 @@ class NewCliAndTuiTests(unittest.TestCase):
 
     def test_full_backup_restore_menu_selects_only_db(self):
         entry=BackupEntry(Path('/tmp/backup.full.tar.gz'),'full','2026-11-20T10:00:00+00:00',1024,'4.4.1')
-        menu=CursesMenu(FakeScreen([curses.KEY_DOWN,-1,ord('r'),curses.KEY_DOWN,10,
-                *(ord(c) for c in 'RESTORE FULL DB'),10,27,27]),Translator('en'))
+        menu=CursesMenu(FakeScreen([curses.KEY_DOWN,32,-1,ord('r'),curses.KEY_DOWN,10,
+                *(ord(c) for c in 'RESTORE FULL DB'),10,27,27,27]),Translator('en'))
         captured=[]
         def fake_job(title,worker):
             captured.append(worker)
