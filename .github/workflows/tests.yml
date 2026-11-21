@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [main, dev, test/27-backup-restore-integration]
+    branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
