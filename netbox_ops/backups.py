@@ -29,7 +29,9 @@ from .services import ExclusiveLock, SystemdServices, write_audit
 from .restore_environment import RuntimeErrorSafe, check_staged_migrations
 
 FORMAT = 1
-KINDS = ('db', 'media', 'full')
+KINDS = ('db', 'media', 'combined')
+RESTORE_KINDS = (*KINDS, 'full')
+COMBINED_KINDS = ('combined', 'full')
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_MEMBERS = 200_000
 MAX_DATA_BYTES = 200 * 1024**3  # Review for unusually large media stores.
@@ -316,7 +318,7 @@ def _validate_archive(path: Path, kind: str, cfg: Configuration, extract_dir: Pa
             if not (member.isfile() or member.isdir()):
                 raise BackupError(f'Special archive member is not allowed: {name}')
             if bits[0] == 'database':
-                if kind != 'full' or name != 'database/netbox.dump' or not member.isfile():
+                if kind not in COMBINED_KINDS or name != 'database/netbox.dump' or not member.isfile():
                     raise BackupError(f'Unexpected database entry: {name}')
             elif bits[0] == 'payload' and len(bits) >= 2 and bits[1] in declared:
                 aid = bits[1]
@@ -361,8 +363,8 @@ def _validate_archive(path: Path, kind: str, cfg: Configuration, extract_dir: Pa
             raise BackupError('Manifest does not match archive contents')
         if roots_seen != set(declared):
             raise BackupError('Archive has missing artifact root entries')
-        if kind == 'full' and 'database/netbox.dump' not in expected:
-            raise BackupError('Missing database dump in full backup')
+        if kind in COMBINED_KINDS and 'database/netbox.dump' not in expected:
+            raise BackupError('Missing database dump in combined backup')
         if kind == 'media' and any(k.startswith('database/') for k in expected):
             raise BackupError('Media backup unexpectedly contains a database')
         if set(declared) != {'media'}:
@@ -699,10 +701,11 @@ class BackupManager:
     def list_backups(self, kind: str | None = None) -> list[Path]:
         if not self.directory.is_dir():
             return []
-        if kind is not None and kind not in ('db', 'media', 'full', 'legacy'):
+        if kind is not None and kind not in (*RESTORE_KINDS, 'legacy'):
             raise BackupError(f'Invalid backup kind: {kind}')
         suffixes = {'db': '.dump', 'media': '.media.tar.gz',
-                    'full': '.full.tar.gz', 'legacy': '.files.tar.gz'}
+                    'combined': '.combined.tar.gz', 'full': '.full.tar.gz',
+                    'legacy': '.files.tar.gz'}
         paths = (p for p in self.directory.iterdir()
                  if p.is_file() and not p.is_symlink() and
                  (p.name.endswith(suffixes[kind]) if kind else
@@ -725,6 +728,8 @@ class BackupManager:
     def classify(path: Path) -> str:
         if path.name.endswith('.media.tar.gz'):
             return 'media'
+        if path.name.endswith('.combined.tar.gz'):
+            return 'combined'
         if path.name.endswith('.full.tar.gz'):
             return 'full'
         if path.name.endswith('.files.tar.gz'):
@@ -736,7 +741,7 @@ class BackupManager:
     @staticmethod
     def backup_purpose(path: Path) -> str:
         """Fast, backwards-compatible recognition from the managed filename."""
-        return 'pre_restore' if re.search(r'^netbox-(?:db|media|full)-pre-restore-', path.name) else 'manual'
+        return 'pre_restore' if re.search(r'^netbox-(?:db|media|combined|full)-pre-restore-', path.name) else 'manual'
 
     def quick_list(self) -> list[BackupEntry]:
         """Filesystem-only inventory for responsive menus; no gzip/manifest reads.
@@ -783,7 +788,7 @@ class BackupManager:
                     meta = _read_archive_metadata(path, kind)
             meta = meta or {}
             legacy = kind == 'legacy' or (
-                kind in ('full', 'media') and
+                kind in (*COMBINED_KINDS, 'media') and
                 {a.get('id') for a in meta.get('artifacts', []) if isinstance(a, dict)} != {'media'})
             return BackupEntry(path, kind, meta.get('created_utc') or entry.created,
                                path.stat().st_size,
@@ -804,7 +809,7 @@ class BackupManager:
                             else _read_archive_metadata(path, kind))
                 created = (metadata or {}).get('created_utc') or ''
                 version = ((metadata or {}).get('netbox_version') or '') if (metadata or {}).get('netbox_version_source') == 'release.yaml' else ''
-                if kind == 'full' and {x.get('id') for x in metadata.get('artifacts', [])} != {'media'}:
+                if kind in COMBINED_KINDS and {x.get('id') for x in metadata.get('artifacts', [])} != {'media'}:
                     legacy = True
             except (OSError, BackupError, ValueError, KeyError, json.JSONDecodeError):
                 legacy = True
@@ -896,7 +901,7 @@ class BackupManager:
             raise BackupError(f'Invalid backup kind: {kind}')
         with ExclusiveLock():
             _safe_directory(self.directory)  # Fail preflight before stopping NetBox.
-            if kind != 'full':
+            if kind != 'combined':
                 return self._backup(kind, progress)
             # A consistent DB + media/config snapshot requires quiescing writers.
             # Preserve original service states; never start a previously stopped unit.
@@ -915,12 +920,12 @@ class BackupManager:
                 *, purpose: str = 'manual') -> BackupReport:
         if purpose not in ('manual', 'pre_restore'):
             raise BackupError('Invalid backup purpose')
-        total = 6 if kind == 'full' else 3
-        _progress(progress, 'prepare', 1 if kind != 'full' else 2, total)
+        total = 6 if kind == 'combined' else 3
+        _progress(progress, 'prepare', 1 if kind != 'combined' else 2, total)
         directory = _safe_directory(self.directory)
         label = '-pre-restore' if purpose == 'pre_restore' else ''
         name = f'netbox-{kind}{label}-{_stamp()}-{uuid.uuid4().hex[:6]}'
-        suffix = '.dump' if kind == 'db' else ('.media.tar.gz' if kind == 'media' else '.full.tar.gz')
+        suffix = '.dump' if kind == 'db' else ('.media.tar.gz' if kind == 'media' else '.combined.tar.gz')
         output = _new_file(directory, name + suffix)
         try:
             if kind == 'db':
@@ -935,16 +940,16 @@ class BackupManager:
             else:
                 with tempfile.TemporaryDirectory(prefix='.nbo-build-', dir=directory) as temporary:
                     dump = None
-                    if kind == 'full':
+                    if kind == 'combined':
                         _progress(progress, 'dump_db', 2, 6)
                         dump = Path(temporary) / 'netbox.dump'
                         _new_file(Path(temporary), 'netbox.dump')
                         _db_dump(self.cfg, dump)
                         _progress(progress, 'dump_db', 3, 6)
-                    _progress(progress, 'archive_media', 3 if kind == 'full' else 1, total)
+                    _progress(progress, 'archive_media', 3 if kind == 'combined' else 1, total)
                     archive_manifest = _create_archive(self.cfg, output, kind, dump, purpose)
-                    _progress(progress, 'archive_media', 4 if kind == 'full' else 2, total)
-                _progress(progress, 'verify', 4 if kind == 'full' else 2, total)
+                    _progress(progress, 'archive_media', 4 if kind == 'combined' else 2, total)
+                _progress(progress, 'verify', 4 if kind == 'combined' else 2, total)
                 _validate_archive(output, kind, self.cfg)
                 # Fast display metadata: no need to decompress a multi-GiB TAR
                 # merely to show its version/date. Integrity still uses verify().
@@ -959,7 +964,7 @@ class BackupManager:
                 }))
                 os.chmod(sidecar, 0o600)
             os.chmod(output, 0o600)
-            _progress(progress, 'complete', 5 if kind == 'full' else 3, total)
+            _progress(progress, 'complete', 5 if kind == 'combined' else 3, total)
             write_audit(f'BACKUP OK kind={kind} path={output} hash={_sha256(output)}')
             return BackupReport(output, kind, f'SHA256={_sha256(output)}')
         except Exception as exc:
@@ -983,12 +988,12 @@ class BackupManager:
                 accept_unknown: bool = False, allow_mismatch: bool = False,
                 progress: ProgressCallback | None = None) -> BackupReport:
         _require_root()
-        if kind not in KINDS:
+        if kind not in RESTORE_KINDS:
             raise BackupError(f'Invalid restore kind: {kind}')
-        if only not in ('db', 'media', 'all') or (kind != 'full' and only != 'all'):
-            raise BackupError('Partial restore is only supported for full backups')
-        restore_db = kind == 'db' or (kind == 'full' and only in ('all', 'db'))
-        restore_media = kind == 'media' or (kind == 'full' and only in ('all', 'media'))
+        if only not in ('db', 'media', 'all') or (kind not in COMBINED_KINDS and only != 'all'):
+            raise BackupError('Partial restore is only supported for combined backups')
+        restore_db = kind == 'db' or (kind in COMBINED_KINDS and only in ('all', 'db'))
+        restore_media = kind == 'media' or (kind in COMBINED_KINDS and only in ('all', 'media'))
         total = 8
         _progress(progress, 'prepare', 0, total)
         with ExclusiveLock():
@@ -1015,14 +1020,14 @@ class BackupManager:
                     _version_guard(manifest, accept_unknown=accept_unknown,
                                    allow_mismatch=allow_mismatch)
                 db_source = protected
-                # A full archive must be extracted even when ONLY its database
+                # A combined archive must be extracted even when ONLY its database
                 # is being restored. Previously full --only db skipped extraction
                 # but then referenced stage/database/netbox.dump (nonexistent).
-                if kind == 'full' or restore_media:
+                if kind in COMBINED_KINDS or restore_media:
                     _progress(progress, 'extract_media', 1, total)
                     _validate_archive(protected, kind, self.cfg, extract_dir=stage)
                 _progress(progress, 'extract_media', 2, total)
-                if kind == 'full':
+                if kind in COMBINED_KINDS:
                     db_source = stage / 'database/netbox.dump'
                 if restore_db:
                     _progress(progress, 'stage_db', 2, total)
