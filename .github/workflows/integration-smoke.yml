@@ -1,0 +1,28 @@
+name: PostgreSQL integration smoke
+
+on:
+  push:
+    branches:
+      - test/27-backup-restore-integration
+
+jobs:
+  postgres-smoke:
+    name: PostgreSQL smoke / ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: Ubuntu 22.04
+            image: ubuntu:22.04
+          - distro: Rocky Linux 9
+            image: rockylinux:9
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run PostgreSQL smoke test
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace:ro" \
+            --workdir /workspace \
+            "${{ matrix.image }}" \
+            bash tests/integration/run_postgres.sh
