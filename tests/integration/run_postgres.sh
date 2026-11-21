@@ -81,7 +81,7 @@ chown postgres:postgres "$workdir/socket"
 # Reproduce #24 deliberately: template0 is SQL_ASCII, while the test DB is UTF8.
 # No TCP listener, no password, and no access outside this temporary container.
 pg_as_postgres "$pg_bin_dir/initdb" -D "$pg_data" \
-  --encoding=SQL_ASCII --locale=C --auth-local=peer --auth-host=reject --no-instructions
+  --encoding=SQL_ASCII --locale=C --auth-local=peer --auth-host=reject
 cat >> "$pg_data/postgresql.conf" <<CONFIG
 listen_addresses = ''
 unix_socket_directories = '$workdir/socket'
