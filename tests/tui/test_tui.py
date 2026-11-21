@@ -235,7 +235,8 @@ class NewServiceTuiTests(unittest.TestCase):
         systemd = MagicMock()
         systemd.status.return_value = [self._state(n) for n in
                                        ('netbox', 'netbox-rq', 'nginx', 'postgresql', 'redis')]
-        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+        with patch('netbox_ops.tui.os.geteuid', return_value=0), \
+             patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
              patch('netbox_ops.tui.load_config'), \
              patch.object(menu, '_choose', return_value=2), \
              patch.object(menu, '_confirm_action', return_value=True) as confirmed, \

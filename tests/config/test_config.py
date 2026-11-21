@@ -25,7 +25,8 @@ GOOD_SYSTEMD_RESPONSE = '\n'.join([
 
 class ConfigurationTests(unittest.TestCase):
     def test_default_mapping(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with patch('netbox_ops.config.default_units', return_value=DEFAULT_UNITS.copy()), \
+             tempfile.TemporaryDirectory() as temp:
             config = load_config(Path(temp) / 'missing.json')
         self.assertEqual(config.units['postgresql'], 'postgresql.service')
 

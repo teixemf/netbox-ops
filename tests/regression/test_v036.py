@@ -19,6 +19,10 @@ from tests.helpers.fake_screen import FakeScreen
 
 class BackupFix036Tests(unittest.TestCase):
     def setUp(self):
+        # Test privileged flows without running the test process as root.
+        root_guard = patch('netbox_ops.backups._require_root')
+        root_guard.start()
+        self.addCleanup(root_guard.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
