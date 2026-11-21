@@ -163,6 +163,56 @@ class BackupView034Tests(unittest.TestCase):
         confirm.assert_not_called()
         job.assert_not_called()
 
+    def test_disabled_action_still_shows_keyboard_focus(self):
+        menu, screen = self.menu([9, curses.KEY_RIGHT, 27, 27], lang='en')
+        self.run_menu(menu)
+        focused = screen.frames[2]
+        self.assertTrue(any(text == '›' for _, _, text, _ in focused))
+        self.assertIn('Marked targets: none',
+                      ' '.join(text for _, _, text, _ in focused))
+
+    def test_marked_target_summary_is_independent_of_preview(self):
+        menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_DOWN,
+                                  27, 27, 27], lang='en')
+        self.run_menu(menu)
+        focused = screen.frames[3]
+        summaries = [text for _, _, text, _ in focused if 'Marked targets:' in text]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn(self.files[2].name, summaries[0])
+        self.assertNotIn(self.files[1].name, summaries[0])
+
+    def test_delete_confirmation_lists_targets_and_can_scroll(self):
+        names = [f'backup-{index}.dump' for index in range(5)]
+        screen = FakeScreen([curses.KEY_DOWN, 27], dimensions=(16, 72))
+        menu = CursesMenu(screen, Translator('en'))
+        self.assertFalse(menu._confirm_token('Delete', 'Delete these backups?',
+                                             'DELETE 5 BACKUPS', target_names=names))
+        first = ' '.join(text for _, _, text, _ in screen.frames[0])
+        scrolled = ' '.join(text for _, _, text, _ in screen.frames[1])
+        self.assertIn('1. backup-0.dump', first)
+        self.assertIn('2. backup-1.dump', scrolled)
+        self.assertNotIn('1. backup-0.dump', scrolled)
+        self.assertIn('2-4/5', scrolled)
+
+    def test_refresh_clears_mark_when_same_path_is_replaced(self):
+        menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_F5,
+                                  27, 27], lang='en')
+        original = self.manager.quick_list
+        count = 0
+
+        def listing():
+            nonlocal count
+            count += 1
+            if count == 2:
+                self.files[2].write_bytes(b'PGDMP-changed')
+            return original()
+
+        with patch.object(self.manager, 'quick_list', side_effect=listing):
+            self.run_menu(menu)
+        self.assertEqual(count, 2)
+        refreshed = ' '.join(text for _, _, text, _ in screen.frames[3])
+        self.assertIn('Marked targets: none', refreshed)
+
     def test_backup_actions_require_explicit_marks(self):
         menu, _ = self.menu([27], lang='en')
         for action in ('restore', 'delete', 'verify'):
