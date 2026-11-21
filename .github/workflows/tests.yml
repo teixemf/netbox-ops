@@ -2,8 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [main, dev, 'chore/**']
+    branches: [main, dev]
   pull_request:
+    branches: [main, dev]
 
 jobs:
   unittest:
