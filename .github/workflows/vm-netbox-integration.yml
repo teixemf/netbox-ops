@@ -7,6 +7,7 @@ on:
       - '.github/workflows/vm-netbox-integration.yml'
       - 'scripts/ci/netbox-vm-host.sh'
       - 'scripts/ci/netbox-vm-guest.sh'
+      - 'scripts/ci/netbox-vm-e2e.sh'
       - 'scripts/ci/netbox-vm-baseline.env'
   workflow_dispatch:
 
@@ -26,7 +27,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh
+          bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh scripts/ci/netbox-vm-e2e.sh
           source scripts/ci/netbox-vm-baseline.env
           if [[ ! "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]; then
             echo '::error::Invalid baseline tag'
@@ -61,4 +62,6 @@ jobs:
           echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify two isolated NetBox boots
+        env:
+          NETBOX_VM_E2E: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: bash scripts/ci/netbox-vm-host.sh verify
