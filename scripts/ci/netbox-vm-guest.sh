@@ -37,6 +37,42 @@ case "$mode" in
     (cd /opt/netbox && PYTHON=/usr/bin/python3.12 bash ./upgrade.sh --readonly)
     /opt/netbox/venv/bin/python -c 'import django; print("Django", django.get_version())'
 
+    # Migrate using local peer authentication and public placeholder values.
+    # No password, SSH key or runtime secret is ever written to this image.
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'CREATE ROLE netbox LOGIN'
+    runuser -u postgres -- createdb --owner=netbox netbox
+    cat > /opt/netbox/netbox/netbox/configuration.py <<'CONFIG'
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'netbox', 'USER': 'netbox', 'PASSWORD': '',
+        'HOST': '', 'PORT': '', 'CONN_MAX_AGE': 300,
+    },
+}
+REDIS = {
+    'tasks': {
+        'HOST': '127.0.0.1', 'PORT': 6379, 'USERNAME': '',
+        'PASSWORD': '', 'DATABASE': 0, 'SSL': False,
+    },
+    'caching': {
+        'HOST': '127.0.0.1', 'PORT': 6379, 'USERNAME': '',
+        'PASSWORD': '', 'DATABASE': 1, 'SSL': False,
+    },
+}
+SECRET_KEY = 'public-ci-placeholder-for-schema-migrations-not-a-real-secret-key'
+API_TOKEN_PEPPERS = {1: 'public-ci-placeholder-for-schema-migrations-not-a-real-api-pepper'}
+CONFIG
+    chown root:netbox /opt/netbox/netbox/netbox/configuration.py
+    chmod 0640 /opt/netbox/netbox/netbox/configuration.py
+    runuser -u netbox -- /opt/netbox/venv/bin/python \
+      /opt/netbox/netbox/manage.py migrate --noinput
+    test "$(runuser -u postgres -- psql -tAc 'SELECT count(*) FROM django_migrations' -d netbox)" -gt 0
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 \
+      -c 'ALTER ROLE netbox NOLOGIN PASSWORD NULL'
+    rm -f /opt/netbox/netbox/netbox/configuration.py
+    echo 'PASS: baseline database migrated; role locked and temporary config removed'
+
     cat > /etc/nginx/sites-available/netbox-ci <<'NGINX'
 server {
     listen 80 default_server;
@@ -53,12 +89,10 @@ NGINX
     nginx -t
     systemctl reload nginx
 
-    # netbox-ops has its own virtual environment and never alters NetBox's.
-    bash /opt/netbox-ops/install.sh
-    /usr/local/sbin/netbox-ops --version
+    # Keep the reusable image independent of every future netbox-ops commit.
     test -x /opt/netbox/venv/bin/python
-    test -x /opt/netbox-ops/venv/bin/python
-    echo 'PASS: NetBox, PostgreSQL, Redis, nginx and netbox-ops installed (no credentials)'
+    test ! -e /opt/netbox-ops
+    echo 'PASS: NetBox, PostgreSQL, Redis and nginx ready without netbox-ops source'
     ;;
 
   provision)
@@ -67,9 +101,9 @@ NGINX
     password=$(openssl rand -hex 24)
     secret=$(openssl rand -hex 32)
     pepper=$(openssl rand -hex 32)
+    # Each disposable VM re-enables the pre-migrated role with a new password.
     runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \
-      "CREATE ROLE netbox LOGIN PASSWORD '$password'"
-    runuser -u postgres -- createdb --owner=netbox netbox
+      "ALTER ROLE netbox LOGIN PASSWORD '$password'"
     cat > /opt/netbox/netbox/netbox/configuration.py <<EOF
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 DATABASES = {
@@ -100,8 +134,16 @@ EOF
     chmod 0640 /opt/netbox/netbox/netbox/configuration.py
     unset password secret pepper
 
+    # No migrations should be needed in a freshly provisioned overlay.
     runuser -u netbox -- /opt/netbox/venv/bin/python \
-      /opt/netbox/netbox/manage.py migrate --noinput
+      /opt/netbox/netbox/manage.py migrate --check --noinput
+
+    # Install netbox-ops from the checkout being tested (not the baseline).
+    install -d -o root -g root -m 0755 /opt/netbox-ops
+    tar -xzf /home/ubuntu/source.tar.gz -C /opt/netbox-ops
+    chown -R root:root /opt/netbox-ops
+    bash /opt/netbox-ops/install.sh
+    /usr/local/sbin/netbox-ops --version
     systemctl enable --now netbox netbox-rq
     for i in $(seq 1 60); do
       if curl --fail --silent --show-error --output /dev/null \
@@ -132,6 +174,11 @@ EOF
   sanitize)
     # No secrets are ever generated in prepare mode; remove build-time SSH identity.
     test ! -e /opt/netbox/netbox/netbox/configuration.py
+    test ! -e /opt/netbox-ops
+    role_state=$(runuser -u postgres -- psql -tA -d postgres \
+      -c "SELECT rolcanlogin::text || '|' || (rolpassword IS NULL)::text FROM pg_authid WHERE rolname = 'netbox'")
+    test "$role_state" = 'false|true'
+    rm -f /home/ubuntu/netbox-vm-guest.sh /home/ubuntu/source.tar.gz
     cloud-init clean --logs --machine-id
     rm -rf /home/ubuntu/.ssh /root/.ssh
     rm -f /etc/ssh/ssh_host_*
