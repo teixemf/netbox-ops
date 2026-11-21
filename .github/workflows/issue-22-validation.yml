@@ -1,0 +1,20 @@
+name: Temporary Issue 22 validation
+
+on:
+  push:
+    branches: [fix/issue-22-restore-environment]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.12-bookworm
+    steps:
+      - uses: actions/checkout@v5
+      - run: python -m unittest discover -s tests -p 'test_*.py' -v
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python -m pip install ruff==0.17.6
+      - run: ruff check .
