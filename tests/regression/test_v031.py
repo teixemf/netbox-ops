@@ -34,17 +34,21 @@ class BackupPerformanceTests(unittest.TestCase):
         self.cfg.backup_directory.mkdir(mode=0o700)
 
     def test_quick_listing_never_decompresses_archives_or_reads_manifest(self):
-        for number in range(30):
-            path = self.cfg.backup_directory / f'netbox-full-20261120T1234{number:02d}Z.full.tar.gz'
-            with path.open('wb') as file:
-                file.write(b'not-a-tar-large-archive')
+        for kind, count in (('full', 30), ('combined', 10)):
+            for number in range(count):
+                path = self.cfg.backup_directory / (
+                    f'netbox-{kind}-20261120T1234{number:02d}Z.{kind}.tar.gz')
+                with path.open('wb') as file:
+                    file.write(b'not-a-tar-large-archive')
         with patch('netbox_ops.backups._read_archive_metadata',
                    side_effect=AssertionError('Archive read!')), \
              patch('netbox_ops.backups._read_sidecar_metadata',
                    side_effect=AssertionError('Sidecar read!')):
             rows = self.manager.quick_list()
-        self.assertEqual(len(rows), 30)
-        self.assertTrue(all(row.kind == 'full' and row.size > 0 for row in rows))
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(sum(row.kind == 'full' for row in rows), 30)
+        self.assertEqual(sum(row.kind == 'combined' for row in rows), 10)
+        self.assertTrue(all(row.size > 0 for row in rows))
 
     def test_media_backup_produces_fast_metadata_sidecar_without_credentials(self):
         with patch('netbox_ops.backups._version', return_value='4.4.1'), \
