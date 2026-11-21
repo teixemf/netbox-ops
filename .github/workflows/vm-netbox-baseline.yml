@@ -1,6 +1,11 @@
 name: Publish reusable NetBox VM baseline
 
 on:
+  # Bootstrap the first baseline when this workflow reaches main.
+  # Later baseline refreshes are manual and use a new version tag.
+  push:
+    branches: [main]
+    paths: ['.github/workflows/vm-netbox-baseline.yml']
   workflow_dispatch:
 
 permissions:
