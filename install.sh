@@ -2,23 +2,23 @@
 # Initial local installation following a privileged Git clone to /opt/netbox-ops.
 set -euo pipefail
 if [[ "${EUID}" -ne 0 ]]; then
-    echo 'Execute como root: sudo /opt/netbox-ops/install.sh' >&2
+    echo 'Run as root: sudo /opt/netbox-ops/install.sh' >&2
     exit 1
 fi
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 if [[ "${ROOT}" != '/opt/netbox-ops' ]]; then
-    echo 'Instale o projecto em /opt/netbox-ops antes de executar install.sh.' >&2
+    echo 'Install the project in /opt/netbox-ops before running install.sh.' >&2
     exit 1
 fi
 
 # Do not change permissions on a non-root-controlled source tree.
 if [[ "$(stat -c %u -- "${ROOT}")" -ne 0 ]]; then
-    echo 'O directório /opt/netbox-ops deve pertencer a root.' >&2
+    echo 'The /opt/netbox-ops directory must be owned by root.' >&2
     exit 1
 fi
 # Supported families: RHEL (including Rocky/Alma) and Debian (incl. Ubuntu).
 if [[ ! -r /etc/os-release ]]; then
-    echo 'Não foi possível identificar o sistema Linux.' >&2
+    echo 'Unable to identify the Linux distribution.' >&2
     exit 1
 fi
 . /etc/os-release
@@ -26,21 +26,21 @@ DISTRO_IDS=" ${ID:-} ${ID_LIKE:-} "
 case "${DISTRO_IDS}" in
     *' debian '*|*' ubuntu '*) FAMILY=debian ;;
     *' rhel '*|*' centos '*|*' fedora '*) FAMILY=rhel ;;
-    *) echo 'Distribuição não suportada: requer RHEL ou Debian (ou derivada).' >&2; exit 1 ;;
+    *) echo 'Unsupported distribution: RHEL or Debian (or a derivative) is required.' >&2; exit 1 ;;
 esac
 for command in systemctl runuser pg_dump pg_restore psql; do
     if ! command -v "${command}" >/dev/null 2>&1; then
         # PGDG clients on RHEL may live outside PATH; the Python backend can
         # discover them, so don't demand bare PG tools at install time.
         if [[ "${command}" == pg_dump || "${command}" == pg_restore || "${command}" == psql ]]; then
-            echo "Aviso: ${command} fora do PATH; configure backup.pg_bin_directory se utilizar PGDG." >&2
+            echo "Warning: ${command} is not in PATH; configure backup.pg_bin_directory if using PGDG." >&2
         else
-            echo "Dependência do sistema em falta: ${command}." >&2
+            echo "Missing system dependency: ${command}." >&2
             exit 1
         fi
     fi
 done
-printf 'Distribuição detectada: %s (%s)\n' "${FAMILY}" "${PRETTY_NAME:-${ID}}"
+printf 'Detected distribution: %s (%s)\n' "${FAMILY}" "${PRETTY_NAME:-${ID}}"
 "${ROOT}/upgrade.sh"
 install -d -o root -g root -m 0700 /etc/netbox-ops /var/log/netbox-ops
 # Persistent data is deliberately outside /opt/netbox-ops (Git-rebuildable code).
@@ -63,14 +63,14 @@ LINK=/usr/sbin/netbox-ops
 TARGET=/usr/local/sbin/netbox-ops
 if [[ -L "${LINK}" ]]; then
     if [[ "$(readlink -- "${LINK}")" != "${TARGET}" ]]; then
-        echo "Erro: ${LINK} já aponta para outro destino." >&2
+        echo "Error: ${LINK} already points to another target." >&2
         exit 1
     fi
 elif [[ -e "${LINK}" ]]; then
-    echo "Erro: ${LINK} já existe e não será substituído." >&2
+    echo "Error: ${LINK} already exists and will not be replaced." >&2
     exit 1
 else
     ln -s -- "${TARGET}" "${LINK}"
 fi
 
-printf '\nInstalação concluída. Execute: sudo netbox-ops\n'
+printf '\nInstallation complete. Run: sudo netbox-ops\n'

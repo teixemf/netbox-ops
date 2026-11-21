@@ -18,11 +18,21 @@ It brings common administration tasks into one terminal-based tool, designed for
 ## Requirements
 
 - RHEL-family or Debian-family Linux with a local NetBox installation
-- Python **3.12** with `venv` support
+- Python **3.12 or newer** (Python 3.x), with working `venv` and `pip` support
 - systemd and PostgreSQL client tools
 - A terminal with Python `curses` support
 
 The application uses a separate Python virtual environment and does not modify NetBox's Python environment.
+
+Install Python from your distribution's official repositories when a compatible version and matching `venv` package are available. On older releases, including Ubuntu 22.04 (which ships Python 3.10 by default), the official repositories may not provide Python 3.12 or newer. In that case, consider upgrading the operating system or installing a separate Python from a trusted source. Do not replace the system's default Python.
+
+The installer looks for compatible Python versions in `/usr/bin` and `/usr/local/bin`, then checks `python3` on `PATH`. To choose an interpreter explicitly, set `PYTHON_BIN`:
+
+```bash
+sudo PYTHON_BIN=/path/to/python3.13 /opt/netbox-ops/install.sh
+```
+
+Before rebuilding an existing environment, `upgrade.sh` checks that the chosen interpreter can create a temporary virtual environment with pip. The installer never installs Python packages through the system package manager or adds external repositories.
 
 ## Getting started
 
