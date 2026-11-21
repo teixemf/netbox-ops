@@ -228,7 +228,7 @@ class NewServiceTuiTests(unittest.TestCase):
     def test_manage_multi_select_and_action(self):
         # Two service checkboxes and A to choose a single action.
         screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 32,
-                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27])
+                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [self._state(n) for n in
