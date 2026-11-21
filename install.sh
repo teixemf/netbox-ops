@@ -96,6 +96,18 @@ install_python_if_requested() {
     fi
 }
 
+check_config_paths() {
+    local directory="${1:-/etc/netbox-ops}"
+    if [[ -L "${directory}" ]]; then
+        printf 'Error: %s must not be a symbolic link.\n' "${directory}" >&2
+        return 1
+    fi
+    if [[ -L "${directory}/config.json" ]]; then
+        printf 'Error: %s/config.json must not be a symbolic link.\n' "${directory}" >&2
+        return 1
+    fi
+}
+
 # Allow isolated tests to source the helpers without running a privileged installer.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
@@ -116,6 +128,8 @@ if [[ "$(stat -c %u -- "${ROOT}")" -ne 0 ]]; then
     echo 'The /opt/netbox-ops directory must be owned by root.' >&2
     exit 1
 fi
+# Check before the installer makes any filesystem or package changes.
+check_config_paths
 # Supported families: RHEL (including Rocky/Alma) and Debian (incl. Ubuntu).
 if [[ ! -r /etc/os-release ]]; then
     echo 'Unable to identify the Linux distribution.' >&2

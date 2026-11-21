@@ -22,7 +22,7 @@ from tests.helpers.fake_screen import FakeScreen
 
 class NewBackupTests(unittest.TestCase):
     def setUp(self):
-        d = tempfile.TemporaryDirectory()
+        d = tempfile.TemporaryDirectory(dir='/root')
         self.addCleanup(d.cleanup)
         self.root = Path(d.name)
         self.media = self.root / 'media'
@@ -73,6 +73,7 @@ class NewBackupTests(unittest.TestCase):
                 {'id':'ldap','path':str(self.secret),'required':False},
                 {'id':'media','path':str(self.media),'required':False},
             ]}}))
+        config.chmod(0o600)
         loaded = load_config(config)
         self.assertEqual(loaded.artifacts, (('media',self.media,True),))
         self.assertEqual(loaded.media_directory, self.media)

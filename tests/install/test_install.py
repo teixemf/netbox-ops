@@ -44,5 +44,47 @@ class InstallerLinkTests(unittest.TestCase):
             self.assertEqual(link.readlink(), Path(temp) / 'different')
 
 
+class ConfigInstallPathTests(unittest.TestCase):
+    def check(self, directory: Path) -> subprocess.CompletedProcess[str]:
+        installer = Path(__file__).resolve().parents[2] / 'install.sh'
+        return subprocess.run(['bash', '-c', 'source "$1"; check_config_paths "$2"',
+                               'bash', str(installer), str(directory)],
+                              capture_output=True, text=True)
+
+    def test_missing_or_regular_config_is_allowed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / 'etc-netbox-ops'
+            self.assertEqual(self.check(directory).returncode, 0)
+            directory.mkdir()
+            config = directory / 'config.json'
+            config.write_text('{}', encoding='utf-8')
+            self.assertEqual(self.check(directory).returncode, 0)
+            self.assertEqual(config.read_text(encoding='utf-8'), '{}')
+
+    def test_rejects_config_symlink_and_broken_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / 'etc-netbox-ops'
+            directory.mkdir()
+            target = Path(temp) / 'real.json'
+            target.write_text('{}', encoding='utf-8')
+            config = directory / 'config.json'
+            for destination in (target, Path(temp) / 'nonexistent.json'):
+                with self.subTest(destination=destination):
+                    config.symlink_to(destination)
+                    result = self.check(directory)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('must not be a symbolic link', result.stderr)
+                    self.assertTrue(config.is_symlink())
+                    config.unlink()
+            self.assertEqual(target.read_text(encoding='utf-8'), '{}')
+
+    def test_rejects_config_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / 'etc-netbox-ops'
+            directory.symlink_to(Path(temp) / 'missing-directory')
+            self.assertNotEqual(self.check(directory).returncode, 0)
+            self.assertTrue(directory.is_symlink())
+
+
 if __name__ == '__main__':
     unittest.main()
