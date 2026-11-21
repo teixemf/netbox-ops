@@ -86,14 +86,14 @@ class NewBackupTests(unittest.TestCase):
     def test_full_restore_only_media_never_stages_database(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
-            full = self.manager.backup('full').path
+            full = self.manager.backup('combined').path
         self.file.write_bytes(b'changed')
         with patches[0], patches[1], patches[2], patches[3], \
              patch('netbox_ops.backups._preflight_db') as preflight, \
              patch('netbox_ops.backups._stage_db') as stage, \
              patch('netbox_ops.backups._rename_db') as rename:
-            restored = self.manager.restore('full', full, only='media')
-        self.assertEqual(restored.kind,'full')
+            restored = self.manager.restore('combined', full, only='media')
+        self.assertEqual(restored.kind,'combined')
         self.assertEqual(self.file.read_bytes(), b'original upload')
         preflight.assert_not_called()
         stage.assert_not_called()
@@ -103,7 +103,7 @@ class NewBackupTests(unittest.TestCase):
     def test_full_restore_only_db_never_replaces_media(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
-            full = self.manager.backup('full').path
+            full = self.manager.backup('combined').path
         self.file.write_bytes(b'changed')
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch('netbox_ops.backups._check_dump'), \
@@ -112,7 +112,7 @@ class NewBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._rename_db') as rename, \
              patch('netbox_ops.backups._terminate'), \
              patch('netbox_ops.backups._replace_artifacts') as replace:
-            restored = self.manager.restore('full',full, only='db')
+            restored = self.manager.restore('combined',full, only='db')
         self.assertIn('Previous database',restored.detail)
         self.assertEqual(self.file.read_bytes(), b'changed')
         self.assertEqual(rename.call_count,2)
@@ -122,7 +122,7 @@ class NewBackupTests(unittest.TestCase):
     def test_full_restore_all_combines_db_and_media(self):
         patches = self.patch_io()
         with patches[0], patches[1], patches[2], patches[4]:
-            full = self.manager.backup('full').path
+            full = self.manager.backup('combined').path
         self.file.write_bytes(b'changed')
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch('netbox_ops.backups._check_dump'), \
@@ -130,7 +130,7 @@ class NewBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._stage_db',side_effect=lambda cfg, p: 'nbo_stage_fake' if p.is_file() else (_ for _ in ()).throw(AssertionError('Staged dump missing'))), \
              patch('netbox_ops.backups._rename_db') as rename, \
              patch('netbox_ops.backups._terminate'):
-            self.manager.restore('full',full,only='all')
+            self.manager.restore('combined',full,only='all')
         self.assertEqual(self.file.read_bytes(),b'original upload')
         self.assertEqual(rename.call_count,2)
         self.assertEqual(len(self.manager.list_backups('media')),1)
@@ -169,7 +169,7 @@ class NewBackupTests(unittest.TestCase):
     def test_legacy_full_is_marked_incompatible(self):
         patches=self.patch_io()
         with patches[0],patches[1],patches[2],patches[4]:
-            full=self.manager.backup('full').path
+            full=self.manager.backup('combined').path
         # Rewrite manifest to pretend the old package backed up credentials.
         altered=self.backups/'legacy.full.tar.gz'
         with tarfile.open(full,'r:gz') as src, tarfile.open(altered,'w:gz') as dst:
@@ -185,7 +185,7 @@ class NewBackupTests(unittest.TestCase):
         found=[e for e in self.manager.describe_backups() if e.path==altered][0]
         self.assertTrue(found.legacy)
         with self.assertRaisesRegex(BackupError,'unknown artifact|media-only'):
-            self.manager.verify('full',altered)
+            self.manager.verify('combined',altered)
 
     def test_progress_has_complete_stage_counts(self):
         stages=[]
