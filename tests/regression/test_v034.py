@@ -143,12 +143,44 @@ class BackupView034Tests(unittest.TestCase):
         delete.assert_called_once()
         self.assertEqual(set(delete.call_args.args[0]), set(self.files[1:]))
 
-    def test_refresh_action_on_bar_reloads_inventory_once(self):
-        keys = [9, *(curses.KEY_RIGHT for _ in range(5)), 10, 27, 27]
-        menu, _ = self.menu(keys)
+    def test_f5_refresh_remains_available_without_refresh_button(self):
+        menu, screen = self.menu([curses.KEY_DOWN, curses.KEY_F5, 27, 27])
         with patch.object(self.manager, 'quick_list', wraps=self.manager.quick_list) as ls:
             self.run_menu(menu)
         self.assertEqual(ls.call_count, 2)
+        self.assertNotIn('[Actualizar]', ' '.join(text for _, _, text, _ in screen.writes))
+
+    def test_focused_but_unmarked_backup_cannot_be_modified(self):
+        menu, _ = self.menu([curses.KEY_DOWN, ord('v'), ord('d'), ord('r'),
+                             27, 27], lang='en')
+        with patch.object(self.manager, 'verify') as verify, \
+             patch.object(self.manager, 'delete_backups') as delete, \
+             patch.object(menu, '_confirm_token') as confirm, \
+             patch.object(menu, '_run_backup_job') as job:
+            self.run_menu(menu)
+        verify.assert_not_called()
+        delete.assert_not_called()
+        confirm.assert_not_called()
+        job.assert_not_called()
+
+    def test_backup_actions_require_explicit_marks(self):
+        menu, _ = self.menu([27], lang='en')
+        for action in ('restore', 'delete', 'verify'):
+            self.assertFalse(menu._backup_action_enabled(action, 3, 0, True))
+        self.assertTrue(menu._backup_action_enabled('restore', 3, 1, True))
+        self.assertFalse(menu._backup_action_enabled('restore', 3, 2, True))
+        self.assertTrue(menu._backup_action_enabled('verify', 3, 2, False))
+        self.assertTrue(menu._backup_action_enabled('delete', 3, 2, False))
+
+    def test_automatic_refresh_keeps_marked_backup_and_focus(self):
+        menu, screen = self.menu([curses.KEY_DOWN, 32, -1, 27, 27, 27])
+        now = iter([0, 1, 2, 11, 12, 13, 14, 15, 16])
+        with patch('netbox_ops.tui.time.monotonic', side_effect=lambda: next(now)), \
+             patch.object(self.manager, 'quick_list', wraps=self.manager.quick_list) as ls:
+            self.run_menu(menu)
+        self.assertEqual(ls.call_count, 2)
+        rendered = ' '.join(text for _, _, text, _ in screen.frames[3])
+        self.assertIn('[x]', rendered)
 
     def test_single_marked_restore_enter_reaches_confirmation_not_popup(self):
         menu, screen = self.menu([curses.KEY_DOWN, 32, 9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10,
