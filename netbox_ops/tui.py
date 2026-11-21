@@ -18,7 +18,9 @@ from . import __version__
 from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
 from .journal import JournalPanel
-from .services import ServiceError, ServiceState, SystemdServices, ServiceVersionCache
+from .menu import MENU_ACTIONS
+from .services import (ServiceError, ServiceState, SystemdServices, ServiceVersionCache,
+                       challenge, order_services, perform_service_batch)
 
 SECTIONS = {0: 'menu_services', 1: 'menu_backups', 2: 'menu_updates',
             6: 'menu_maintenance'}
@@ -28,8 +30,6 @@ ACTIONS = ('start', 'stop', 'restart', 'enable', 'disable')
 
 def make_main_items(t: Translator) -> list[tuple[str, str, tuple[str, ...]]]:
     """One source of truth for the menu labels and CLI commands."""
-    from .cli import MENU_ACTIONS
-
     items = [(f'{int(number):02d}  {t(key)}', 'action', (group, action))
              for number, group, action, key in MENU_ACTIONS]
     items.append((f'L   {t("tui_language")}', 'language', ()))
@@ -518,7 +518,6 @@ class CursesMenu:
     def _confirm_action(self, action: str, names: Sequence[str],
                         skipped: Sequence[str] = ()) -> bool:
         """Use exact, strong challenge for PostgreSQL and Redis changes."""
-        from .cli import challenge
         token = challenge(action, names)
         typed = ''
         while True:
@@ -604,7 +603,6 @@ class CursesMenu:
 
     def _execute_batch(self, systemd: SystemdServices,
                        action: str, names: Sequence[str]) -> None:
-        from .cli import perform_service_batch, order_services
         ordered = order_services(action, names)
         self._service_steps = []
         self._draw_progress(action, 0, len(ordered), ordered[0], 'running', '')

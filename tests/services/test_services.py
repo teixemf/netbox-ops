@@ -230,9 +230,9 @@ class LifecycleAndBatchTests(unittest.TestCase):
             [MagicMock(active='active', enabled='enabled')],
         ]
         events = []
-        with patch('netbox_ops.cli.os.geteuid', return_value=0), \
-             patch('netbox_ops.cli.ExclusiveLock'), \
-             patch('netbox_ops.cli.write_audit') as audit:
+        with patch('netbox_ops.services.os.geteuid', return_value=0), \
+             patch('netbox_ops.services.ExclusiveLock'), \
+             patch('netbox_ops.services.write_audit') as audit:
             results, failure = perform_service_batch(manager, 'start', ['netbox', 'redis'],
                                                      lambda *event: events.append(event))
         self.assertIsNone(failure)
@@ -245,9 +245,9 @@ class LifecycleAndBatchTests(unittest.TestCase):
     def test_batch_aborts_failure_without_touching_remaining(self):
         manager = MagicMock()
         manager.stop.side_effect = ServiceError('simulated failure')
-        with patch('netbox_ops.cli.os.geteuid', return_value=0), \
-             patch('netbox_ops.cli.ExclusiveLock'), \
-             patch('netbox_ops.cli.write_audit'):
+        with patch('netbox_ops.services.os.geteuid', return_value=0), \
+             patch('netbox_ops.services.ExclusiveLock'), \
+             patch('netbox_ops.services.write_audit'):
             results, failure = perform_service_batch(manager, 'stop',
                                                      ['postgresql', 'netbox'])
         self.assertEqual(results, [])
@@ -256,7 +256,7 @@ class LifecycleAndBatchTests(unittest.TestCase):
 
     def test_batch_requires_root_and_never_runs_any_service(self):
         manager = MagicMock()
-        with patch('netbox_ops.cli.os.geteuid', return_value=1000):
+        with patch('netbox_ops.services.os.geteuid', return_value=1000):
             with self.assertRaises(ServiceError):
                 perform_service_batch(manager, 'disable', ['netbox'])
         manager.disable.assert_not_called()
