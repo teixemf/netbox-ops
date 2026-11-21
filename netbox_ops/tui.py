@@ -1027,10 +1027,16 @@ class CursesMenu:
                     for i, action in enumerate(operations):
                         ax, row = positions[i]
                         enabled = any(action_enabled(action, state) for state in targets)
-                        style = ('selected' if focus == 'actions' and operation == i and enabled
+                        focused = focus == 'actions' and operation == i
+                        style = ('selected' if focused and enabled
                                  else ('title' if enabled else 'muted'))
                         self._put(actions_y + 1 + row, 4 + ax,
                                   f'[{labels[i]}]' if enabled else f' {labels[i]} ', style)
+                        if focused and not enabled:
+                            self._put(actions_y + 1 + row, 3 + ax, '›', 'section')
+                    self._put(actions_y + action_rows + 1, 4,
+                              self._targets_summary([s.name for s in targets], w - 8),
+                              'section' if targets else 'muted')
 
                     log_title_y = actions_y + action_rows + 3
                     if log_title_y <= h - 4:
@@ -1039,7 +1045,7 @@ class CursesMenu:
                                   else self.t('nbo_logs_title'), 'section')
                         if preview is not None:
                             self._put(log_title_y, min(42, max(28, w // 2)),
-                                      f'[{self.t("nbo_live_action")}: '
+                                      f'[L: {self.t("nbo_live_action")} '
                                       f'{"ON" if panel.live else "OFF"}]',
                                       'success' if panel.live else 'muted')
                         logs_y = log_title_y + 1
@@ -1122,27 +1128,52 @@ class CursesMenu:
             panel.close()
             self.stdscr.timeout(-1)
 
-    def _confirm_token(self, title: str, prompt: str, token: str) -> bool:
+    def _confirm_token(self, title: str, prompt: str, token: str,
+                       *, target_names: Sequence[str] = ()) -> bool:
         typed = ''
+        target_scroll = 0
+        visible = 0
         while True:
             frame = self._frame(title, self.t('tui_confirm_hint'))
             if frame:
                 h, w = frame
-                for i, line in enumerate(textwrap.wrap(safe_text(prompt), width=max(15,w-10))[:5]):
-                    self._put(4+i, 3, line, 'section')
-                self._put(min(11,h-4), 3, f'{self.t("nbo_type_token")} {token}: {typed}', 'title')
+                prompt_lines = 2 if target_names else 5
+                for i, line in enumerate(textwrap.wrap(safe_text(prompt), width=max(15, w - 10))[:prompt_lines]):
+                    self._put(4 + i, 3, line, 'section')
+                if target_names:
+                    visible = max(1, min(7, h - 13))
+                    self._put(6, 3, f'{self.t("nbo_operation_targets")} ({len(target_names)}):',
+                              'section')
+                    for i in range(target_scroll, min(len(target_names), target_scroll + visible)):
+                        self._put(7 + i - target_scroll, 4,
+                                  f'{i + 1}. {safe_text(target_names[i])}'[:max(10, w - 10)],
+                                  'muted')
+                    if len(target_names) > visible:
+                        self._put(7 + visible, 3,
+                                  f'↑↓ {target_scroll + 1}-{min(len(target_names), target_scroll + visible)}'
+                                  f'/{len(target_names)}', 'section')
+                token_y = min(11, h - 4) if not target_names else min(h - 4, 8 + visible)
+                self._put(token_y, 3, f'{self.t("nbo_type_token")} {token}: {typed}', 'title')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return False
-            if key in (10,13,curses.KEY_ENTER):
+            if target_names and key in (curses.KEY_UP, curses.KEY_DOWN,
+                                        curses.KEY_PPAGE, curses.KEY_NPAGE):
+                step = -1 if key in (curses.KEY_UP, curses.KEY_PPAGE) else 1
+                if key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+                    step *= max(1, visible)
+                target_scroll = max(0, min(max(0, len(target_names) - visible),
+                                           target_scroll + step))
+                continue
+            if key in (10, 13, curses.KEY_ENTER):
                 if typed == token:
                     return True
                 self._show_lines(self.t('nbo_confirm_failed_title'),
                                  [(self.t('nbo_confirm_failed_message'), 'failure')],
                                  self.t('nbo_confirm_failed_hint'))
                 return False
-            if key in (8,127,curses.KEY_BACKSPACE):
+            if key in (8, 127, curses.KEY_BACKSPACE):
                 typed = typed[:-1]
             elif 32 <= key <= 126 and len(typed) < 48:
                 typed += chr(key)
@@ -1248,6 +1279,19 @@ class CursesMenu:
                       'success' if step_status=='done' else
                       ('failure' if step_status=='error' else 'muted'))
         self.stdscr.refresh()
+
+    def _targets_summary(self, names: Sequence[str], width: int) -> str:
+        """Show marked operation targets without confusing them with keyboard focus."""
+        prefix = self.t('nbo_operation_targets') + ': '
+        if not names:
+            return (prefix + self.t('nbo_none_marked'))[:width]
+        summary = ', '.join(names)
+        if len(prefix) + len(summary) > width and len(names) > 1:
+            summary = f'{names[0]} (+{len(names) - 1})'
+        if len(prefix) + len(summary) > width:
+            tail = max(1, width - len(prefix) - 1)
+            summary = '…' + summary[-tail:]
+        return (prefix + summary)[:width]
 
     @staticmethod
     def _backup_action_positions(labels: Sequence[str], width: int) -> list[tuple[int, int]]:
@@ -1376,10 +1420,14 @@ class CursesMenu:
         def reload_inventory():
             nonlocal entries, cursor, scroll, refreshed
             selected = entries[cursor].path if cursor is not None and cursor < len(entries) else None
+            marked_fingerprints = {e.path: fingerprint(e) for e in entries if e.path in chosen}
             entries = manager.quick_list()
             refresh_storage()
             cursor = next((i for i, e in enumerate(entries) if e.path == selected), None)
             chosen.intersection_update(e.path for e in entries)
+            # A replaced backup must be marked again, even if its path is unchanged.
+            chosen.difference_update(e.path for e in entries if e.path in chosen
+                                     and marked_fingerprints[e.path] != fingerprint(e))
             scroll = min(scroll, max(0, len(entries) - 1))
             refreshed = time.monotonic()
             # Old entries remain cached only while the fingerprints still match.
@@ -1534,8 +1582,11 @@ class CursesMenu:
                                  else ('title' if enabled else 'muted'))
                         label = f'[{labels[i]}]' if enabled else f' {labels[i]} '
                         self._put(action_y + 1 + row, 4 + ax, label, style)
-                        if focus == 'actions' and action_index == i and not enabled and ax > 0:
-                            self._put(action_y + 1 + row, 3 + ax, '›', 'muted')
+                        if focus == 'actions' and action_index == i and not enabled:
+                            self._put(action_y + 1 + row, 3 + ax, '›', 'section')
+                    self._put(action_y + action_rows + 1, 4,
+                              self._targets_summary([e.path.name for e in marked], w - 8),
+                              'section' if marked else 'muted')
 
                     self._paint(list_title_y, 2, w - 4, h - 2 - list_title_y)
                     self._put(list_title_y, 3, f'{self.t("nbo_backup_table")}   '
@@ -1581,13 +1632,11 @@ class CursesMenu:
                 if key == 27:
                     if chosen:
                         chosen.clear()
-                    elif focus == 'actions':
-                        focus = 'backups'
-                    elif cursor is None:
-                        return
-                    else:
-                        cursor = None
+                    elif focus is not None:
                         focus = None
+                        cursor = None
+                    else:
+                        return
                 elif key == 9:
                     focus = 'backups' if focus=='actions' else 'actions'
                 elif key in (ord('*'), ord('s'), ord('S'), ord('a'), ord('A')):
@@ -1706,7 +1755,8 @@ class CursesMenu:
                     self.stdscr.timeout(-1)
                     notice = self.t('nbo_delete_selected_warning', count=len(targets),
                                     size=self._human_size(sum(e.size for e in targets)))
-                    if self._confirm_token(self.t('nbo_delete_title'), notice, token):
+                    if self._confirm_token(self.t('nbo_delete_title'), notice, token,
+                                           target_names=[e.path.name for e in targets]):
                         self._run_backup_job(self.t('nbo_delete_title'),
                              lambda cb, paths=[e.path for e in targets]:
                              self._delete_selected_job(manager, paths, cb))
