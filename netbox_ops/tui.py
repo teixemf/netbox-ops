@@ -1267,16 +1267,17 @@ class CursesMenu:
     def _backup_action_enabled(action: str, count: int, marked: int,
                                target_present: bool, *, restorable: bool = True,
                                verifiable: bool = True) -> bool:
-        if action in ('create', 'refresh'):
+        """Focus is never authorization for a backup operation."""
+        if action == 'create':
             return True
         if action == 'select_all':
             return count > 0
         if action == 'restore':
-            return target_present and marked <= 1 and restorable
+            return marked == 1 and target_present and restorable
         if action == 'verify':
-            return (marked > 0 or target_present) and verifiable
+            return marked > 0 and verifiable
         if action == 'delete':
-            return marked > 0 or target_present
+            return marked > 0
         return False
 
     def _choose_restore_scope(self, entry) -> str | None:
@@ -1339,7 +1340,7 @@ class CursesMenu:
         chosen: set[Path] = set()
         focus: str | None = None
         action_index = 0
-        backup_actions = ('create','verify','restore','delete','select_all','refresh')
+        backup_actions = ('create', 'verify', 'restore', 'delete', 'select_all')
         details: dict[tuple, object] = {}
         verified: set[tuple] = set()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='nbo-metadata')
@@ -1359,6 +1360,7 @@ class CursesMenu:
                 disk_error = safe_text(exc)
 
         refresh_storage()
+        refreshed = time.monotonic()
 
         def fingerprint(entry):
             # A replaced file or modified sidecar must not inherit stale detail.
@@ -1372,13 +1374,14 @@ class CursesMenu:
                 return (str(entry.path), 'missing')
 
         def reload_inventory():
-            nonlocal entries, cursor, scroll
+            nonlocal entries, cursor, scroll, refreshed
             selected = entries[cursor].path if cursor is not None and cursor < len(entries) else None
             entries = manager.quick_list()
             refresh_storage()
             cursor = next((i for i, e in enumerate(entries) if e.path == selected), None)
             chosen.intersection_update(e.path for e in entries)
-            scroll = 0
+            scroll = min(scroll, max(0, len(entries) - 1))
+            refreshed = time.monotonic()
             # Old entries remain cached only while the fingerprints still match.
             fresh = {fingerprint(e) for e in entries}
             for key in list(details):
@@ -1389,6 +1392,11 @@ class CursesMenu:
         self.stdscr.timeout(120)
         try:
             while True:
+                if time.monotonic() - refreshed >= 10:
+                    try:
+                        reload_inventory()
+                    except (BackupError, OSError):
+                        refreshed = time.monotonic()
                 if task is not None and task.done():
                     try:
                         details[task_key] = task.result()
@@ -1411,8 +1419,8 @@ class CursesMenu:
                     else:
                         task_key = entry_key
                         task = pool.submit(manager.describe_one, preview)
-                detail = details.get(entry_key, preview) if preview else None
-                ready = preview is not None and entry_key in details
+                detail = (details.get(entry_key) or preview) if preview else None
+                ready = preview is not None and details.get(entry_key) is not None
                 if len(marked) == 1 and fingerprint(marked[0]) not in details and task is None:
                     other = marked[0]
                     other_key = fingerprint(other)
@@ -1420,13 +1428,13 @@ class CursesMenu:
                     task = pool.submit(manager.describe_one, other)
                 # A legacy or corrupt archive is never presented as
                 # restorable. Metadata must be loaded before enabling restore.
-                action_targets = marked if marked else ([entry] if entry else [])
+                action_targets = marked
                 incompatible = any(item.kind == 'legacy' or
                                    (item is not None and
                                     getattr(details.get(fingerprint(item)), 'legacy', False))
                                    for item in action_targets)
-                can_restore = (len(action_targets) == 1 and
-                               fingerprint(action_targets[0]) in details and
+                can_restore = (len(marked) == 1 and
+                               details.get(fingerprint(marked[0])) is not None and
                                not incompatible)
                 # Legacy archives may be verified read-only, but never restored.
                 can_verify = bool(action_targets)
@@ -1611,12 +1619,14 @@ class CursesMenu:
                             cursor = move_selection(cursor,key,len(entries))
                 elif key in (10,13,curses.KEY_ENTER) and focus == 'actions':
                     action = backup_actions[action_index]
-                    target_present = bool(marked) if len(marked) == 1 else (not marked and entry is not None)
+                    target_present = len(marked) == 1
                     if not self._backup_action_enabled(action, len(entries), len(marked),
                                                        target_present, restorable=can_restore,
                                                        verifiable=can_verify):
-                        if action == 'restore' and (marked or entry is not None):
-                            if len(marked) > 1:
+                        if action == 'restore':
+                            if not marked:
+                                explanation = self.t('nbo_mark_backup_required')
+                            elif len(marked) > 1:
                                 explanation = self.t('nbo_restore_single')
                             elif incompatible:
                                 explanation = self.t('nbo_legacy_blocked')
@@ -1627,12 +1637,9 @@ class CursesMenu:
                         continue
                     key = {'create':ord('c'),'restore':ord('r'),'verify':ord('v'),
                            'delete':ord('d'),
-                           'select_all':ord('*'),'refresh':curses.KEY_F5}[action]
+                           'select_all':ord('*')}[action]
                     if key == ord('*'):
                         chosen = (set() if len(chosen)==len(entries) else {e.path for e in entries})
-                        continue
-                    if key == curses.KEY_F5:
-                        reload_inventory()
                         continue
                     # Continue through the same safe confirmation handlers as shortcuts.
                 if key in (ord('c'),ord('C')):
@@ -1647,14 +1654,11 @@ class CursesMenu:
                                                  lambda cb: manager.backup(kind,progress=cb))
                             reload_inventory()
                     self.stdscr.timeout(120)
-                elif key in (ord('r'),ord('R')) and (entry is not None or len(chosen) == 1):
-                    if len(chosen)>1:
-                        continue  # Restore is disabled for a multi-selection.
-                    if len(chosen)==1:
-                        entry = marked[0]
-                        entry_key = fingerprint(entry)
-                        detail = details.get(entry_key, entry)
-                        ready = entry_key in details
+                elif key in (ord('r'), ord('R')) and len(marked) == 1:
+                    entry = marked[0]
+                    entry_key = fingerprint(entry)
+                    detail = details.get(entry_key) or entry
+                    ready = details.get(entry_key) is not None
                     if not ready:
                         self._show_lines(self.t('nbo_detail_label'),
                                          [(self.t('nbo_metadata_loading'), 'muted')])
@@ -1694,8 +1698,8 @@ class CursesMenu:
                         self._run_backup_job(self.t('nbo_restore_choose'), restore_worker)
                         reload_inventory()
                     self.stdscr.timeout(120)
-                elif key in (ord('d'),ord('D')) and (entry is not None or chosen):
-                    targets = [e for e in entries if e.path in chosen] if chosen else [entry]
+                elif key in (ord('d'), ord('D')) and marked:
+                    targets = marked
                     token = 'DELETE BACKUP' if len(targets)==1 else f'DELETE {len(targets)} BACKUPS'
                     self.stdscr.timeout(-1)
                     notice = self.t('nbo_delete_selected_warning', count=len(targets),
@@ -1706,8 +1710,8 @@ class CursesMenu:
                              self._delete_selected_job(manager, paths, cb))
                         reload_inventory()
                     self.stdscr.timeout(120)
-                elif key in (ord('v'),ord('V')) and (entry is not None or chosen):
-                    targets = [e for e in entries if e.path in chosen] if chosen else [entry]
+                elif key in (ord('v'), ord('V')) and marked:
+                    targets = marked
                     self.stdscr.timeout(-1)
                     if self._run_backup_job(self.t('nbo_verify_title'),
                                             lambda cb, selected=targets: self._verify_job_many(manager, selected, cb)):
