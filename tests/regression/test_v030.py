@@ -176,6 +176,7 @@ class NewBackupTests(unittest.TestCase):
             for member in src:
                 if member.name=='manifest.json':
                     meta=json.load(src.extractfile(member))
+                    meta['kind'] = 'full'
                     meta['artifacts'].append({'id':'ldap','kind':'file'})
                     payload=json.dumps(meta).encode()
                     member.size=len(payload)
@@ -185,7 +186,7 @@ class NewBackupTests(unittest.TestCase):
         found=[e for e in self.manager.describe_backups() if e.path==altered][0]
         self.assertTrue(found.legacy)
         with self.assertRaisesRegex(BackupError,'unknown artifact|media-only'):
-            self.manager.verify('combined',altered)
+            self.manager.verify('full',altered)
 
     def test_progress_has_complete_stage_counts(self):
         stages=[]
