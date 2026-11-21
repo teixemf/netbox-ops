@@ -6,7 +6,6 @@ No environment values, command output or Django tracebacks are logged.
 """
 from __future__ import annotations
 
-import os
 import re
 import shlex
 import subprocess
@@ -16,8 +15,8 @@ from pathlib import Path
 from .config import Configuration
 
 _ASSIGNMENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-_USERNAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_.-]*\\$?$|^[0-9]+$')
-_ENVFILE = re.compile(r'(?P<path>/.*?) \\(ignore_errors=(?P<ignore>yes|no)\\)(?=\\s|$)')
+_USERNAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_.-]*\$?$|^[0-9]+$')
+_ENVFILE = re.compile(r'(?P<path>/.*?) \(ignore_errors=(?P<ignore>yes|no)\)(?=\s|$)')
 
 
 class RuntimeErrorSafe(Exception):
@@ -122,7 +121,7 @@ def _running_service_environment(pid: str) -> dict[str, str]:
         if not content:
             raise OSError('Empty process environment')
         result = {}
-        for entry in content.split(b'\\0'):
+        for entry in content.split(b'\0'):
             if not entry:
                 continue
             key, sep, value = entry.partition(b'=')
@@ -187,7 +186,6 @@ def netbox_runtime(cfg: Configuration, runner=subprocess.run) -> NetBoxRuntime:
 # It changes in-memory Django settings only; it cannot apply migrations.
 DJANGO_STAGE_CHECK = """
 import io
-import os
 import sys
 
 stage = os.environ.pop('NBO_STAGE_DATABASE')
