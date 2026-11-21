@@ -137,7 +137,7 @@ class BackupFix036Tests(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
         self.assertFalse(hasattr(self.manager, 'delete_all'))
         labels = [Translator('pt')('nbo_act_' + name) for name in
-                  ('create', 'verify', 'restore', 'delete', 'select_all', 'refresh')]
+                  ('create', 'verify', 'restore', 'delete', 'select_all')]
         self.assertIn('Validar', labels)
         self.assertNotIn('Apagar todos', labels)
 
@@ -148,7 +148,7 @@ class BackupFix036Tests(unittest.TestCase):
         Path(str(path) + '.json').write_text(json.dumps({
             'kind': 'db', 'tool': 'netbox-ops', 'format': 1,
             'netbox_version': '4.4.3', 'netbox_version_source': 'release.yaml'}))
-        screen = FakeScreen([curses.KEY_DOWN, 9, curses.KEY_RIGHT, 10, 27, 27, 27],
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, curses.KEY_RIGHT, 10, 27, 27, 27, 27],
                             dimensions=(35, 145))
         menu = CursesMenu(screen, Translator('pt'))
         called = []

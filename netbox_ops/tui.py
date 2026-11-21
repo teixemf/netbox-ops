@@ -937,7 +937,7 @@ class CursesMenu:
             self.stdscr.timeout(200)
 
     def _manage(self) -> None:
-        """Manage selected units, with an always-visible log panel and bottom actions."""
+        """Manage marked services with operations above the journal preview."""
         try:
             config = load_config(self.config_path)
             systemd = SystemdServices(config)
@@ -954,7 +954,7 @@ class CursesMenu:
         refreshed = time.monotonic()
         for state in states:
             self.versions.request(state.name)
-        operations = ACTIONS + ('live',)
+        operations = ACTIONS
         movement = (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k'),
                     curses.KEY_LEFT, curses.KEY_RIGHT)
         panel = JournalPanel(systemd)
@@ -969,137 +969,154 @@ class CursesMenu:
                     except ServiceError:
                         pass
                     refreshed = time.monotonic()
-                preview = states[index] if focus is not None else None
+                if states:
+                    index = min(index, len(states) - 1)
+                preview = states[index] if states and focus is not None else None
                 if preview and panel.name != preview.name:
                     panel.select(preview.name)
                 frame = self._frame(self.t('tui_manage_title'), self.t('nbo_manage_hint_035'))
                 if frame:
                     h, w = frame
-                    split = max(34, min(44, w//3))
-                    label_list = ([self.t('action_'+a) for a in ACTIONS] +
-                                  [f'{self.t("nbo_live_action")}: {"ON" if panel.live else "OFF"}'])
-                    positions = self._backup_action_positions(label_list, w - 10)
+                    split = max(31, min(44, w // 3))
+                    labels = [self.t('action_' + action) for action in operations]
+                    positions = self._backup_action_positions(labels, w - 10)
                     action_rows = max(row for _, row in positions) + 1
-                    actions_y = h - 5 - action_rows
-                    actions_top = actions_y - 1
-                    top_bottom = min(15, actions_top - 2)
-                    self._paint(3, 2, split - 3, max(1, top_bottom - 2))
-                    self._paint(3, split + 1, w - split - 4, max(1, top_bottom - 2))
+                    # Reserve the service list and operation bar first. On
+                    # short terminals the journal preview disappears entirely.
+                    actions_y = max(10, min(13 if h >= 27 else 11,
+                                             h - 3 - action_rows))
+                    self._paint(3, 2, split - 3, max(1, actions_y - 4))
+                    self._paint(3, split + 1, w - split - 4, max(1, actions_y - 4))
                     self._put(3, 3, self.t('nbo_services_label'), 'section')
-                    self._put(3, split+2, self.t('nbo_detail_label'), 'section')
+                    self._put(3, split + 2, self.t('nbo_detail_label'), 'section')
                     for i, state in enumerate(states):
-                        y=5+i
-                        selected = focus=='services' and index==i
+                        y = 5 + i
+                        if y >= actions_y:
+                            break
+                        selected = focus == 'services' and index == i
                         if selected:
-                            self._put(y, 3, ' '*(split-5), 'selected')
+                            self._put(y, 3, ' ' * (split - 5), 'selected')
                         self._put(y, 4, f"[{'x' if state.name in chosen else ' '}] {state.name:<13}",
                                   'selected' if selected else '')
                         self._put(y, 24, '●' if state.healthy else '○',
                                   'selected' if selected else state_style(state))
-                    self._put(11, 4, f'{self.t("nbo_chosen")}: {len(chosen)}','muted')
+                    if actions_y > 12:
+                        self._put(11, 4, f'{self.t("nbo_chosen")}: {len(chosen)}', 'muted')
                     if preview is not None:
-                        x=split+2
+                        x = split + 2
                         version = self.versions.get(preview.name)
-                        self._put(5,x,preview.unit,'title')
-                        self._put(6,x,f'{self.t("tui_col_state")}: {preview.active} ({preview.substate})', state_style(preview))
-                        self._put(7,x,f'{self.t("tui_col_startup")}: {preview.enabled}    PID: {preview.main_pid}','muted')
-                        self._put(9,x,f'CPU: {self.cpu_display.get(preview.name,"—")}    '
-                                      f'RAM: {self._human_size(preview.memory_current)}','section')
-                        self._put(10,x,f'{self.t("nbo_service_version")}: {version or "—"}','muted')
-                        self._put(11,x,f'{self.t("nbo_service_uptime")}: {self._uptime(preview.uptime_seconds)}','muted')
-                    else:
-                        self._put(5, split+2, self.t('nbo_select_to_preview'), 'muted')
-                    log_title_y=top_bottom+1
-                    self._put(log_title_y,3,(self.t('nbo_live_logs_title') if panel.live else self.t('nbo_logs_title')),'section')
-                    if preview:
-                        self._put(log_title_y,min(42,w-30),f'{preview.unit}    '
-                                  f'{self.t("nbo_live_action")}: {"ON" if panel.live else "OFF"}',
-                                  'success' if panel.live else 'muted')
-                    logs_y=log_title_y+1
-                    logs_height=max(0,actions_top-logs_y-2)
-                    self._paint(logs_y,2,w-4,logs_height+1)
-                    if preview is None:
-                        self._put(logs_y+1,4,self.t('nbo_select_to_preview'),'muted')
-                    else:
-                        self._render_journal(panel,logs_y+1,max(0,logs_height-1),4,w-10)
-                    self._put(actions_top,3,'─'*(w-7),'muted')
-                    self._put(actions_y,3,self.t('nbo_actions_label'),'section')
-                    targets=[s for s in states if s.name in chosen]
+                        props = (
+                            (5, preview.unit, 'title'),
+                            (6, f'{self.t("tui_col_state")}: {preview.active} ({preview.substate})',
+                             state_style(preview)),
+                            (7, f'{self.t("tui_col_startup")}: {preview.enabled}    PID: {preview.main_pid}', 'muted'),
+                            (9, f'CPU: {self.cpu_display.get(preview.name, "—")}    '
+                             f'RAM: {self._human_size(preview.memory_current)}', 'section'),
+                            (10, f'{self.t("nbo_service_version")}: {version or "—"}', 'muted'),
+                            (11, f'{self.t("nbo_service_uptime")}: {self._uptime(preview.uptime_seconds)}', 'muted'),
+                        )
+                        for y, value, style in props:
+                            if y < actions_y - 1:
+                                self._put(y, x, value, style)
+                    elif 5 < actions_y - 1:
+                        self._put(5, split + 2, self.t('nbo_select_to_preview'), 'muted')
+
+                    self._put(actions_y - 1, 3, '─' * (w - 7), 'muted')
+                    self._put(actions_y, 3, self.t('nbo_actions_label'), 'section')
+                    targets = [s for s in states if s.name in chosen]
                     for i, action in enumerate(operations):
-                        ax,row=positions[i]
-                        enabled=(preview is not None if action=='live'
-                                 else any(action_enabled(action,state) for state in targets))
-                        style=('selected' if focus=='actions' and operation==i and enabled
-                               else ('title' if enabled else 'muted'))
-                        self._put(actions_y+1+row,4+ax,
-                                  f'[{label_list[i]}]' if enabled else f' {label_list[i]} ',style)
+                        ax, row = positions[i]
+                        enabled = any(action_enabled(action, state) for state in targets)
+                        style = ('selected' if focus == 'actions' and operation == i and enabled
+                                 else ('title' if enabled else 'muted'))
+                        self._put(actions_y + 1 + row, 4 + ax,
+                                  f'[{labels[i]}]' if enabled else f' {labels[i]} ', style)
+
+                    log_title_y = actions_y + action_rows + 3
+                    if log_title_y <= h - 4:
+                        self._put(log_title_y, 3,
+                                  self.t('nbo_live_logs_title') if panel.live
+                                  else self.t('nbo_logs_title'), 'section')
+                        if preview is not None:
+                            self._put(log_title_y, min(42, max(28, w // 2)),
+                                      f'[{self.t("nbo_live_action")}: '
+                                      f'{"ON" if panel.live else "OFF"}]',
+                                      'success' if panel.live else 'muted')
+                        logs_y = log_title_y + 1
+                        logs_height = max(0, h - 3 - logs_y)
+                        if logs_height:
+                            self._paint(logs_y, 2, w - 4, logs_height)
+                            if preview is None:
+                                self._put(logs_y + 1, 4, self.t('nbo_select_to_preview'), 'muted')
+                            else:
+                                self._render_journal(panel, logs_y + 1,
+                                                     max(0, logs_height - 1), 4, w - 10)
                     self.stdscr.refresh()
-                key=self.stdscr.getch()
+                key = self.stdscr.getch()
                 if key == 3:
                     return
                 if key == 27:
-                    if focus is not None:
-                        focus=None
+                    if chosen:
+                        chosen.clear()
+                    elif focus is not None:
+                        focus = None
                     else:
                         return
-                elif key in (curses.KEY_F5,ord('r'),ord('R')):
-                    refreshed=0
+                elif key in (curses.KEY_F5, ord('r'), ord('R')):
+                    refreshed = 0
                     if panel.name:
                         panel.refresh()
-                elif key in (ord('l'),ord('L')) and preview:
+                elif key in (ord('l'), ord('L')) and preview:
                     panel.set_live(not panel.live)
-                elif key==9:
-                    focus = 'actions' if focus=='services' else 'services'
+                elif key == 9:
+                    focus = 'services' if focus == 'actions' else 'actions'
                 elif key in movement:
                     if focus is None:
-                        focus='services'
-                        index=len(states)-1 if key in (curses.KEY_UP,ord('k')) else 0
-                    elif focus=='services':
-                        index=move_selection(index,key,len(states))
+                        focus = 'services'
+                        index = len(states) - 1 if key in (curses.KEY_UP, ord('k')) else 0
+                    elif focus == 'services':
+                        index = move_selection(index, key, len(states))
                     else:
-                        operation=(operation+(1 if key in (curses.KEY_RIGHT,curses.KEY_DOWN,ord('j')) else -1))%len(operations)
-                elif focus=='services' and key==32:
-                    name=states[index].name
+                        operation = (operation + (1 if key in (
+                            curses.KEY_RIGHT, curses.KEY_DOWN, ord('j')) else -1)) % len(operations)
+                elif focus == 'services' and key == 32 and states:
+                    name = states[index].name
                     if name in chosen:
                         chosen.remove(name)
                     else:
                         chosen.add(name)
-                elif key in (10,13,curses.KEY_ENTER):
-                    if focus=='services':
-                        self._expanded_logs(systemd,states[index],panel)
+                elif key in (10, 13, curses.KEY_ENTER):
+                    if focus == 'services' and states:
+                        self._expanded_logs(systemd, states[index], panel)
                         self.stdscr.timeout(150)
-                        refreshed=0
-                    elif focus=='actions':
-                        action=operations[operation]
-                        if action=='live':
-                            if preview:
-                                panel.set_live(not panel.live)
-                            continue
-                        targets=[s for s in states if s.name in chosen]
-                        eligible=[s.name for s in targets if action_enabled(action,s)]
-                        skipped=[s.name for s in targets if s.name not in eligible]
+                        refreshed = 0
+                    elif focus == 'actions':
+                        action = operations[operation]
+                        targets = [s for s in states if s.name in chosen]
+                        eligible = [s.name for s in targets if action_enabled(action, s)]
+                        skipped = [s.name for s in targets if s.name not in eligible]
                         if not eligible:
                             self._show_lines(self.t('tui_error_title'),
-                                             [(self.t('nbo_no_applicable'),'muted')])
+                                             [(self.t('nbo_no_applicable'), 'muted')])
                             self.stdscr.timeout(150)
                             continue
-                        if os.geteuid()!=0:
+                        if os.geteuid() != 0:
                             self._show_lines(self.t('tui_error_title'),
-                                             [(self.t('root_required_actions'),'failure')])
+                                             [(self.t('root_required_actions'), 'failure')])
                             self.stdscr.timeout(150)
                             continue
-                        confirmed=(self._confirm_action(action,eligible,skipped=skipped)
-                                   if skipped else self._confirm_action(action,eligible))
+                        confirmed = (self._confirm_action(action, eligible, skipped=skipped)
+                                     if skipped else self._confirm_action(action, eligible))
                         if confirmed:
-                            self._execute_batch(systemd,action,eligible)
+                            self._execute_batch(systemd, action, eligible)
                             try:
-                                states=systemd.status(SERVICE_NAMES)
+                                states = systemd.status(SERVICE_NAMES)
                                 self._update_cpu(states)
                             except ServiceError:
                                 pass
                             if panel.name:
                                 panel.refresh()
-                            refreshed=time.monotonic()
+                            refreshed = time.monotonic()
                         self.stdscr.timeout(150)
         finally:
             panel.close()
@@ -1250,16 +1267,17 @@ class CursesMenu:
     def _backup_action_enabled(action: str, count: int, marked: int,
                                target_present: bool, *, restorable: bool = True,
                                verifiable: bool = True) -> bool:
-        if action in ('create', 'refresh'):
+        """Focus is never authorization for a backup operation."""
+        if action == 'create':
             return True
         if action == 'select_all':
             return count > 0
         if action == 'restore':
-            return target_present and marked <= 1 and restorable
+            return marked == 1 and target_present and restorable
         if action == 'verify':
-            return (marked > 0 or target_present) and verifiable
+            return marked > 0 and verifiable
         if action == 'delete':
-            return marked > 0 or target_present
+            return marked > 0
         return False
 
     def _choose_restore_scope(self, entry) -> str | None:
@@ -1322,7 +1340,7 @@ class CursesMenu:
         chosen: set[Path] = set()
         focus: str | None = None
         action_index = 0
-        backup_actions = ('create','verify','restore','delete','select_all','refresh')
+        backup_actions = ('create', 'verify', 'restore', 'delete', 'select_all')
         details: dict[tuple, object] = {}
         verified: set[tuple] = set()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='nbo-metadata')
@@ -1342,6 +1360,7 @@ class CursesMenu:
                 disk_error = safe_text(exc)
 
         refresh_storage()
+        refreshed = time.monotonic()
 
         def fingerprint(entry):
             # A replaced file or modified sidecar must not inherit stale detail.
@@ -1355,13 +1374,14 @@ class CursesMenu:
                 return (str(entry.path), 'missing')
 
         def reload_inventory():
-            nonlocal entries, cursor, scroll
+            nonlocal entries, cursor, scroll, refreshed
             selected = entries[cursor].path if cursor is not None and cursor < len(entries) else None
             entries = manager.quick_list()
             refresh_storage()
             cursor = next((i for i, e in enumerate(entries) if e.path == selected), None)
             chosen.intersection_update(e.path for e in entries)
-            scroll = 0
+            scroll = min(scroll, max(0, len(entries) - 1))
+            refreshed = time.monotonic()
             # Old entries remain cached only while the fingerprints still match.
             fresh = {fingerprint(e) for e in entries}
             for key in list(details):
@@ -1372,6 +1392,11 @@ class CursesMenu:
         self.stdscr.timeout(120)
         try:
             while True:
+                if time.monotonic() - refreshed >= 10:
+                    try:
+                        reload_inventory()
+                    except (BackupError, OSError):
+                        refreshed = time.monotonic()
                 if task is not None and task.done():
                     try:
                         details[task_key] = task.result()
@@ -1394,8 +1419,8 @@ class CursesMenu:
                     else:
                         task_key = entry_key
                         task = pool.submit(manager.describe_one, preview)
-                detail = details.get(entry_key, preview) if preview else None
-                ready = preview is not None and entry_key in details
+                detail = (details.get(entry_key) or preview) if preview else None
+                ready = preview is not None and details.get(entry_key) is not None
                 if len(marked) == 1 and fingerprint(marked[0]) not in details and task is None:
                     other = marked[0]
                     other_key = fingerprint(other)
@@ -1403,13 +1428,13 @@ class CursesMenu:
                     task = pool.submit(manager.describe_one, other)
                 # A legacy or corrupt archive is never presented as
                 # restorable. Metadata must be loaded before enabling restore.
-                action_targets = marked if marked else ([entry] if entry else [])
+                action_targets = marked
                 incompatible = any(item.kind == 'legacy' or
                                    (item is not None and
                                     getattr(details.get(fingerprint(item)), 'legacy', False))
                                    for item in action_targets)
-                can_restore = (len(action_targets) == 1 and
-                               fingerprint(action_targets[0]) in details and
+                can_restore = (len(marked) == 1 and
+                               details.get(fingerprint(marked[0])) is not None and
                                not incompatible)
                 # Legacy archives may be verified read-only, but never restored.
                 can_verify = bool(action_targets)
@@ -1417,136 +1442,138 @@ class CursesMenu:
                 if frame:
                     h, w = frame
                     pane = w >= 104
-                    split = min(max(60, w * 3 // 5), 93) if pane else w - 3
-
-                    # One horizontal action bar, wrapping only when the window
-                    # is too narrow; never overlap the footer or the inventory.
-                    labels = [self.t('nbo_act_' + a) for a in backup_actions]
+                    split = max(56, min(92, w * 55 // 100)) if pane else w - 3
+                    labels = [self.t('nbo_act_' + action) for action in backup_actions]
                     positions = self._backup_action_positions(labels, w - 8)
                     action_rows = max(row for _, row in positions) + 1
-                    action_y = max(10, h - 5 - action_rows)
-                    list_bottom = action_y - 2
-                    show_storage = pane and split >= 57 and h >= 31 and action_y >= 25
-                    chart_y = min(6 + min(13, len(entries)) + 2, action_y - 12) if show_storage else 0
-                    self._paint(3, 2, split - 3, max(2, list_bottom - 2))
+                    # Preserve the top details and middle actions. The list
+                    # gets the remaining width and vertical space.
+                    action_y = min(max(6, h // 3), h - action_rows - 7)
+                    list_title_y = action_y + action_rows + 2
+                    self._paint(3, 2, w - 4, max(1, action_y - 4))
+                    self._put(3, 3, self.t('nbo_detail_label'), 'section')
+                    detail_width = max(12, split - 8)
+                    if preview is None:
+                        if action_y > 6:
+                            self._put(5, 4, self.t('nbo_backup_select_preview'), 'muted')
+                    else:
+                        kind_label = self.t('nbo_kind_' + preview.kind)
+                        # Prioritize identifying and safety metadata on short
+                        # terminals; combine type and purpose on one row.
+                        purpose = (self.t('nbo_pre_restore') if detail.purpose == 'pre_restore'
+                                   else self.t('nbo_manual'))
+                        props = [
+                            self.t('nbo_name') + ': ' + preview.path.name,
+                            (self.t('nbo_type') + ': ' + kind_label + '   ' +
+                             self.t('nbo_purpose') + ': ' + purpose),
+                            self.t('nbo_date') + ': ' + self._pretty_date(detail.created) + ' UTC',
+                            self.t('nbo_size') + ': ' + self._human_size(preview.size),
+                            (self.t('nbo_version') + ': ' + (detail.version or '—')
+                             if ready else self.t('nbo_metadata_loading')),
+                            (self.t('nbo_legacy_blocked') if ready and detail.legacy else
+                             (self.t('nbo_integrity_ok') if entry_key in verified else
+                              self.t('nbo_integrity_not_checked'))),
+                            self.t('nbo_contents') + ': ' +
+                            self.t('nbo_kind_contents_' + preview.kind),
+                        ]
+                        y = 5
+                        for j, value in enumerate(props):
+                            for line in textwrap.wrap(safe_text(value), detail_width,
+                                                      break_long_words=True)[:2] or ['']:
+                                if y >= action_y - 1:
+                                    break
+                                self._put(y, 4, line,
+                                          'failure' if j == 5 and ready and detail.legacy
+                                          else ('title' if j == 0 else 'muted'))
+                                y += 1
+
                     if pane:
-                        self._paint(3, split + 1, w - split - 4, max(2, list_bottom - 2))
-                    self._put(3, 3, self.t('nbo_backup_table'), 'section')
-                    # Center each heading over its fixed-width data column.
-                    show_tag = split >= 77
+                        x = split + 2
+                        self._put(3, x, self.t('nbo_storage_label'), 'section')
+                        show_ring = (disk_info is not None and action_y >= 15
+                                     and w >= 120)
+                        legend_x = x + 23 if show_ring else x
+                        if disk_info is not None:
+                            used, other, free, total, count = disk_info
+                            legends = ((self.t('nbo_storage_used'), used, 'disk_backup'),
+                                       (self.t('nbo_storage_other'), other, 'disk_other'),
+                                       (self.t('nbo_storage_free'), free, 'disk_free'))
+                            if show_ring:
+                                self._draw_storage_ring(x + 1, 5, disk_info)
+                            for j, (label, value, color) in enumerate(legends):
+                                self._put(5 + j, legend_x,
+                                          f'● {label}: {self._human_size(value)}', color)
+                            self._put(8, legend_x,
+                                      f'{self.t("nbo_storage_count")}: {count}', 'muted')
+                        elif disk_error and action_y >= 7:
+                            self._put(5, x, disk_error[:max(10, w - x - 3)], 'warning')
+                        if len(marked) >= 2 and action_y >= 11:
+                            sy = action_y - 4
+                            self._put(sy, legend_x, self.t('nbo_multi_title') +
+                                      f' ({len(marked)})', 'section')
+                            self._put(sy + 1, legend_x, f'{self.t("nbo_total_size")}: '
+                                      f'{self._human_size(sum(e.size for e in marked))}', 'muted')
+                            self._put(sy + 2, legend_x,
+                                      self.t('nbo_multi_restore_disabled'), 'warning')
+                    elif disk_info is not None and action_y >= 10:
+                        used, other, free, total, count = disk_info
+                        self._put(action_y - 2, 4,
+                                  f'{self.t("nbo_storage_label")}: '
+                                  f'{self._human_size(used)} / {self._human_size(total)}',
+                                  'muted')
+
+                    self._put(action_y - 1, 3, '─' * (w - 7), 'muted')
+                    self._put(action_y, 3, self.t('nbo_backup_actions_label'), 'section')
+                    for i, action in enumerate(backup_actions):
+                        ax, row = positions[i]
+                        enabled = self._backup_action_enabled(
+                            action, len(entries), len(marked),
+                            len(marked) == 1, restorable=can_restore,
+                            verifiable=can_verify)
+                        style = ('selected' if focus == 'actions' and action_index == i and enabled
+                                 else ('title' if enabled else 'muted'))
+                        label = f'[{labels[i]}]' if enabled else f' {labels[i]} '
+                        self._put(action_y + 1 + row, 4 + ax, label, style)
+                        if focus == 'actions' and action_index == i and not enabled and ax > 0:
+                            self._put(action_y + 1 + row, 3 + ax, '›', 'muted')
+
+                    self._paint(list_title_y, 2, w - 4, h - 2 - list_title_y)
+                    self._put(list_title_y, 3, f'{self.t("nbo_backup_table")}   '
+                              f'{self.t("nbo_backup_count")}: {len(entries)}   '
+                              f'{self.t("nbo_chosen")}: {len(chosen)}', 'section')
+                    show_tag = w >= 95
                     header = (f'{"":4}{self.t("nbo_type"):^7} {self.t("nbo_date"):^16} '
                               f'{self.t("nbo_size"):^10} ')
                     if show_tag:
                         header += f'{self.t("nbo_tag_header"):^12} '
-                    remaining = max(8, split - 7 - len(header))
+                    remaining = max(8, w - 7 - len(header))
                     header += f'{self.t("nbo_name"):^{remaining}}'
-                    self._put(4, 4, header[:max(8, split-7)], 'muted')
-                    visible = max(1, min(action_y - 8,
-                                         chart_y - 7 if show_storage else action_y - 8))
-                    if cursor is not None:
+                    self._put(list_title_y + 1, 4, header[:w - 7], 'muted')
+                    visible = max(0, h - list_title_y - 4)
+                    if cursor is not None and visible:
                         if cursor < scroll:
                             scroll = cursor
                         elif cursor >= scroll + visible:
                             scroll = cursor - visible + 1
                     for i in range(scroll, min(len(entries), scroll + visible)):
                         item = entries[i]
-                        row = 5 + i - scroll
+                        row = list_title_y + 2 + i - scroll
                         selected = i == cursor and focus != 'actions'
                         if selected:
-                            self._put(row, 3, ' ' * (split - 5), 'selected')
+                            self._put(row, 3, ' ' * (w - 6), 'selected')
                         content = (f"[{'x' if item.path in chosen else ' '}] {item.kind:<7} "
                                    f'{self._pretty_date(item.created):<16} '
                                    f'{self._human_size(item.size):>10} ')
                         if show_tag:
-                            tag = (self.t('nbo_pre_restore_short') if item.purpose=='pre_restore' else self.t('nbo_manual_short'))
+                            tag = (self.t('nbo_pre_restore_short')
+                                   if item.purpose == 'pre_restore'
+                                   else self.t('nbo_manual_short'))
                             content += f'{tag:<12} '
                         content += item.path.name
-                        self._put(row, 4, content[:max(8, split - 7)],
+                        self._put(row, 4, content[:w - 7],
                                   'selected' if selected else '')
-                    if not entries:
-                        self._put(6, 4, self.t('nbo_backup_empty'), 'muted')
-
-                    if pane:
-                        x = split + 2
-                        right_width = max(10, w - x - 3)
-                        self._put(3, x, self.t('nbo_detail_label'), 'section')
-                        if preview is None:
-                            self._put(5, x, self.t('nbo_backup_select_preview'), 'muted')
-                        else:
-                            kind_label = self.t('nbo_kind_' + preview.kind)
-                            props = [
-                                self.t('nbo_type') + ': ' + kind_label,
-                                self.t('nbo_date') + ': ' + self._pretty_date(detail.created) + ' UTC',
-                                self.t('nbo_size') + ': ' + self._human_size(preview.size),
-                                (self.t('nbo_version') + ': ' + (detail.version or '—')
-                                 if ready else self.t('nbo_metadata_loading')),
-                                (self.t('nbo_legacy_blocked') if ready and detail.legacy else
-                                 (self.t('nbo_integrity_ok') if entry_key in verified else
-                                  self.t('nbo_integrity_not_checked'))),
-                                self.t('nbo_contents') + ': ' +
-                                self.t('nbo_kind_contents_' + preview.kind),
-                                self.t('nbo_purpose') + ': ' + (self.t('nbo_pre_restore')
-                                 if detail.purpose == 'pre_restore' else self.t('nbo_manual')),
-                                self.t('nbo_name') + ':',
-                            ]
-                            y = 5
-                            for j, value in enumerate(props):
-                                for line in textwrap.wrap(safe_text(value), right_width,
-                                                          break_long_words=True)[:2] or ['']:
-                                    if y >= action_y - 2:
-                                        break
-                                    self._put(y, x, line,
-                                              'failure' if j == 4 and ready and detail.legacy else 'muted')
-                                    y += 1
-                            for line in textwrap.wrap(preview.path.name, right_width,
-                                                      break_long_words=True)[:5]:
-                                if y >= action_y - 2:
-                                    break
-                                self._put(y, x, line, 'title')
-                                y += 1
-
-                    if show_storage and disk_info is not None:
-                        self._put(chart_y - 1, 4, self.t('nbo_storage_label'), 'section')
-                        self._draw_storage_ring(5, chart_y, disk_info)
-                        bx = 25
-                        used, other, free, total, count = disk_info
-                        legends = ((self.t('nbo_storage_used'), used, 'disk_backup'),
-                                   (self.t('nbo_storage_other'), other, 'disk_other'),
-                                   (self.t('nbo_storage_free'), free, 'disk_free'))
-                        for j, (label, value, color) in enumerate(legends):
-                            self._put(chart_y + j + 1, bx,
-                                      f'● {label}: {self._human_size(value)}'[:max(8, split-bx-2)],
-                                      color)
-                        self._put(chart_y + 5, bx,
-                                  f'{self.t("nbo_storage_count")}: {count}', 'muted')
-                    elif show_storage and disk_error:
-                        self._put(chart_y, 4, disk_error[:max(10, split-7)], 'warning')
-
-                    if pane and len(marked) >= 2 and action_y >= 25:
-                        sy = min(20, action_y - 5)
-                        if sy > 17:
-                            self._put(sy, x, self.t('nbo_multi_title') +
-                                      f' ({len(marked)})', 'section')
-                            self._put(sy+1, x, f'{self.t("nbo_total_size")}: '
-                                      f'{self._human_size(sum(e.size for e in marked))}', 'muted')
-                            self._put(sy+2, x, self.t('nbo_multi_restore_disabled')[:right_width], 'warning')
-                    self._put(action_y - 2, 3, f'{self.t("nbo_backup_count")}: {len(entries)}  |  '
-                              f'{self.t("nbo_chosen")}: {len(chosen)}', 'muted')
-                    self._put(action_y - 1, 3, '─' * (w - 7), 'muted')
-                    self._put(action_y, 3, self.t('nbo_backup_actions_label'), 'section')
-                    target = (marked[0] if len(marked) == 1 else entry) if len(marked) <= 1 else None
-                    for i, action in enumerate(backup_actions):
-                        ax, row = positions[i]
-                        enabled = self._backup_action_enabled(action, len(entries),
-                                                               len(marked), target is not None,
-                                                               restorable=can_restore,
-                                                               verifiable=can_verify)
-                        style = ('selected' if focus == 'actions' and action_index == i and enabled
-                                 else ('title' if enabled else 'muted'))
-                        text = f'[{labels[i]}]' if enabled else f' {labels[i]} '
-                        self._put(action_y + 1 + row, 4 + ax, text, style)
-                        if focus == 'actions' and action_index == i and not enabled and ax > 0:
-                            self._put(action_y + 1 + row, 3 + ax, '›', 'muted')
+                    if not entries and visible:
+                        self._put(list_title_y + 2, 4, self.t('nbo_backup_empty'), 'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
                 if key == 3:
@@ -1594,12 +1621,14 @@ class CursesMenu:
                             cursor = move_selection(cursor,key,len(entries))
                 elif key in (10,13,curses.KEY_ENTER) and focus == 'actions':
                     action = backup_actions[action_index]
-                    target_present = bool(marked) if len(marked) == 1 else (not marked and entry is not None)
+                    target_present = len(marked) == 1
                     if not self._backup_action_enabled(action, len(entries), len(marked),
                                                        target_present, restorable=can_restore,
                                                        verifiable=can_verify):
-                        if action == 'restore' and (marked or entry is not None):
-                            if len(marked) > 1:
+                        if action == 'restore':
+                            if not marked:
+                                explanation = self.t('nbo_mark_backup_required')
+                            elif len(marked) > 1:
                                 explanation = self.t('nbo_restore_single')
                             elif incompatible:
                                 explanation = self.t('nbo_legacy_blocked')
@@ -1610,12 +1639,9 @@ class CursesMenu:
                         continue
                     key = {'create':ord('c'),'restore':ord('r'),'verify':ord('v'),
                            'delete':ord('d'),
-                           'select_all':ord('*'),'refresh':curses.KEY_F5}[action]
+                           'select_all':ord('*')}[action]
                     if key == ord('*'):
                         chosen = (set() if len(chosen)==len(entries) else {e.path for e in entries})
-                        continue
-                    if key == curses.KEY_F5:
-                        reload_inventory()
                         continue
                     # Continue through the same safe confirmation handlers as shortcuts.
                 if key in (ord('c'),ord('C')):
@@ -1630,14 +1656,11 @@ class CursesMenu:
                                                  lambda cb: manager.backup(kind,progress=cb))
                             reload_inventory()
                     self.stdscr.timeout(120)
-                elif key in (ord('r'),ord('R')) and (entry is not None or len(chosen) == 1):
-                    if len(chosen)>1:
-                        continue  # Restore is disabled for a multi-selection.
-                    if len(chosen)==1:
-                        entry = marked[0]
-                        entry_key = fingerprint(entry)
-                        detail = details.get(entry_key, entry)
-                        ready = entry_key in details
+                elif key in (ord('r'), ord('R')) and len(marked) == 1:
+                    entry = marked[0]
+                    entry_key = fingerprint(entry)
+                    detail = details.get(entry_key) or entry
+                    ready = details.get(entry_key) is not None
                     if not ready:
                         self._show_lines(self.t('nbo_detail_label'),
                                          [(self.t('nbo_metadata_loading'), 'muted')])
@@ -1677,8 +1700,8 @@ class CursesMenu:
                         self._run_backup_job(self.t('nbo_restore_choose'), restore_worker)
                         reload_inventory()
                     self.stdscr.timeout(120)
-                elif key in (ord('d'),ord('D')) and (entry is not None or chosen):
-                    targets = [e for e in entries if e.path in chosen] if chosen else [entry]
+                elif key in (ord('d'), ord('D')) and marked:
+                    targets = marked
                     token = 'DELETE BACKUP' if len(targets)==1 else f'DELETE {len(targets)} BACKUPS'
                     self.stdscr.timeout(-1)
                     notice = self.t('nbo_delete_selected_warning', count=len(targets),
@@ -1689,8 +1712,8 @@ class CursesMenu:
                              self._delete_selected_job(manager, paths, cb))
                         reload_inventory()
                     self.stdscr.timeout(120)
-                elif key in (ord('v'),ord('V')) and (entry is not None or chosen):
-                    targets = [e for e in entries if e.path in chosen] if chosen else [entry]
+                elif key in (ord('v'), ord('V')) and marked:
+                    targets = marked
                     self.stdscr.timeout(-1)
                     if self._run_backup_job(self.t('nbo_verify_title'),
                                             lambda cb, selected=targets: self._verify_job_many(manager, selected, cb)):
