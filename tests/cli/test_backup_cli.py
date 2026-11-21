@@ -14,12 +14,22 @@ from netbox_ops.i18n import Translator
 class BackupCliTests(unittest.TestCase):
     def test_commands_and_confirmation_flags(self):
         parser = build_parser()
-        for action in ('db', 'media', 'full'):
+        for action in ('db', 'media', 'combined'):
             self.assertEqual(parser.parse_args(['backup', action]).action, action)
+        for action in ('db', 'media', 'combined', 'full'):
             args = parser.parse_args(['restore', action, '--file', '/tmp/a.dump', '--yes',
                                       '--acknowledge-data-loss'])
             self.assertTrue(args.acknowledge_data_loss)
+        for kind in ('combined', 'full'):
+            args = parser.parse_args(['restore', kind, '--file', '/tmp/a.tar.gz', '--only', 'db'])
+            self.assertEqual(args.only, 'db')
+            self.assertEqual(parser.parse_args(['backup', 'list', '--kind', kind]).kind, kind)
+            self.assertEqual(parser.parse_args(['backup', 'verify', '--kind', kind,
+                                                '--file', '/tmp/a.tar.gz']).kind, kind)
         self.assertEqual(parser.parse_args(['backup', 'list', '--kind', 'db']).kind, 'db')
+        with patch('sys.stderr', new_callable=io.StringIO):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(['backup', 'full'])
 
     def test_no_restore_when_only_yes(self):
         import contextlib
