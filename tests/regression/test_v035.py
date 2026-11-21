@@ -25,6 +25,10 @@ class RestoreTagTests(unittest.TestCase):
         root_guard = patch('netbox_ops.backups._require_root')
         root_guard.start()
         self.addCleanup(root_guard.stop)
+        # File locking is tested separately; do not access global /run paths here.
+        lock_guard = patch('netbox_ops.backups.ExclusiveLock')
+        lock_guard.start()
+        self.addCleanup(lock_guard.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
