@@ -138,7 +138,7 @@ class RealBackupTests(unittest.TestCase):
                 self.assertEqual(manifest['files'][name]['sha256'], sha256(expected))
         self.assertEqual(self.manager.list_backups('media'), [report.path])
 
-    def test_full_backup(self):
+    def test_combined_backup(self):
         systemd = MagicMock()
         systemd.status.return_value = []
         with patch('netbox_ops.backups.SystemdServices', return_value=systemd):
@@ -162,7 +162,7 @@ class RealBackupTests(unittest.TestCase):
             self.assertEqual(
                 archive.extractfile('payload/media/uploads/photo.bin').read(), self.photo,
             )
-        extracted = report.path.parent.parent / 'full-dump.dump'
+        extracted = report.path.parent.parent / 'combined-dump.dump'
         extracted.write_bytes(dump_bytes)
         self._verify_dump_data(extracted)
         self.assertFalse(list(self.cfg.backup_directory.glob('.nbo-build-*')))
