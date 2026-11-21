@@ -104,6 +104,17 @@ class PythonPackageInstallTests(unittest.TestCase):
             self.assertNotIn('UNEXPECTED_PROMPT', result.stdout)
             self.assertFalse((directory / 'calls.log').exists())
 
+
+    def test_confirmation_decline_has_distinct_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.run_bash(
+                'PYTHON_PACKAGE_VERSION=3.12; '
+                'confirm_python_install() { return 2; }; '
+                'install_python_if_requested debian',
+                Path(temp),
+            )
+            self.assertEqual(result.returncode, 2)
+
     def test_confirmation_requires_interactive_terminal(self):
         with tempfile.TemporaryDirectory() as temp:
             result = self.run_bash('confirm_python_install', Path(temp))

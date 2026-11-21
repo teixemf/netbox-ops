@@ -10,29 +10,6 @@ python_is_supported() {
     (( 10#${BASH_REMATCH[1]} >= 12 ))
 }
 
-python_installation_guidance() {
-    local distro_ids=''
-    if [[ -r /etc/os-release ]]; then
-        # Used for guidance only; no packages are installed by this script.
-        distro_ids=" $(. /etc/os-release; printf '%s %s' "${ID:-}" "${ID_LIKE:-}") "
-    fi
-    case "${distro_ids}" in
-        *' debian '*|*' ubuntu '*)
-            echo 'Check your distribution repositories for Python 3.12+ and its matching venv package.' >&2
-            echo 'If available, install both with apt (for example: python3.12 and python3.12-venv).' >&2
-            ;;
-        *' rhel '*|*' centos '*|*' fedora '*)
-            echo 'Check your distribution repositories for Python 3.12+ and its matching pip/venv support.' >&2
-            echo 'If available, install the packages with dnf.' >&2
-            ;;
-        *)
-            echo 'Check your distribution official repositories for Python 3.12+ with venv and pip support.' >&2
-            ;;
-    esac
-    echo 'If your OS release does not provide it, consider upgrading the OS or installing a separate Python from a trusted source.' >&2
-    echo 'Set PYTHON_BIN to the compatible interpreter path; do not replace the system Python.' >&2
-}
-
 select_python() {
     local candidate
     PYTHON=''
@@ -56,7 +33,6 @@ select_python() {
     local directory path
     local -A seen=()
     local -a directories=()
-    local path_entry
     IFS=':' read -r -a directories <<< "${PATH:-}"
     directories+=(/usr/bin /usr/local/bin /opt/python/bin /opt/python3/bin /opt/local/bin)
     for directory in "${directories[@]}"; do
@@ -83,7 +59,6 @@ select_python() {
     done
     echo 'Error: Python 3.12 or newer was not found.' >&2
     return 1
-
 }
 
 PRECHECK_VENV=''

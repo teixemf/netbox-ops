@@ -37,49 +37,67 @@ confirm_python_install() {
         echo 'Python installation requires an interactive terminal; no changes were made.' >&2
         return 1
     fi
-    read -r -p 'Python 3.12 is available. Install it now? [y/N] ' response || return 1
+    read -r -p "Python ${PYTHON_PACKAGE_VERSION} is available. Install it now? [y/N] " response || return 1
     case "${response,,}" in
         y|yes) return 0 ;;
-        *) echo 'Python installation declined; no packages were installed.' >&2; return 1 ;;
+        *) echo 'Python installation declined; no packages were installed.' >&2; return 2 ;;
     esac
 }
 
 install_python_if_requested() {
     local family="$1"
+    local minor interpreter support
     local -a install_command=()
-    case "${family}" in
-        debian)
-            if ! command -v apt-cache >/dev/null 2>&1 ||
-               ! command -v apt-get >/dev/null 2>&1 ||
-               ! apt_has_candidate python3.12 ||
-               ! apt_has_candidate python3.12-venv; then
-                echo 'Python 3.12 and python3.12-venv are not both available in the configured APT repositories.' >&2
-                return 1
-            fi
-            install_command=(apt-get --no-remove install --yes --no-install-recommends python3.12 python3.12-venv)
-            ;;
-        rhel)
-            if ! command -v dnf >/dev/null 2>&1 ||
-               ! dnf_has_candidate python3.12 ||
-               ! dnf_has_candidate python3.12-pip; then
-                echo 'Python 3.12 and python3.12-pip are not both available in the configured DNF repositories.' >&2
-                return 1
-            fi
-            install_command=(dnf -y --setopt=install_weak_deps=False install python3.12 python3.12-pip)
-            ;;
-        *)
-            echo 'Cannot offer automatic Python installation on this distribution.' >&2
-            return 1
-            ;;
-    esac
+    PYTHON_PACKAGE_VERSION=''
 
-    confirm_python_install || return 1
-    printf 'Installing Python 3.12 from configured repositories...\n'
-    if ! "${install_command[@]}"; then
-        echo 'Python package installation failed. Check the package-manager output above.' >&2
+    # Prefer the oldest supported version with all required packages available.
+    # A bounded set avoids scanning repositories or installing untested majors.
+    for minor in {12..20}; do
+        interpreter="python3.${minor}"
+        case "${family}" in
+            debian)
+                support="${interpreter}-venv"
+                if command -v apt-cache >/dev/null 2>&1 &&
+                   command -v apt-get >/dev/null 2>&1 &&
+                   apt_has_candidate "${interpreter}" &&
+                   apt_has_candidate "${support}"; then
+                    install_command=(apt-get --no-remove install --yes --no-install-recommends "${interpreter}" "${support}")
+                else
+                    continue
+                fi
+                ;;
+            rhel)
+                support="${interpreter}-pip"
+                if command -v dnf >/dev/null 2>&1 &&
+                   dnf_has_candidate "${interpreter}" &&
+                   dnf_has_candidate "${support}"; then
+                    install_command=(dnf -y --setopt=install_weak_deps=False install "${interpreter}" "${support}")
+                else
+                    continue
+                fi
+                ;;
+            *)
+                echo 'Cannot offer automatic Python installation on this distribution.' >&2
+                return 1
+                ;;
+        esac
+        PYTHON_PACKAGE_VERSION="3.${minor}"
+        break
+    done
+
+    if [[ -z "${PYTHON_PACKAGE_VERSION}" ]]; then
+        echo 'No compatible Python packages with virtual-environment support are available in the configured repositories.' >&2
         return 1
     fi
+
+    confirm_python_install || return $?
+    printf 'Installing Python %s from configured repositories...\n' "${PYTHON_PACKAGE_VERSION}"
+    if ! "${install_command[@]}"; then
+        echo 'Python package installation failed. Check the package-manager output above.' >&2
+        return 3
+    fi
 }
+
 # Allow isolated tests to source the helpers without running a privileged installer.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
@@ -131,8 +149,13 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
     # Sourcing upgrade.sh only loads its Python-detection helpers.
     . "${ROOT}/upgrade.sh"
     if ! (select_python >/dev/null 2>&1); then
-        if ! install_python_if_requested "${FAMILY}"; then
-            python_not_found_message
+        if install_python_if_requested "${FAMILY}"; then
+            : # Re-run detection in upgrade.sh after package installation.
+        else
+            status=$?
+            if [[ "${status}" -eq 1 ]]; then
+                python_not_found_message
+            fi
             exit 1
         fi
     fi
