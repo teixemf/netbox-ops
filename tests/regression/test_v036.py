@@ -70,7 +70,7 @@ class BackupFix036Tests(unittest.TestCase):
              patch('netbox_ops.backups._version', return_value='4.4.3'), \
              patch('netbox_ops.backups.SystemdServices') as systemd_for_create:
             systemd_for_create.return_value.status.return_value=[]
-            source = self.manager.backup('full').path
+            source = self.manager.backup('combined').path
         self.assertEqual((self.media / 'upload.txt').read_text(), 'untouched')
         systemd = MagicMock()
         systemd.status.return_value = []
@@ -91,8 +91,8 @@ class BackupFix036Tests(unittest.TestCase):
              patch('netbox_ops.backups.write_audit'), \
              patch.object(self.manager, '_backup') as safety, \
              patch('netbox_ops.backups._replace_artifacts') as replace:
-            result = self.manager.restore('full', source, only='db')
-        self.assertEqual(result.kind, 'full')
+            result = self.manager.restore('combined', source, only='db')
+        self.assertEqual(result.kind, 'combined')
         self.assertEqual(observed, ['netbox.dump'])
         rename.assert_called()
         replace.assert_not_called()
