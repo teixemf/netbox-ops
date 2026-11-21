@@ -137,7 +137,9 @@ EOF
     rm -f /etc/ssh/ssh_host_*
     sync
     fstrim / || true
-    systemctl poweroff --no-block
+    test ! -e /home/ubuntu/.ssh/authorized_keys
+    test ! -e /etc/ssh/ssh_host_ed25519_key
+    echo 'PASS: build-time guest credentials removed'
     ;;
 
   *)
