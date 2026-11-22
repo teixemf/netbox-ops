@@ -254,8 +254,8 @@ class Ui040Tests(unittest.TestCase):
         self.assertIn('Restore PostgreSQL data only',text)
         self.assertIn('Restore database and media together',text)
 
-    def test_version_is_040(self):
-        self.assertEqual(__version__,'0.4.0')
+    def test_version_format(self):
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
 
 if __name__=='__main__':

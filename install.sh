@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Initial local installation following a privileged Git clone to /opt/netbox-ops.
+# Initial local installation from a trusted release archive or privileged Git clone.
 set -euo pipefail
 
 

@@ -30,7 +30,7 @@ class BackupFix036Tests(unittest.TestCase):
         self.manager = BackupManager(self.cfg)
 
     def test_version(self):
-        self.assertEqual(__version__, '0.4.0')
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
     def test_reverse_chronological_order_across_types_and_pre_restore(self):
         self.cfg.backup_directory.mkdir()

@@ -36,10 +36,10 @@ Before rebuilding an existing environment, `upgrade.sh` checks that the chosen i
 
 ## Getting started
 
-Install from a prepared release archive on the NetBox server:
+Download the `netbox-ops-v0.5.0.tar.gz` asset from the GitHub Release, then install it on the NetBox server. The archive contains a top-level `netbox-ops/` directory:
 
 ```bash
-sudo unzip -o netbox-ops-v0.4.0.zip -d /opt
+sudo tar -xzf netbox-ops-v0.5.0.tar.gz -C /opt
 sudo /opt/netbox-ops/install.sh
 sudo netbox-ops
 ```
@@ -60,9 +60,9 @@ Review `config.example.json` and the configuration stored under `/etc/netbox-ops
 
 ## Project status
 
-**Current version: 0.4.0 — early development.**
+**Current version: 0.5.0 — early development.**
 
-Automated tests cover isolated scenarios, but **real restore procedures have not yet been validated on RHEL and Debian systems**. Do not use restore functionality on production systems until you have tested recovery in a disposable environment with appropriate snapshots or non-production data.
+CI includes real PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9. Disposable NetBox VM smoke tests cover service restart and database backup verification, but **full end-to-end NetBox restore and recovery testing remains outstanding**. Do not use restore functionality on production systems until you have tested recovery in a disposable environment with appropriate snapshots or non-production data.
 
 ## Contributing
 

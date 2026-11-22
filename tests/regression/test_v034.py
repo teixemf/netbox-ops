@@ -44,7 +44,7 @@ class BackupView034Tests(unittest.TestCase):
             menu._backups()
 
     def test_version(self):
-        self.assertEqual(__version__, '0.4.0')
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
     def test_action_bar_single_row_wide_terminal_and_wraps_narrow(self):
         labels = [Translator('pt')('nbo_act_' + action) for action in
