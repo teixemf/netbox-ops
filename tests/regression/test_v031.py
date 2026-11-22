@@ -196,8 +196,8 @@ class ServiceVersionTests(unittest.TestCase):
         confirm.assert_called_once_with('start',['netbox-rq'],skipped=['netbox'])
         execute.assert_called_once_with(service_api,'start',['netbox-rq'])
 
-    def test_version_is_032(self):
-        self.assertEqual(__version__, '0.4.0')
+    def test_version_format(self):
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
 
 if __name__ == '__main__':

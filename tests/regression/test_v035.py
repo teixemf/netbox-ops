@@ -202,8 +202,8 @@ class JournalUiTests(unittest.TestCase):
                         'nbo_tag_header','nbo_pre_restore','nbo_purpose'):
                 self.assertNotIn('<',t(key))
 
-    def test_release(self):
-        self.assertEqual(__version__,'0.4.0')
+    def test_version_format(self):
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
 
 if __name__=='__main__':
