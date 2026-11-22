@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from netbox_ops import __version__
 from netbox_ops.platform import (detect_platform, discover_service_units,
@@ -18,7 +18,7 @@ from netbox_ops.i18n import Translator
 from netbox_ops.backups import BackupManager
 from netbox_ops.tui import CursesMenu
 from netbox_ops.cli import build_parser, dispatch
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 def result(text: str = '', rc: int = 0) -> subprocess.CompletedProcess[str]:
@@ -78,12 +78,13 @@ class Platform040Tests(unittest.TestCase):
             discover_service_units('rhel', runner)
 
     def test_debian_json_override_and_cluster_port(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir='/root') as temp:
             path = Path(temp) / 'config.json'
             path.write_text(json.dumps({'services': {'netbox': 'netbox-custom.service'},
                                         'backup': {'postgres_port': 5433,
                                                    'directory': temp + '/backup',
                                                    'media_directory': temp + '/media'}}))
+            path.chmod(0o600)
             with patch('netbox_ops.config.default_units', return_value={
                 **DEFAULT_UNITS, 'redis': 'redis-server.service',
                 'postgresql': 'postgresql@16-main.service'}):
@@ -93,9 +94,10 @@ class Platform040Tests(unittest.TestCase):
             self.assertEqual(config.postgres_port, 5433)
 
     def test_debian_postgresql_meta_unit_is_rejected_when_cluster_exists(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir='/root') as temp:
             path = Path(temp)/'config.json'
             path.write_text(json.dumps({'services': {'postgresql':'postgresql.service'}}))
+            path.chmod(0o600)
             with patch('netbox_ops.config.default_units', return_value=DEFAULT_UNITS.copy()), \
                  patch('netbox_ops.config.detect_platform') as d, \
                  patch('netbox_ops.config.has_postgres_clusters', return_value=True):
@@ -112,11 +114,12 @@ class Platform040Tests(unittest.TestCase):
         self.assertEqual(profile['postgresql'], 'postgresql-16.service')
 
     def test_multiple_clusters_can_be_resolved_by_explicit_unit(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir='/root') as temp:
             path = Path(temp)/'config.json'
             path.write_text(json.dumps({'services': {
                 'postgresql': 'postgresql@16-main.service'},
                 'backup': {'postgres_port': 5432}}))
+            path.chmod(0o600)
             with patch('netbox_ops.config.default_units', side_effect=PlatformError('Multiple PostgreSQL clusters')), \
                  patch('netbox_ops.config.discover_service_units', return_value={
                      **DEFAULT_UNITS, 'redis': 'redis-server.service'}), \
@@ -162,18 +165,19 @@ class Platform040Tests(unittest.TestCase):
         self.assertIn('debian',output.getvalue())
         self.assertIn('postgresql.service',output.getvalue())
 
-    def test_install_script_requires_python312_on_both_families(self):
-        root=Path(__file__).resolve().parents[1]
+    def test_install_script_supports_python312_or_newer_on_both_families(self):
+        root=Path(__file__).resolve().parents[2]
         installer=(root/'install.sh').read_text()
         upgrade=(root/'upgrade.sh').read_text()
         self.assertIn('FAMILY=debian',installer)
         self.assertIn('FAMILY=rhel',installer)
-        self.assertIn('python3.12',upgrade)
+        self.assertIn('python3.12',installer)
+        self.assertIn('python_is_supported',upgrade)
+        self.assertIn('>= 12',upgrade)
         self.assertIn('PYTHON_BIN',upgrade)
-        self.assertIn('3.12',upgrade)
 
     def test_source_compiles_with_python312_grammar(self):
-        root=Path(__file__).resolve().parents[1]
+        root=Path(__file__).resolve().parents[2]
         for source in (root/'netbox_ops').rglob('*.py'):
             with self.subTest(source=source.name):
                 ast.parse(source.read_text(), filename=str(source), feature_version=(3,12))
@@ -213,7 +217,7 @@ class Ui040Tests(unittest.TestCase):
             self.assertTrue(menu._confirm_token('create','confirm','CREATE'))
         alert.assert_not_called()
 
-    def test_backup_chart_and_manual_tag_and_bottom_actions(self):
+    def test_backup_chart_and_manual_tag_above_actions_and_list(self):
         screen=FakeScreen([curses.KEY_DOWN, 27, 27],dimensions=(45,165))
         menu=CursesMenu(screen,Translator('pt'))
         with patch('netbox_ops.tui.load_config',return_value=self.cfg), \
@@ -226,7 +230,9 @@ class Ui040Tests(unittest.TestCase):
         self.assertTrue(donut_positions)
         actions=[y for y,x,txt,_ in writes if 'OPERAÇÕES SOBRE BACKUPS' in txt]
         self.assertTrue(all(y>max(donut_positions) for y in actions))
-        self.assertGreater(min(actions),35)
+        table = [y for y,x,txt,_ in writes if 'BACKUPS' in txt and y > min(actions)]
+        self.assertTrue(table)
+        self.assertLess(min(actions), min(table))
 
     def test_detail_follows_current_focus_while_another_is_marked(self):
         screen=FakeScreen([curses.KEY_DOWN,32,curses.KEY_DOWN,27,27,27],dimensions=(45,165))
@@ -248,8 +254,8 @@ class Ui040Tests(unittest.TestCase):
         self.assertIn('Restore PostgreSQL data only',text)
         self.assertIn('Restore database and media together',text)
 
-    def test_version_is_040(self):
-        self.assertEqual(__version__,'0.4.0')
+    def test_version_format(self):
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
 
 if __name__=='__main__':

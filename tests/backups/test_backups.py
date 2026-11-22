@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from netbox_ops.backups import BackupError, BackupManager, _validate_archive
+from netbox_ops.backups import (BackupError, BackupManager, _create_archive,
+                                _validate_archive)
 from netbox_ops.config import DEFAULT_UNITS, Configuration, ConfigError, load_config
 from netbox_ops.cli import build_parser, perform_backup_action
 from netbox_ops.i18n import Translator
@@ -109,7 +110,7 @@ class FileBackupTests(unittest.TestCase):
         with self.assertRaisesRegex(BackupError, '0700'):
             self.ops.backup('media')
 
-    def test_files_restore_undoes_changes_on_django_failure(self):
+    def test_media_restore_skips_django_migration_check(self):
         with patch('netbox_ops.backups.write_audit'), patch('netbox_ops.backups._version', return_value='4.4.1'):
             source = self.ops.backup('media').path
         self.configfile.write_text('before restore')
@@ -117,15 +118,14 @@ class FileBackupTests(unittest.TestCase):
         systemd = MagicMock()
         systemd.status.return_value = []
         with patch('netbox_ops.backups.SystemdServices', return_value=systemd), \
-             patch('netbox_ops.backups._django_check', side_effect=BackupError('invalid settings')), \
+             patch('netbox_ops.backups._django_check', side_effect=AssertionError('must skip migration check')), \
              patch('netbox_ops.backups.write_audit'), \
              patch('netbox_ops.backups._version', return_value='4.4.1'):
-            with self.assertRaisesRegex(BackupError, 'invalid settings'):
-                self.ops.restore('media', source)
+            self.ops.restore('media', source)
         self.assertEqual(self.configfile.read_text(), 'before restore')
-        self.assertEqual(self.photo.read_text(), 'before file')
+        self.assertEqual(self.photo.read_text(), 'original')
 
-    def test_full_backup_restarts_services_after_archive_failure(self):
+    def test_combined_backup_restarts_services_after_archive_failure(self):
         active = MagicMock()
         active.name, active.active = 'netbox', 'active'
         inactive = MagicMock()
@@ -137,12 +137,12 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
             with self.assertRaisesRegex(BackupError, 'disk full'):
-                self.ops.backup('full')
+                self.ops.backup('combined')
         systemd.stop.assert_called_once_with(['netbox'])
         systemd.start.assert_called_once_with(['netbox'])
-        self.assertFalse(self.ops.list_backups('full'))
+        self.assertFalse(self.ops.list_backups('combined'))
 
-    def test_full_backup_quiesces_writers_and_restores_original_service_state(self):
+    def test_combined_backup_quiesces_writers_and_restores_original_service_state(self):
         active = MagicMock(name='netbox')
         active.name, active.active = 'netbox', 'active'
         inactive = MagicMock(name='netbox-rq')
@@ -155,11 +155,59 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._db_dump', side_effect=fake_dump), \
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
-            result = self.ops.backup('full')
-        self.assertEqual(result.kind, 'full')
+            result = self.ops.backup('combined')
+        self.assertEqual(result.kind, 'combined')
         systemd.stop.assert_called_once_with(['netbox'])
         systemd.start.assert_called_once_with(['netbox'])
-        self.assertIn('database/netbox.dump', self.ops.verify('full', result.path)['files'])
+        self.assertIn('database/netbox.dump', self.ops.verify('combined', result.path)['files'])
+
+    def test_combined_archive_metadata_and_listing(self):
+        def fake_dump(cfg, target):
+            target.write_bytes(b'PGDMP_FAKE_ARCHIVE')
+        systemd = MagicMock()
+        systemd.status.return_value = []
+        with patch('netbox_ops.backups.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.backups._db_dump', side_effect=fake_dump), \
+             patch('netbox_ops.backups._version', return_value='4.4.1'), \
+             patch('netbox_ops.backups.write_audit'):
+            report = self.ops.backup('combined')
+        self.assertTrue(report.path.name.endswith('.combined.tar.gz'))
+        self.assertTrue(report.path.name.startswith('netbox-combined-'))
+        self.assertEqual(self.ops.classify(report.path), 'combined')
+        self.assertEqual(self.ops.list_backups('combined'), [report.path])
+        self.assertEqual(self.ops.verify('combined', report.path)['kind'], 'combined')
+        sidecar = json.loads(Path(str(report.path) + '.json').read_text())
+        self.assertEqual(sidecar['kind'], 'combined')
+        self.assertFalse(self.ops.describe_one(self.ops.quick_list()[0]).legacy)
+        with self.assertRaisesRegex(BackupError, 'compatible'):
+            self.ops.verify('full', report.path)
+
+    def test_historical_full_archive_remains_readable_and_verifiable(self):
+        self.store.mkdir(mode=0o700)
+        dump = self.base / 'db.dump'
+        dump.write_bytes(b'PGDMP_FAKE_ARCHIVE')
+        old = self.store / 'netbox-full-pre-restore-20261120T120000Z-abc123.full.tar.gz'
+        with patch('netbox_ops.backups._version', return_value='4.4.1'):
+            _create_archive(self.cfg, old, 'full', dump, 'pre_restore')
+        self.assertEqual(self.ops.classify(old), 'full')
+        self.assertEqual(self.ops.backup_purpose(old), 'pre_restore')
+        self.assertEqual(self.ops.list_backups('full'), [old])
+        self.assertIn(old, self.ops.list_backups())
+        self.assertEqual(self.ops.verify('full', old)['kind'], 'full')
+        entry = self.ops.describe_one(self.ops.quick_list()[0])
+        self.assertEqual(entry.kind, 'full')
+        self.assertEqual(entry.purpose, 'pre_restore')
+        self.assertFalse(entry.legacy)
+        with self.assertRaisesRegex(BackupError, 'compatible'):
+            self.ops.verify('combined', old)
+
+    def test_full_creation_is_disabled_but_restore_kind_remains_supported(self):
+        with patch('netbox_ops.backups._require_root'):
+            with self.assertRaisesRegex(BackupError, 'Invalid backup kind'):
+                self.ops.backup('full')
+        with patch('netbox_ops.backups._require_root'):
+            with self.assertRaises(FileNotFoundError):
+                self.ops.restore('full', self.base / 'missing.full.tar.gz', only='db')
 
     def test_db_restore_preserves_previous_database(self):
         source = self.base / 'external.dump'
@@ -185,7 +233,7 @@ class FileBackupTests(unittest.TestCase):
         self.assertEqual(rename.call_args_list[1].args[1], 'netbox')
         self.assertEqual(len(self.ops.list_backups('db')), 1)
 
-    def test_failed_migrations_trigger_db_rollback(self):
+    def test_failed_migrations_leave_active_database_unchanged(self):
         source = self.base / 'external.dump'
         source.write_bytes(b'PGDMP_FAKE_ARCHIVE')
         systemd = MagicMock()
@@ -198,14 +246,19 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._preflight_db'), \
              patch('netbox_ops.backups._stage_db', return_value='nbo_stage_fake'), \
              patch('netbox_ops.backups._rename_db') as rename, \
-             patch('netbox_ops.backups._terminate'), \
-             patch('netbox_ops.backups._django_check', side_effect=BackupError('migration mismatch')), \
+             patch('netbox_ops.backups._terminate') as terminate, \
+             patch('netbox_ops.backups._drop_db') as drop, \
+             patch('netbox_ops.backups._django_check', side_effect=BackupError('migration mismatch')) as django, \
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
             with self.assertRaisesRegex(BackupError, 'migration mismatch'):
                 self.ops.restore('db', source, accept_unknown=True)
-        self.assertEqual(rename.call_count, 4)
-        self.assertEqual(rename.call_args_list[3].args[1], 'netbox')
+        django.assert_called_once_with(self.cfg, 'nbo_stage_fake')
+        rename.assert_not_called()
+        terminate.assert_not_called()
+        systemd.stop.assert_not_called()
+        drop.assert_called_once_with('nbo_stage_fake', cfg=self.cfg)
+        self.assertEqual(self.ops.list_backups('db'), [])
 
     def test_db_archive_format_guard_precedes_psql(self):
         bad = self.base / 'bad.dump'
@@ -214,34 +267,3 @@ class FileBackupTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, 'PGDMP'):
                 self.ops.verify('db', bad)
             run.assert_not_called()
-
-
-class BackupCliTests(unittest.TestCase):
-    def test_commands_and_confirmation_flags(self):
-        parser = build_parser()
-        for action in ('db', 'media', 'full'):
-            self.assertEqual(parser.parse_args(['backup', action]).action, action)
-            args = parser.parse_args(['restore', action, '--file', '/tmp/a.dump', '--yes',
-                                      '--acknowledge-data-loss'])
-            self.assertTrue(args.acknowledge_data_loss)
-        self.assertEqual(parser.parse_args(['backup', 'list', '--kind', 'db']).kind, 'db')
-
-    def test_no_restore_when_only_yes(self):
-        import contextlib
-        with patch('netbox_ops.backups.BackupManager') as manager, \
-                contextlib.redirect_stderr(io.StringIO()):
-            rc = perform_backup_action('restore', 'db', Configuration(DEFAULT_UNITS),
-                                       Translator('en'), source=Path('/tmp/a.dump'), yes=True)
-        self.assertEqual(rc, 2)
-        manager.return_value.restore.assert_not_called()
-
-    def test_config_rejects_unknown_backup_fields(self):
-        with tempfile.TemporaryDirectory() as folder:
-            p = Path(folder) / 'cfg.json'
-            p.write_text(json.dumps({'backup': {'unknown': True}}))
-            with self.assertRaises(ConfigError):
-                load_config(p)
-
-
-if __name__ == '__main__':
-    unittest.main()

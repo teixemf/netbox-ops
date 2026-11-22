@@ -4,26 +4,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Callable
 from pathlib import Path
 from typing import Sequence
 
 from . import __version__
 from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, Configuration, load_config
 from .i18n import LANGUAGES, Translator
-from .services import ExclusiveLock, ServiceError, SystemdServices, write_audit
-
-
-# Menu numbers and CLI paths are maintained together. Stubs never touch NetBox.
-MENU_ACTIONS = (
-    ('1', 'services', 'manage', 'menu_2'),
-    ('2', 'backup', 'manage', 'menu_backup_manage'),
-    ('3', 'updates', 'check', 'menu_9'),
-    ('4', 'upgrade', 'netbox', 'menu_10'),
-    ('5', 'upgrade', 'plugins', 'menu_11'),
-    ('6', 'upgrade', 'stack', 'menu_12'),
-    ('7', 'self-upgrade', '', 'menu_13'),
-)
+from .menu import MENU_ACTIONS
+from .services import (CRITICAL_SERVICES, ExclusiveLock, ServiceError, SystemdServices,
+                       challenge, order_services, perform_service_batch as perform_service_batch, write_audit)
 
 
 
@@ -68,12 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     backup = top.add_parser('backup', help='Create PostgreSQL, artifact or integrated archives.')
     backup_commands = backup.add_subparsers(dest='action', required=True)
-    for operation in ('db', 'media', 'full'):
+    for operation in ('db', 'media', 'combined'):
         backup_commands.add_parser(operation, help='Create a protected, timestamped backup.')
     listed = backup_commands.add_parser('list', help='List local backup archives.')
-    listed.add_argument('--kind', choices=('db', 'media', 'full', 'legacy'))
+    listed.add_argument('--kind', choices=('db', 'media', 'combined', 'full', 'legacy'))
     verified = backup_commands.add_parser('verify', help='Verify a backup archive and its checksums.')
-    verified.add_argument('--kind', choices=('db', 'media', 'full', 'legacy'), required=True)
+    verified.add_argument('--kind', choices=('db', 'media', 'combined', 'full', 'legacy'), required=True)
     verified.add_argument('--file', type=Path, required=True)
 
     deleted = backup_commands.add_parser('delete', help='Delete one local backup, with explicit confirmation.')
@@ -83,10 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     restore = top.add_parser('restore', help='Restore a verified backup (disruptive).')
     restore_commands = restore.add_subparsers(dest='action', required=True)
-    for operation in ('db', 'media', 'full'):
+    for operation in ('db', 'media', 'combined', 'full'):
         command = restore_commands.add_parser(operation, help='Restore an archive of this type.')
         command.add_argument('--file', type=Path, required=True)
-        if operation == 'full':
+        if operation in ('combined', 'full'):
             command.add_argument('--only', choices=('db', 'media', 'all'), default='all',
                                  help='Restore only DB, only media, or both (default).')
         command.add_argument('--yes', action='store_true', help='Noninteractive restore confirmation.')
@@ -132,17 +121,6 @@ def display_status(systemd: SystemdServices, names: Sequence[str], t: Translator
         return 1
     return 0
 
-
-CRITICAL_SERVICES = frozenset({'postgresql', 'redis'})
-
-
-def challenge(action: str, names: Sequence[str]) -> str:
-    """Require a more specific confirmation for critical system dependencies."""
-    verb = action.upper()
-    critical = [name for name in dict.fromkeys(names) if name in CRITICAL_SERVICES]
-    if critical:
-        return f'{verb} {",".join(critical)}'
-    return verb
 
 
 def confirmed(t: Translator, names: Sequence[str], action: str = 'restart') -> bool:
@@ -201,59 +179,6 @@ def perform_restart(systemd: SystemdServices, names: Sequence[str], t: Translato
     return perform_service_action(systemd, 'restart', names, t, yes, allow_critical)
 
 
-# Stop dependants before databases; start/restart databases before the web workers.
-START_ORDER = ('postgresql', 'redis', 'nginx', 'netbox', 'netbox-rq')
-STOP_ORDER = tuple(reversed(START_ORDER))
-
-
-def order_services(action: str, names: Sequence[str]) -> list[str]:
-    unique = list(dict.fromkeys(names))
-    if action not in ('start', 'stop', 'restart', 'enable', 'disable'):
-        raise ValueError(f'Unsupported action: {action}')
-    if any(name not in SERVICE_NAMES for name in unique):
-        raise ServiceError('Unknown service')
-    if action in ('enable', 'disable'):
-        return unique
-    priority = STOP_ORDER if action == 'stop' else START_ORDER
-    return sorted(unique, key=priority.index)
-
-
-def perform_service_batch(systemd: SystemdServices, action: str,
-                          names: Sequence[str], on_progress: Callable[[str, int, int, str, str], None]
-                          | None = None) -> tuple[list[tuple[str, str]], str | None]:
-    '''One exclusive lock, per-service audit and real completed-step progress.
-
-    Abort on the first failure; no implicit rollback or extra services.
-    on_progress receives (stage, completed, total, service, details).
-    '''
-    if os.geteuid() != 0:
-        raise ServiceError('Root privileges required')
-    ordered = order_services(action, names)
-    if not ordered:
-        raise ServiceError('No services selected')
-    results: list[tuple[str, str]] = []
-    total = len(ordered)
-    who = f'uid={os.getuid()} sudo_user={os.environ.get("SUDO_USER", "unknown")}'
-    with ExclusiveLock():
-        write_audit(f'{action.upper()} batch requested services={",".join(ordered)} {who}')
-        for name in ordered:
-            if on_progress:
-                on_progress('running', len(results), total, name, '')
-            try:
-                state = getattr(systemd, action)([name])[0]
-                detail = state.enabled if action in ('enable', 'disable') else state.active
-                write_audit(f'{action.upper()} success service={name} state={detail}')
-            except (ServiceError, OSError) as exc:
-                write_audit(f'{action.upper()} failure service={name} error={exc}')
-                if on_progress:
-                    on_progress('error', len(results), total, name, str(exc))
-                return results, f'{name}: {exc}'
-            results.append((name, detail))
-            if on_progress:
-                on_progress('done', len(results), total, name, detail)
-        write_audit(f'{action.upper()} batch finished services={",".join(ordered)}')
-    return results, None
-
 
 def not_implemented(t: Translator, name: str) -> int:
     print(t('not_implemented', command=name))
@@ -261,7 +186,7 @@ def not_implemented(t: Translator, name: str) -> int:
 
 
 def confirm_restore(kind: str, source: Path, t: Translator, only: str = 'all') -> bool:
-    token = f'RESTORE {kind.upper()}' + (f' {only.upper()}' if kind == 'full' else '')
+    token = f'RESTORE {kind.upper()}' + (f' {only.upper()}' if kind in ('combined', 'full') else '')
     print(t('backup_restore_warning', kind=kind, path=str(source)))
     try:
         return input(t('backup_restore_confirmation', token=token)) == token
@@ -478,11 +403,11 @@ def interactive_menu(t: Translator, config_path: Path = CONFIG_PATH) -> int:
             if (group, action) == ('services', 'manage'):
                 menu_manage(t, config_path)
             elif (group, action) == ('backup', 'manage'):
-                print('  1) Backup DB     2) Backup media     3) Backup full')
+                print('  1) Backup DB     2) Backup media     3) Backup combined')
                 print('  4) List backups (CLI restore/delete requires explicit file and confirmation)')
                 option = input(t('prompt')).strip()
                 if option in ('1', '2', '3'):
-                    kind = {'1': 'db', '2': 'media', '3': 'full'}[option]
+                    kind = {'1': 'db', '2': 'media', '3': 'combined'}[option]
                     if input(f'Create {kind} backup? [yes/NO] ').lower() == 'yes':
                         perform_backup_action('backup', kind, cfg, t)
                 elif option == '4':

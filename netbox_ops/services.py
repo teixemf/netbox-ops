@@ -10,7 +10,7 @@ import time
 import concurrent.futures
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable
+from typing import Callable, Sequence
 
 from .config import Configuration, SERVICE_NAMES
 from .netbox_version import read_netbox_version
@@ -221,6 +221,72 @@ class ExclusiveLock:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
+
+
+CRITICAL_SERVICES = frozenset({'postgresql', 'redis'})
+
+
+def challenge(action: str, names: Sequence[str]) -> str:
+    """Require a more specific confirmation for critical system dependencies."""
+    verb = action.upper()
+    critical = [name for name in dict.fromkeys(names) if name in CRITICAL_SERVICES]
+    if critical:
+        return f'{verb} {",".join(critical)}'
+    return verb
+
+
+# Stop dependants before databases; start/restart databases before the web workers.
+START_ORDER = ('postgresql', 'redis', 'nginx', 'netbox', 'netbox-rq')
+STOP_ORDER = tuple(reversed(START_ORDER))
+
+
+def order_services(action: str, names: Sequence[str]) -> list[str]:
+    unique = list(dict.fromkeys(names))
+    if action not in ('start', 'stop', 'restart', 'enable', 'disable'):
+        raise ValueError(f'Unsupported action: {action}')
+    if any(name not in SERVICE_NAMES for name in unique):
+        raise ServiceError('Unknown service')
+    if action in ('enable', 'disable'):
+        return unique
+    priority = STOP_ORDER if action == 'stop' else START_ORDER
+    return sorted(unique, key=priority.index)
+
+
+def perform_service_batch(systemd: SystemdServices, action: str,
+                          names: Sequence[str], on_progress: Callable[[str, int, int, str, str], None]
+                          | None = None) -> tuple[list[tuple[str, str]], str | None]:
+    '''One exclusive lock, per-service audit and real completed-step progress.
+
+    Abort on the first failure; no implicit rollback or extra services.
+    on_progress receives (stage, completed, total, service, details).
+    '''
+    if os.geteuid() != 0:
+        raise ServiceError('Root privileges required')
+    ordered = order_services(action, names)
+    if not ordered:
+        raise ServiceError('No services selected')
+    results: list[tuple[str, str]] = []
+    total = len(ordered)
+    who = f'uid={os.getuid()} sudo_user={os.environ.get("SUDO_USER", "unknown")}'
+    with ExclusiveLock():
+        write_audit(f'{action.upper()} batch requested services={",".join(ordered)} {who}')
+        for name in ordered:
+            if on_progress:
+                on_progress('running', len(results), total, name, '')
+            try:
+                state = getattr(systemd, action)([name])[0]
+                detail = state.enabled if action in ('enable', 'disable') else state.active
+                write_audit(f'{action.upper()} success service={name} state={detail}')
+            except (ServiceError, OSError) as exc:
+                write_audit(f'{action.upper()} failure service={name} error={exc}')
+                if on_progress:
+                    on_progress('error', len(results), total, name, str(exc))
+                return results, f'{name}: {exc}'
+            results.append((name, detail))
+            if on_progress:
+                on_progress('done', len(results), total, name, detail)
+        write_audit(f'{action.upper()} batch finished services={",".join(ordered)}')
+    return results, None
 
 
 class ServiceVersionCache:

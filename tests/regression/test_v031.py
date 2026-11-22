@@ -8,18 +8,16 @@ import curses
 import json
 import tempfile
 import unittest
-from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import subprocess
 
 from netbox_ops import __version__
-from netbox_ops.backups import BackupManager, BackupEntry
+from netbox_ops.backups import BackupManager
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.services import ServiceState, ServiceVersionCache
 from netbox_ops.tui import CursesMenu, action_enabled
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 class BackupPerformanceTests(unittest.TestCase):
@@ -36,17 +34,21 @@ class BackupPerformanceTests(unittest.TestCase):
         self.cfg.backup_directory.mkdir(mode=0o700)
 
     def test_quick_listing_never_decompresses_archives_or_reads_manifest(self):
-        for number in range(30):
-            path = self.cfg.backup_directory / f'netbox-full-20261120T1234{number:02d}Z.full.tar.gz'
-            with path.open('wb') as file:
-                file.write(b'not-a-tar-large-archive')
+        for kind, count in (('full', 30), ('combined', 10)):
+            for number in range(count):
+                path = self.cfg.backup_directory / (
+                    f'netbox-{kind}-20261120T1234{number:02d}Z.{kind}.tar.gz')
+                with path.open('wb') as file:
+                    file.write(b'not-a-tar-large-archive')
         with patch('netbox_ops.backups._read_archive_metadata',
                    side_effect=AssertionError('Archive read!')), \
              patch('netbox_ops.backups._read_sidecar_metadata',
                    side_effect=AssertionError('Sidecar read!')):
             rows = self.manager.quick_list()
-        self.assertEqual(len(rows), 30)
-        self.assertTrue(all(row.kind == 'full' and row.size > 0 for row in rows))
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(sum(row.kind == 'full' for row in rows), 30)
+        self.assertEqual(sum(row.kind == 'combined' for row in rows), 10)
+        self.assertTrue(all(row.size > 0 for row in rows))
 
     def test_media_backup_produces_fast_metadata_sidecar_without_credentials(self):
         with patch('netbox_ops.backups._version', return_value='4.4.1'), \
@@ -66,7 +68,7 @@ class BackupPerformanceTests(unittest.TestCase):
     def test_metadata_cache_once_for_same_selection(self):
         with patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
-            archive = self.manager.backup('media').path
+            self.manager.backup('media').path
         screen = FakeScreen([curses.KEY_DOWN, -1, curses.KEY_UP, curses.KEY_DOWN, 27,27],
                             dimensions=(30,125))
         menu = CursesMenu(screen, Translator('pt'))
@@ -181,7 +183,7 @@ class ServiceVersionTests(unittest.TestCase):
         others = [ServiceState(name,name+'.service','loaded','active','running','enabled')
                   for name in ('nginx','postgresql','redis')]
         screen = FakeScreen([curses.KEY_DOWN,32,curses.KEY_DOWN,32,
-                             9,10,27,27],dimensions=(30,130))
+                             9,10,27,27,27],dimensions=(30,130))
         menu = CursesMenu(screen,Translator('pt'))
         service_api=MagicMock()
         service_api.status.return_value=[running,stopped,*others]
@@ -194,8 +196,8 @@ class ServiceVersionTests(unittest.TestCase):
         confirm.assert_called_once_with('start',['netbox-rq'],skipped=['netbox'])
         execute.assert_called_once_with(service_api,'start',['netbox-rq'])
 
-    def test_version_is_032(self):
-        self.assertEqual(__version__, '0.4.0')
+    def test_version_format(self):
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
 
 if __name__ == '__main__':

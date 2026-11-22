@@ -15,7 +15,7 @@ from netbox_ops.tui import CursesMenu
 from netbox_ops.i18n import Translator
 from netbox_ops.backups import BackupManager, BackupEntry, BackupError
 from netbox_ops.config import Configuration, DEFAULT_UNITS
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 class V032Tests(unittest.TestCase):
     def test_netbox_version_from_release_yaml_not_django(self):
@@ -30,7 +30,8 @@ class V032Tests(unittest.TestCase):
         runner = MagicMock(return_value=subprocess.CompletedProcess([],0,'5.2.9\n',''))
         with patch('netbox_ops.services.read_netbox_version',return_value='4.4.1') as source:
             cache=ServiceVersionCache(runner=runner)
-            cache.request('netbox');cache.request('netbox-rq')
+            cache.request('netbox')
+            cache.request('netbox-rq')
             cache._futures['netbox'].result(timeout=2)
             self.assertEqual(cache.get('netbox-rq'),'4.4.1')
             source.assert_called_once()
@@ -84,7 +85,9 @@ class V032Tests(unittest.TestCase):
 
     def test_backup_multiselect_space_and_all_are_nondestructive(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d); backup_dir=root/'backups';backup_dir.mkdir(mode=0o700)
+            root=Path(d)
+            backup_dir=root/'backups'
+            backup_dir.mkdir(mode=0o700)
             for i in range(3):
                 (backup_dir/f'netbox-db-20261120T11000{i}Z.dump').write_bytes(b'PGDMP')
             cfg=Configuration(DEFAULT_UNITS.copy(),backup_dir)
@@ -96,13 +99,16 @@ class V032Tests(unittest.TestCase):
                  patch.object(manager,'delete_backups') as deletion, \
                  patch.object(manager,'verify') as verification:
                 menu._backups()
-            deletion.assert_not_called();verification.assert_not_called()
+            deletion.assert_not_called()
+            verification.assert_not_called()
             output=' '.join(row[2] for row in screen.writes)
             self.assertIn('Seleccionados',output)
 
     def test_bulk_menu_delete_uses_only_explicitly_marked_files(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d); folder=root/'backups';folder.mkdir(mode=0o700)
+            root=Path(d)
+            folder=root/'backups'
+            folder.mkdir(mode=0o700)
             for i in range(3):
                 (folder/f'netbox-db-20261120T13000{i}Z.dump').write_bytes(b'PGDMP')
             manager=BackupManager(Configuration(DEFAULT_UNITS.copy(),folder))
@@ -129,7 +135,9 @@ class V032Tests(unittest.TestCase):
 
     def test_bulk_menu_verify_selection_and_select_all(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d); folder=root/'backups';folder.mkdir(mode=0o700)
+            root=Path(d)
+            folder=root/'backups'
+            folder.mkdir(mode=0o700)
             for i in range(3):
                 (folder/f'netbox-db-20261120T12000{i}Z.dump').write_bytes(b'PGDMP')
             manager=BackupManager(Configuration(DEFAULT_UNITS.copy(),folder))
@@ -148,8 +156,10 @@ class V032Tests(unittest.TestCase):
 
     def test_pre031_versions_not_displayed_as_netbox_release(self):
         with tempfile.TemporaryDirectory() as d:
-            folder=Path(d)/'backup';folder.mkdir(mode=0o700)
-            source=folder/'sample.dump';source.write_bytes(b'PGDMPmock')
+            folder=Path(d)/'backup'
+            folder.mkdir(mode=0o700)
+            source=folder/'sample.dump'
+            source.write_bytes(b'PGDMPmock')
             meta={'kind':'db','netbox_version':'5.2.9','tool':'netbox-ops','format':1,
                   'created_utc':'2026-11-20T10:00:00+00:00'}
             Path(str(source)+'.json').write_text(json.dumps(meta))
@@ -164,9 +174,13 @@ class V032Tests(unittest.TestCase):
 
     def test_selected_bulk_delete_preflight_rejects_external_and_duplicates(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d); backup_dir=root/'backup';backup_dir.mkdir(mode=0o700)
-            good=backup_dir/'a.dump';good.write_bytes(b'PGDMPmock')
-            outside=root/'outside.dump';outside.write_bytes(b'untouched')
+            root=Path(d)
+            backup_dir=root/'backup'
+            backup_dir.mkdir(mode=0o700)
+            good=backup_dir/'a.dump'
+            good.write_bytes(b'PGDMPmock')
+            outside=root/'outside.dump'
+            outside.write_bytes(b'untouched')
             cfg=Configuration(DEFAULT_UNITS.copy(),backup_dir)
             manager=BackupManager(cfg)
             with patch('netbox_ops.backups._require_root'),patch('netbox_ops.backups.ExclusiveLock'):
@@ -174,15 +188,18 @@ class V032Tests(unittest.TestCase):
                     manager.delete_backups([good,outside])
                 with self.assertRaises(BackupError):
                     manager.delete_backups([good,good])
-            self.assertTrue(good.exists());self.assertTrue(outside.exists())
+            self.assertTrue(good.exists())
+            self.assertTrue(outside.exists())
 
     def test_selected_verification_reports_each_file(self):
         entries=[BackupEntry(Path('/tmp/a.dump'),'db','',1,''),BackupEntry(Path('/tmp/b.dump'),'db','',1,'')]
-        manager=MagicMock(); events=[]
+        manager=MagicMock()
+        events=[]
         result=CursesMenu._verify_job_many(manager,entries,lambda *args:events.append(args))
         self.assertEqual(manager.verify.call_count,2)
         self.assertEqual(events[-1][0],'complete')
         self.assertEqual(events[-1][1:],(2,2,''))
         self.assertIn('2 backups',result)
 
-if __name__=='__main__': unittest.main()
+if __name__=='__main__':
+    unittest.main()

@@ -1,2 +1,0 @@
-# netbox-ops 0.4.0: no external Python packages required.
-# Pin exact versions here if any dependencies are introduced.

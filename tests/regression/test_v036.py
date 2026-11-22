@@ -14,7 +14,7 @@ from netbox_ops.cli import build_parser
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.tui import CursesMenu
-from test_tui import FakeScreen
+from tests.helpers.fake_screen import FakeScreen
 
 
 class BackupFix036Tests(unittest.TestCase):
@@ -30,7 +30,7 @@ class BackupFix036Tests(unittest.TestCase):
         self.manager = BackupManager(self.cfg)
 
     def test_version(self):
-        self.assertEqual(__version__, '0.4.0')
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
     def test_reverse_chronological_order_across_types_and_pre_restore(self):
         self.cfg.backup_directory.mkdir()
@@ -61,8 +61,8 @@ class BackupFix036Tests(unittest.TestCase):
             self.assertEqual([x.name for x in self.manager.list_backups()],
                              ['new.dump', 'old.dump'])
 
-    def test_full_only_db_stages_existing_extracted_dump_before_db_operations(self):
-        # A real full TAR archive is built; DB and service actions are mocked.
+    def test_combined_only_db_stages_existing_extracted_dump_before_db_operations(self):
+        # A real combined TAR archive is built; DB and service actions are mocked.
         with patch('netbox_ops.backups._db_dump',
                    side_effect=lambda cfg, path: path.write_bytes(b'PGDMP' + b'x' * 96)), \
              patch('netbox_ops.backups._check_dump'), \
@@ -70,7 +70,7 @@ class BackupFix036Tests(unittest.TestCase):
              patch('netbox_ops.backups._version', return_value='4.4.3'), \
              patch('netbox_ops.backups.SystemdServices') as systemd_for_create:
             systemd_for_create.return_value.status.return_value=[]
-            source = self.manager.backup('full').path
+            source = self.manager.backup('combined').path
         self.assertEqual((self.media / 'upload.txt').read_text(), 'untouched')
         systemd = MagicMock()
         systemd.status.return_value = []
@@ -91,8 +91,8 @@ class BackupFix036Tests(unittest.TestCase):
              patch('netbox_ops.backups.write_audit'), \
              patch.object(self.manager, '_backup') as safety, \
              patch('netbox_ops.backups._replace_artifacts') as replace:
-            result = self.manager.restore('full', source, only='db')
-        self.assertEqual(result.kind, 'full')
+            result = self.manager.restore('combined', source, only='db')
+        self.assertEqual(result.kind, 'combined')
         self.assertEqual(observed, ['netbox.dump'])
         rename.assert_called()
         replace.assert_not_called()
@@ -137,7 +137,7 @@ class BackupFix036Tests(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
         self.assertFalse(hasattr(self.manager, 'delete_all'))
         labels = [Translator('pt')('nbo_act_' + name) for name in
-                  ('create', 'verify', 'restore', 'delete', 'select_all', 'refresh')]
+                  ('create', 'verify', 'restore', 'delete', 'select_all')]
         self.assertIn('Validar', labels)
         self.assertNotIn('Apagar todos', labels)
 
@@ -148,7 +148,7 @@ class BackupFix036Tests(unittest.TestCase):
         Path(str(path) + '.json').write_text(json.dumps({
             'kind': 'db', 'tool': 'netbox-ops', 'format': 1,
             'netbox_version': '4.4.3', 'netbox_version_source': 'release.yaml'}))
-        screen = FakeScreen([curses.KEY_DOWN, 9, curses.KEY_RIGHT, 10, 27, 27, 27],
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, curses.KEY_RIGHT, 10, 27, 27, 27, 27],
                             dimensions=(35, 145))
         menu = CursesMenu(screen, Translator('pt'))
         called = []

@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import curses
-import io
 import unittest
-from dataclasses import replace
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from netbox_ops.i18n import Translator
@@ -14,36 +11,7 @@ from netbox_ops.tui import (CursesMenu, SECTIONS, make_main_items,
 from netbox_ops.services import ServiceState
 
 
-class FakeScreen:
-    def __init__(self, keys=(), dimensions=(24, 100)):
-        self.keys = iter(keys)
-        self.dimensions = dimensions
-        self.writes = []
-        self.current_frame = []
-        self.frames = []
-
-    def getmaxyx(self):
-        return self.dimensions
-
-    def addnstr(self, y, x, text, n, attr):
-        entry = (y, x, text[:n], attr)
-        self.writes.append(entry)
-        self.current_frame.append(entry)
-
-    def erase(self):
-        self.current_frame = []
-
-    def refresh(self):
-        self.frames.append(list(self.current_frame))
-
-    def getch(self):
-        return next(self.keys)
-
-    def keypad(self, enabled):
-        pass
-
-    def timeout(self, ms):
-        self.wait_ms = ms
+from tests.helpers.fake_screen import FakeScreen
 
 
 class MenuNavigationTests(unittest.TestCase):
@@ -103,8 +71,8 @@ class RestartSafetyTests(unittest.TestCase):
         self.assertFalse(CursesMenu(FakeScreen([27]), Translator('pt'))._confirm(['netbox']))
 
     def test_cancelled_manage_action_never_executes_systemctl(self):
-        # Select first service; open action selector; cancel confirmation; Esc twice.
-        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27])
+        # Mark first service; attempt disabled action; clear marks and return.
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [ServiceState(n, f'{n}.service', 'loaded',
@@ -159,7 +127,8 @@ class NewServiceTuiTests(unittest.TestCase):
 
     def test_main_menu_escape_then_q_exits(self):
         menu = CursesMenu(FakeScreen([27, ord('q')]), Translator('pt'))
-        systemd=MagicMock(); systemd.status.return_value=[]
+        systemd=MagicMock()
+        systemd.status.return_value=[]
         with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices',return_value=systemd), \
              patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups:
             backups.return_value.storage_stats.return_value=(0,0,0)
@@ -259,7 +228,7 @@ class NewServiceTuiTests(unittest.TestCase):
     def test_manage_multi_select_and_action(self):
         # Two service checkboxes and A to choose a single action.
         screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 32,
-                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27])
+                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [self._state(n) for n in
