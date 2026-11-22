@@ -33,6 +33,23 @@ jobs:
         run: python -m pip install ruff==0.17.6
       - name: Check Python code
         run: ruff check .
+      - name: Check release archive
+        run: |
+          bash -n scripts/build-release.sh
+          bash scripts/build-release.sh
+          archive="$(find dist -maxdepth 1 -type f -name 'netbox-ops-v*.tar.gz' -print -quit)"
+          test -n "$archive"
+          tar -tzf "$archive" > /tmp/netbox-ops-archive-files
+          grep -Fxq 'netbox-ops/install.sh' /tmp/netbox-ops-archive-files
+          grep -Fxq 'netbox-ops/netbox_ops.py' /tmp/netbox-ops-archive-files
+          if grep -Eq '^netbox-ops/(\.github/|tests/|scripts/)' /tmp/netbox-ops-archive-files; then
+            echo 'Unexpected development files in release archive'
+            exit 1
+          fi
+          extracted="$(mktemp -d)"
+          tar -xzf "$archive" -C "$extracted"
+          test -x "$extracted/netbox-ops/install.sh"
+          test -x "$extracted/netbox-ops/upgrade.sh"
 
   integration:
     name: PostgreSQL integration / ${{ matrix.distro }}

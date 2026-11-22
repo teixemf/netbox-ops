@@ -2,6 +2,17 @@
 
 Notable changes to netbox-ops are listed below. The project is currently in early development.
 
+## [0.5.0] — Reliability, security and development foundations
+
+- Hardened configuration file permissions and improved PostgreSQL restore staging and migration checks.
+- Improved installation and upgrade scripts, including Python detection and failure handling.
+- Refactored shared service logic and improved TUI layouts and action navigation.
+- Added PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9.
+- Added reusable NetBox VM baselines and smoke tests for service restart, HTTP availability and database backup verification.
+- Reorganized the test suite, added Ruff checks and documented a lightweight development and release workflow.
+
+**Validation:** CI passed on Python 3.12–3.15 and with real PostgreSQL integration tests. A real NetBox VM smoke test passed for service management and database backup verification. Full end-to-end NetBox restore and recovery testing remains outstanding.
+
 ## [0.4.0] — RHEL/Debian compatibility and TUI improvements
 
 - Added RHEL- and Debian-family detection and safer discovery of PostgreSQL and Redis systemd units.

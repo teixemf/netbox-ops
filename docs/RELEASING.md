@@ -4,7 +4,7 @@ netbox-ops uses a lightweight release process: develop on `dev`, publish stable 
 
 ## Versioning
 
-Use Semantic Versioning (`MAJOR.MINOR.PATCH`) and tags such as `v0.4.1`.
+Use Semantic Versioning (`MAJOR.MINOR.PATCH`) and tags such as `v0.5.0`.
 
 - **PATCH**: compatible bug fixes.
 - **MINOR**: new features; during `0.x`, also use a minor bump for breaking changes and explain them.
@@ -27,7 +27,16 @@ The tag, `netbox_ops/__init__.py` version, and release notes must agree.
    git push origin vX.Y.Z
    ```
 
-5. Check that the published version and source archive match the tag.
+5. Build the Linux installation archive from the release tag (requires Git, tar and gzip):
+
+   ```bash
+   bash scripts/build-release.sh vX.Y.Z
+   tar -tzf dist/netbox-ops-vX.Y.Z.tar.gz
+   ```
+
+   The package contains `netbox-ops/` with the application, installer and configuration example. It does not include development tests, CI files or local runtime data. The build script checks that the tag matches the committed package version.
+6. In GitHub **Releases**, create a release using the existing tag, add concise English notes from the changelog, and **upload `dist/netbox-ops-vX.Y.Z.tar.gz` as a release asset**. GitHub's automatic source archives are not a replacement for the installation asset.
+7. Download the published asset and verify that extraction creates `netbox-ops/install.sh` with executable permissions, and that the packaged version matches the tag.
 
 Before releasing changes to restore, upgrade, installation, or other destructive operations, validate the affected paths in a disposable environment. Where RHEL/Debian behavior differs, test the relevant platform. State known limitations openly; defer a stable release if a critical safety path has not been validated.
 
