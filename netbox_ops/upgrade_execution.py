@@ -29,6 +29,7 @@ def validate_execution_approval(
     approval: ExecutionApproval,
     *,
     inspector: Callable = inspect_git_installation,
+    fresh_plan: UpgradePlan | None = None,
 ) -> None:
     """Reinspect the live Git checkout without changing any files.
 
@@ -36,6 +37,12 @@ def validate_execution_approval(
     caller must rebuild the plan using fresh prerequisite, resolver and plugin
     inventory evidence before invoking this function.
     """
+    # A freshly rebuilt plan is mandatory for any caller that intends to
+    # execute an upgrade. Approval of an earlier plan is not reusable after
+    # dependencies, requirements or upstream metadata change.
+    if fresh_plan is not None:
+        if fresh_plan.fingerprint != plan.fingerprint or not fresh_plan.can_execute:
+            raise UpgradeExecutionError('Upgrade plan changed during preflight')
     if not plan.can_execute:
         raise UpgradeExecutionError('Upgrade plan has blockers or no stages')
     if not plan.stages or any(stage.blockers for stage in plan.stages):
@@ -59,8 +66,18 @@ def validate_execution_approval(
         raise UpgradeExecutionError('NetBox installation changed after planning')
     if live.warnings != original.warnings:
         raise UpgradeExecutionError('Git installation warnings changed after planning')
+    previous = plan.current_netbox
+    if plan.target_netbox == previous:
+        raise UpgradeExecutionError('No NetBox version change was approved')
     for stage in plan.stages:
+        if stage.previous_netbox != previous or stage.netbox_version == previous:
+            raise UpgradeExecutionError('NetBox stages are out of order')
+        if 'v' + stage.netbox_version not in plan.source.available_tags:
+            raise UpgradeExecutionError('Unverified NetBox Git release tag')
+        previous = stage.netbox_version
         if any(check.status == 'blocked' for check in stage.prerequisites):
             raise UpgradeExecutionError('A stage has incompatible prerequisites')
         if any(check.status == 'blocked' for check in stage.plugin_checks):
             raise UpgradeExecutionError('A stage has incompatible plugins')
+    if previous != plan.target_netbox:
+        raise UpgradeExecutionError('Final NetBox stage does not match the target')
