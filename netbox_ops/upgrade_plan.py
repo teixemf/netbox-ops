@@ -232,7 +232,13 @@ def _fingerprint(plan: UpgradePlan) -> str:
         'tags': plan.source.available_tags,
         'selected': plan.selected_plugins,
         'plugin_versions': [(p.package, p.installed_version, p.proposed_version) for p in plan.plugins],
-        'stages': [(s.kind, s.previous_netbox, s.netbox_version, s.plugin_versions) for s in plan.stages],
+        'stages': [(s.kind, s.previous_netbox, s.netbox_version, s.plugin_versions,
+                    [(p.name, p.installed, p.status) for p in s.prerequisites],
+                    [(p.package, p.version, p.status,
+                      [(e.source, e.status, e.detail) for e in p.evidence]) for p in s.plugin_checks])
+                   for s in plan.stages],
+        'warnings': plan.warnings,
+        'blockers': plan.blockers,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()
 
@@ -293,7 +299,8 @@ def build_upgrade_plan(
         warnings.append('Review all intervening NetBox release notes before approving the plan')
     if installation.warnings:
         warnings.extend(installation.warnings)
-    warnings.append('Check special migration and plugin instructions in release notes manually')
+    if path:
+        warnings.append('Check special migration and plugin instructions in release notes manually')
     safeguards = (
         'Create and verify PostgreSQL and media backups before any operation',
         'Protect configuration, plugin pins and previous Git commit as root-only recovery data',
@@ -330,6 +337,7 @@ def build_upgrade_plan(
                     current_to_target[(name, target_versions[-1])] = selection_review.stages[-1]
             if proposed is None:
                 item_warnings.append(f'{name}: selected plugin release is not verified')
+                blockers.append(f'{name}: select a verified plugin release before executing')
         else:
             proposed = original
         # When crossing NetBox versions, the installed plugin remains active
@@ -429,14 +437,19 @@ def edit_upgrade_plan(plan: UpgradePlan, *, target_netbox: str | None = None,
                       reviewer: Callable[..., PluginReview] = review_plugin_upgrade) -> UpgradePlan:
     """Rebuild all stage-level evidence instead of patching a stale plan in place."""
     source = plan.source
+    destination = target_netbox if target_netbox is not None else plan.target_netbox
+    stages = required_netbox_path(plan.current_netbox, destination, source.available_tags)
+    relevant = set(stages or (plan.current_netbox,))
     return build_upgrade_plan(
         source.installation, source.inventory,
-        target_netbox=target_netbox if target_netbox is not None else plan.target_netbox,
+        target_netbox=destination,
         selected_plugins=selected_plugins if selected_plugins is not None else dict(plan.selected_plugins),
         available_tags=source.available_tags,
         postgres_version=source.postgres_version,
         redis_version=source.redis_version,
-        python_by_stage=dict(source.python_by_stage),
-        preflights={(pkg, stage): result for pkg, stage, result in source.preflights},
+        python_by_stage={key: value for key, value in source.python_by_stage if key in relevant},
+        # A changed target/plugin choice invalidates old resolver evidence. Always
+        # rerun the isolated preflight before considering the edited plan approved.
+        preflights={},
         reviewer=reviewer,
     )
