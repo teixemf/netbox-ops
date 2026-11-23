@@ -270,3 +270,79 @@ combined_verify_healthy
 rm -f -- "$fixture"
 rmdir -- "$fixture_dir"
 echo 'PASS: media-only restore preserved unselected database data'
+
+
+echo 'Testing rollback after database and media replacement begins'
+# The callback is injected by the disposable VM test harness only. Production
+# CLI code and normal restore paths do not expose a failure-injection switch.
+python3 - "$combined_backup" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.backups import BackupManager
+from netbox_ops.config import load_config
+
+source = Path(sys.argv[1])
+reached_replace = False
+
+def fail_after_replace(stage, done, total, detail=''):
+    global reached_replace
+    if stage == 'replace' and done == 6:
+        reached_replace = True
+        raise RuntimeError('CI injected failure after live replacement')
+
+try:
+    BackupManager(load_config()).restore(
+        'combined', source, progress=fail_after_replace
+    )
+except RuntimeError as exc:
+    assert str(exc) == 'CI injected failure after live replacement', str(exc)
+else:
+    raise AssertionError('Restore unexpectedly succeeded despite injected failure')
+assert reached_replace, 'Restore did not reach the post-replacement checkpoint'
+print('PASS: injected post-replacement failure reached rollback path')
+PY
+netbox_tag verify_modified
+[[ ! -e "$fixture_dir" ]] || fail 'Rollback did not restore pre-restore media state'
+combined_verify_healthy
+remaining=$(runuser -u postgres -- psql -X -A -t -d postgres \
+  -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'")
+[[ "$remaining" == 0 ]] || fail 'Rollback left a staging database'
+find "$media_dir" -maxdepth 1 -name '.netbox-ops-restore-*' | grep -q . &&
+  fail 'Rollback left media staging directories'
+echo 'PASS: post-replacement failure restored database, media and services'
+
+echo 'Testing a rejected corrupt combined archive without changing live data'
+# The disposable VM is the only place where the test archive is deliberately damaged.
+# The database tag is currently modified, while the media fixture was cleaned up.
+netbox_tag verify_modified
+[[ ! -e "$fixture_dir" ]] || fail 'Media fixture unexpectedly survived cleanup'
+python3 - "$combined_backup" <<'PY'
+import sys
+from pathlib import Path
+
+archive = Path(sys.argv[1])
+# Damage the gzip header, not the trailing padding: the latter can be ignored
+# by gzip readers and produce a false negative for this regression.
+with archive.open('r+b') as stream:
+    assert stream.read(2) == b'\x1f\x8b', 'Unexpected archive format'
+    stream.seek(0)
+    stream.write(b'XX')
+PY
+failure_log=$(mktemp)
+if "${cli[@]}" restore combined --file "$combined_backup" --yes --acknowledge-data-loss >"$failure_log" 2>&1; then
+  cat "$failure_log" >&2
+  rm -f -- "$failure_log"
+  fail 'Restore unexpectedly accepted a corrupt combined archive'
+fi
+echo 'Expected restore rejection diagnostics:'
+cat "$failure_log"
+rm -f -- "$failure_log"
+netbox_tag verify_modified
+[[ ! -e "$fixture_dir" ]] || fail 'Rejected restore changed media data'
+combined_verify_healthy
+remaining=$(runuser -u postgres -- psql -X -A -t -d postgres \
+  -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'")
+[[ "$remaining" == 0 ]] || fail 'Rejected restore left a staging database'
+echo 'PASS: corrupt archive rejected without changing live data or service health'
