@@ -20,13 +20,12 @@ class ExecutionApprovalTests(unittest.TestCase):
             'HEAD', 'https://github.com/netbox-community/netbox.git',
             Path('/opt/netbox/venv/bin/python'), '3.12.0', (), (),
         )
-        source = Mock(installation=self.install)
+        source = Mock(installation=self.install, available_tags=('v4.4.1',))
         stage = UpgradeStage('netbox', '4.4.0', '4.4.1', (), (), (), (), (), ())
         self.plan = Mock(
             can_execute=True, stages=(stage,), selected_plugins=(),
             source=source, fingerprint='approved',
-            requires_strong_confirmation=False,
-        )
+            requires_strong_confirmation=False, current_netbox='4.4.0',\n            target_netbox='4.4.1',\n        )
         self.approval = ExecutionApproval('approved', 'a' * 40, '/opt/netbox')
         self.inspector = Mock(return_value=self.install)
 
@@ -79,6 +78,25 @@ class ExecutionApprovalTests(unittest.TestCase):
     def test_plugin_selection_rejected(self):
         self.plan.selected_plugins = (('plugin', '1.0'),)
         self.check_rejected()
+
+    def test_unverified_git_tag_rejected(self):
+        self.plan.source.available_tags = ()
+        self.check_rejected()
+
+    def test_stage_sequence_rejected(self):
+        self.plan.stages = (replace(self.plan.stages[0], previous_netbox='4.3.9'),)
+        self.check_rejected()
+
+    def test_final_target_must_match(self):
+        self.plan.target_netbox = '4.4.2'
+        self.check_rejected()
+
+    def test_fresh_plan_mismatch_rejected(self):
+        with self.assertRaises(UpgradeExecutionError):
+            validate_execution_approval(self.plan, self.approval,
+                                        inspector=self.inspector,
+                                        fresh_plan=Mock(fingerprint='changed', can_execute=True))
+        self.inspector.assert_not_called()
 
     def test_stage_blocker_rejected(self):
         self.plan.stages = (replace(self.plan.stages[0], blockers=('missing database',)),)
