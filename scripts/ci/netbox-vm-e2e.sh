@@ -282,12 +282,12 @@ import sys
 from pathlib import Path
 
 archive = Path(sys.argv[1])
+# Damage the gzip header, not the trailing padding: the latter can be ignored
+# by gzip readers and produce a false negative for this regression.
 with archive.open('r+b') as stream:
-    stream.seek(-1, 2)
-    last = stream.read(1)
-    assert last, 'Empty archive'
-    stream.seek(-1, 2)
-    stream.write(bytes([last[0] ^ 0x01]))
+    assert stream.read(2) == b'\\x1f\\x8b', 'Unexpected archive format'
+    stream.seek(0)
+    stream.write(b'XX')
 PY
 failure_log=$(mktemp)
 if "${cli[@]}" restore combined --file "$combined_backup" --yes --acknowledge-data-loss >"$failure_log" 2>&1; then
