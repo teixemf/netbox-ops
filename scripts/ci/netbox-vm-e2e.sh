@@ -154,3 +154,46 @@ remaining=$(runuser -u postgres -- psql -X -A -t -d postgres \
   -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'")
 [[ "$remaining" == 0 ]] || fail 'A staged restore database was left behind'
 echo 'PASS: pre-restore safety backup and staging cleanup'
+
+
+echo 'Creating a real NetBox media fixture for backup and restore'
+media_dir='/opt/netbox/netbox/media'
+fixture_dir="$media_dir/netbox-ops-ci"
+fixture="$fixture_dir/media-restore.txt"
+[[ -d "$media_dir" && ! -L "$media_dir" ]] || fail 'NetBox media directory is missing or unsafe'
+[[ ! -e "$fixture_dir" && ! -L "$fixture_dir" ]] || fail 'Media test fixture already exists'
+install -d -o netbox -g netbox -m 750 "$fixture_dir"
+printf 'netbox-ops original media fixture\n' > "$fixture"
+chown netbox:netbox "$fixture"
+chmod 640 "$fixture"
+original_sha=$(sha256sum "$fixture" | cut -d' ' -f1)
+
+echo 'Backing up real NetBox media through netbox-ops'
+[[ -z "$("${cli[@]}" backup list --kind media)" ]] ||
+  fail 'Expected no existing media backups in disposable VM'
+"${cli[@]}" backup media
+mapfile -t media_backups < <("${cli[@]}" backup list --kind media)
+[[ "${#media_backups[@]}" -eq 1 ]] || fail 'Expected one media backup'
+media_backup="${media_backups[0]}"
+[[ "$media_backup" == "$backup_dir/"* && -f "$media_backup" && ! -L "$media_backup" ]] ||
+  fail 'Media backup is missing or unsafe'
+"${cli[@]}" backup verify --kind media --file "$media_backup"
+
+echo 'Changing media data and restoring the original archive'
+printf 'netbox-ops modified media fixture\n' > "$fixture"
+[[ "$(sha256sum "$fixture" | cut -d' ' -f1)" != "$original_sha" ]] ||
+  fail 'Media fixture mutation did not change the contents'
+"${cli[@]}" restore media --file "$media_backup" --yes --acknowledge-data-loss
+[[ -f "$fixture" && ! -L "$fixture" ]] || fail 'Restored media fixture is missing'
+[[ "$(sha256sum "$fixture" | cut -d' ' -f1)" == "$original_sha" ]] ||
+  fail 'Restored media contents differ from the original'
+[[ "$(stat -c '%U:%G' "$fixture")" == 'netbox:netbox' ]] ||
+  fail 'Restored media ownership is incorrect'
+[[ "$(stat -c '%a' "$fixture")" == '640' ]] ||
+  fail 'Restored media permissions are incorrect'
+systemctl is-active --quiet netbox.service netbox-rq.service nginx.service ||
+  fail 'NetBox services are not healthy after media restore'
+wait_for_http || fail 'NetBox HTTP is unavailable after media restore'
+rm -f -- "$fixture"
+rmdir -- "$fixture_dir"
+echo 'PASS: real NetBox media backup and restore with content, ownership and mode checks'
