@@ -168,13 +168,15 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(result.status, 'unknown')
 
     def test_resolver_nonconflict_failure_is_unknown(self):
-        runner = lambda command, **kwargs: subprocess.CompletedProcess(command, 1, '', 'No matching distribution')
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, '', 'No matching distribution')
         result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], ['django==5.2'],
                                                '3.12', runner=runner)
         self.assertEqual(result.status, 'unknown')
 
     def test_resolver_proven_conflict_blocks(self):
-        runner = lambda command, **kwargs: subprocess.CompletedProcess(command, 1, '', 'ERROR: ResolutionImpossible')
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, '', 'ERROR: ResolutionImpossible')
         result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], ['django==5.2'],
                                                '3.12', runner=runner)
         self.assertEqual(result.status, 'blocked')
