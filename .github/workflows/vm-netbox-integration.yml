@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   verify:
-    name: Boot NetBox twice from published baseline
+    name: E2E checks and two isolated NetBox boots
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -63,5 +63,5 @@ jobs:
 
       - name: Verify two isolated NetBox boots
         env:
-          NETBOX_VM_E2E: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          NETBOX_VM_E2E: '1'
         run: bash scripts/ci/netbox-vm-host.sh verify
