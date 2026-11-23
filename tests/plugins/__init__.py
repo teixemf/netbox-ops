@@ -1,0 +1,1 @@
+"""Plugin upgrade tests."""
