@@ -1,0 +1,1 @@
+"""NetBox upgrade discovery tests."""
