@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from netbox_ops.plugin_compatibility import (
     CompatibilityEvidence, DependencyPreflight, PluginCompatibility, PluginReview,
@@ -218,7 +218,7 @@ class PlannerTests(unittest.TestCase):
         plan = build_upgrade_plan(self.installation, inventory, available_tags=self.tags,
                                   target_netbox='4.6.2', reviewer=self.reviewer)
         self.assertTrue(plan.requires_strong_confirmation)
-        self.assertTrue(any('enabled PLUGINS' in w for w in plan.warnings))
+        self.assertTrue(any('Enabled PLUGINS' in w for w in plan.warnings))
         self.assertEqual(plan.stages[0].plugin_checks, ())
 
     def test_no_verified_plugin_release_needs_manual_review(self):
