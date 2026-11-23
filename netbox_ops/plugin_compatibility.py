@@ -270,3 +270,168 @@ def _netbox_requirements(requires_dist: object, target: str) -> tuple[list[Compa
                              f'NetBox {target} satisfies declared dependency {spec}', 'supports'))
         elif check is False:
             evidence.append(CompatibilityEvidence('PyPI Requires-Dist',
+                             f'NetBox {target} violates declared dependency {spec}', 'blocks'))
+        else:
+            evidence.append(CompatibilityEvidence('PyPI Requires-Dist',
+                             'NetBox dependency cannot be evaluated safely', 'unknown'))
+    if not found:
+        evidence.append(CompatibilityEvidence('PyPI Requires-Dist',
+                                              'No explicit NetBox distribution dependency', 'warns'))
+    return evidence, supported
+
+
+def _range_contains(value: str | None, version: tuple[int, ...], *, upper: bool) -> bool | None:
+    if not value:
+        return None
+    value = value.removeprefix('v')
+    wildcard = re.fullmatch(r'(\d+)\.(\d+)\.[x*]', value)
+    if wildcard:
+        bound = int(wildcard.group(1)), int(wildcard.group(2))
+        return version[:2] <= bound if upper else version[:2] >= bound
+    bound = _number_version(value)
+    if bound is None:
+        raise ValueError('Unreviewed declared NetBox version range')
+    return version <= bound if upper else version >= bound
+
+
+def assess_compatibility(package: str, version: str, netbox_version: str,
+                         python_version: str, metadata: dict | None,
+                         *, published_files: list[dict] | None = None,
+                         declaration: CompatibilityDeclaration | None = None,
+                         catalog: CompatibilityDeclaration | None = None,
+                         preflight: DependencyPreflight | None = None,
+                         alternatives: Sequence[str] = ()) -> PluginCompatibility:
+    """Block proven technical conflicts; require strong confirmation for unknowns."""
+    _validate_package(package)
+    if _release_key(version) is None or not _TARGET.fullmatch(netbox_version):
+        raise CompatibilityError('Select an exact stable plugin and NetBox version')
+    evidence: list[CompatibilityEvidence] = []
+    confirmed_python = False
+    confirmed_netbox = False
+    info = metadata.get('info') if isinstance(metadata, dict) else None
+    if not isinstance(info, dict):
+        evidence.append(CompatibilityEvidence('PyPI', 'Release metadata unavailable', 'unknown'))
+    else:
+        actual_package = info.get('name', '')
+        actual_version = info.get('version', '')
+        if (not isinstance(actual_package, str) or not isinstance(actual_version, str)
+                or normalize_name(actual_package) != normalize_name(package)
+                or actual_version != version):
+            evidence.append(CompatibilityEvidence('PyPI', 'Metadata identity does not match selection', 'unknown'))
+        else:
+            requirement = info.get('requires_python')
+            check = _check_specifiers(requirement, python_version)
+            if check is True:
+                confirmed_python = True
+                evidence.append(CompatibilityEvidence('PyPI Requires-Python',
+                                 f'Python {python_version} satisfies {requirement}', 'supports'))
+            elif check is False:
+                evidence.append(CompatibilityEvidence('PyPI Requires-Python',
+                                 f'Python {python_version} violates {requirement}', 'blocks'))
+            else:
+                evidence.append(CompatibilityEvidence('PyPI Requires-Python',
+                                 'No evaluable Python version declaration', 'unknown'))
+            dependency_evidence, supported = _netbox_requirements(info.get('requires_dist'),
+                                                                  netbox_version.removeprefix('v'))
+            evidence.extend(dependency_evidence)
+            confirmed_netbox = supported
+    if published_files is not None:
+        possible = [_check_specifiers(f.get('requires_python'), python_version)
+                    for f in published_files if isinstance(f, dict) and not f.get('yanked')]
+        if possible and all(check is False for check in possible):
+            evidence.append(CompatibilityEvidence('PyPI distribution files',
+                                                 'All published files reject the selected Python version', 'blocks'))
+        elif possible and True in possible:
+            evidence.append(CompatibilityEvidence('PyPI distribution files',
+                                                 'At least one published file allows the selected Python version', 'supports'))
+        else:
+            evidence.append(CompatibilityEvidence('PyPI distribution files',
+                                                 'File-level Python compatibility could not be verified', 'unknown'))
+    for label, item in (('Plugin release documentation', declaration),
+                        ('NetBox Labs plugin catalog', catalog)):
+        if item is None:
+            continue
+        if not item.source.startswith('https://'):
+            evidence.append(CompatibilityEvidence(label, 'Unverified source', 'unknown'))
+            continue
+        actual = _number_version(netbox_version.removeprefix('v'))
+        if not (item.min_netbox or item.max_netbox):
+            evidence.append(CompatibilityEvidence(label, 'Ambiguous compatibility range', 'unknown'))
+            continue
+        try:
+            lower_ok = _range_contains(item.min_netbox, actual, upper=False)
+            upper_ok = _range_contains(item.max_netbox, actual, upper=True)
+        except ValueError:
+            evidence.append(CompatibilityEvidence(label, 'Ambiguous compatibility range', 'unknown'))
+            continue
+        in_range = lower_ok is not False and upper_ok is not False
+        if in_range:
+            evidence.append(CompatibilityEvidence(item.source, 'Target NetBox is in the declared range', 'supports'))
+            if not item.advisory and label != 'NetBox Labs plugin catalog':
+                confirmed_netbox = True
+        elif item.enforced and not item.advisory and label != 'NetBox Labs plugin catalog':
+            evidence.append(CompatibilityEvidence(item.source,
+                             'Verified PluginConfig gate rejects target NetBox', 'blocks'))
+        else:
+            evidence.append(CompatibilityEvidence(item.source,
+                             'Declared range differs from target; not proof of a technical conflict', 'warns'))
+    if preflight:
+        outcome = {'passed': 'supports', 'blocked': 'blocks', 'unknown': 'unknown'}.get(preflight.status, 'unknown')
+        evidence.append(CompatibilityEvidence('Isolated pip resolver', preflight.detail, outcome))
+    blocked = any(record.status == 'blocks' for record in evidence)
+    preflight_passed = bool(preflight and preflight.status == 'passed' and preflight.checked_core)
+    status = 'blocked' if blocked else ('compatible' if confirmed_python and confirmed_netbox
+                                        and preflight_passed and not any(x.status == 'unknown' for x in evidence)
+                                        else 'uncertain')
+    candidates = tuple(x for x in dict.fromkeys(alternatives) if _release_key(x) is not None and x != version)
+    return PluginCompatibility(package, version, netbox_version, python_version,
+                               status, tuple(evidence), candidates)
+
+
+def assess_upgrade_stages(package: str, version: str, netbox_steps: Sequence[str],
+                          python_versions: Sequence[str], metadata: dict | None,
+                          *, published_files: list[dict] | None = None,
+                          declaration: CompatibilityDeclaration | None = None,
+                          catalog: CompatibilityDeclaration | None = None,
+                          preflights: Sequence[DependencyPreflight | None] | None = None,
+                          alternatives: Sequence[str] = ()) -> tuple[PluginCompatibility, ...]:
+    if not netbox_steps or len(netbox_steps) != len(python_versions):
+        raise CompatibilityError('Specify Python runtime for every NetBox stage')
+    if preflights is not None and len(preflights) != len(netbox_steps):
+        raise CompatibilityError('Specify preflight for every NetBox stage')
+    return tuple(assess_compatibility(package, version, target, python_version, metadata,
+                                     declaration=declaration, catalog=catalog,
+                                     published_files=published_files, preflight=preflights[i] if preflights is not None else None,
+                                     alternatives=alternatives)
+                 for i, (target, python_version) in enumerate(zip(netbox_steps, python_versions)))
+
+
+def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequence[str],
+                                  python_version: str, *, runner: Callable = subprocess.run,
+                                  interpreter: Path | None = None) -> DependencyPreflight:
+    """Use pip's dry-run wheel-only resolver; no installation or builds.
+
+    A caller must supply vetted target NetBox core pins and every plugin pin
+    for a meaningful full conflict check; missing core pins never confirms it.
+    """
+    pins = tuple(plugin_pins) + tuple(core_pins)
+    if not plugin_pins or not all(isinstance(p, str) and _PIN.fullmatch(p) for p in pins):
+        raise CompatibilityError('Resolver accepts only exact safe package pins')
+    match = re.fullmatch(r'(\d+)\.(\d+)(?:\.\d+)?', python_version)
+    if match is None:
+        raise CompatibilityError('Resolver requires a numeric target Python version')
+    executable = str(interpreter or sys.executable)
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith(('PIP_', 'PYTHON')) and name not in ('VIRTUAL_ENV',)}
+    env.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR='1', PYTHONNOUSERSITE='1')
+    with tempfile.TemporaryDirectory(prefix='netbox-ops-resolver-') as temp:
+        report = Path(temp) / 'report.json'
+        command = [executable, '-I', '-m', 'pip', '--isolated', 'install', '--dry-run',
+                   '--ignore-installed', '--only-binary=:all:', '--no-input',
+                   '--no-cache-dir', '--disable-pip-version-check', '--quiet',
+                   '--timeout', '8', '--retries', '0', '--index-url', PYPI_INDEX,
+                   '--python-version', f'{match.group(1)}.{match.group(2)}',
+                   '--report', str(report), *pins]
+        try:
+            completed = runner(command, cwd=temp, env=env, text=True, capture_output=True,
+                               timeout=120, check=False)
