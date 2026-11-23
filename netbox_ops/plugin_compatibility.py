@@ -435,3 +435,166 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
         try:
             completed = runner(command, cwd=temp, env=env, text=True, capture_output=True,
                                timeout=120, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return DependencyPreflight('unknown', 'Isolated resolver unavailable or timed out')
+        if completed.returncode:
+            error = (completed.stderr or '') + '\n' + (completed.stdout or '')
+            if 'ResolutionImpossible' in error or 'conflicting dependencies' in error.lower():
+                return DependencyPreflight('blocked', 'pip confirmed conflicting Python dependencies', bool(core_pins))
+            return DependencyPreflight('unknown', 'pip could not complete a wheel-only dependency check')
+        try:
+            parsed = json.loads(report.read_text(encoding='utf-8'))
+            if not isinstance(parsed, dict) or not isinstance(parsed.get('install'), list):
+                raise ValueError('Invalid resolver report')
+        except (OSError, UnicodeError, ValueError):
+            return DependencyPreflight('unknown', 'No valid isolated resolver report')
+        if not core_pins:
+            return DependencyPreflight('unknown', 'Resolver ran without NetBox core dependency pins')
+        return DependencyPreflight('passed', 'Wheel-only dependency resolution completed', checked_core=True)
+
+
+def parse_compatibility_document(markdown: str, plugin_version: str, source: str,
+                                 *, advisory: bool = False) -> CompatibilityDeclaration | None:
+    """Extract an exact-version range from a small, conventional COMPATIBILITY.md table.
+
+    Ambiguous tables or prose are not treated as proven version constraints.
+    """
+    if not source.startswith('https://') or len(markdown) > 128 * 1024:
+        return None
+    if _release_key(plugin_version) is None:
+        raise CompatibilityError('Invalid plugin version')
+    lines = markdown.splitlines()
+    header_indexes = None
+    matches: list[tuple[str | None, str | None]] = []
+    for line in lines:
+        if '|' not in line:
+            continue
+        columns = [item.strip() for item in line.strip().strip('|').split('|')]
+        lowered = [re.sub(r'[^a-z0-9]+', ' ', item.lower()).strip() for item in columns]
+        if 'plugin version' in lowered or ('version' in lowered and any('netbox' in x for x in lowered)):
+            def locate(terms: tuple[str, ...]) -> int | None:
+                return next((i for i, text in enumerate(lowered) if text in terms), None)
+            version_at = locate(('plugin version', 'version'))
+            minimum_at = locate(('minimum netbox', 'min netbox', 'netbox minimum', 'min netbox version'))
+            maximum_at = locate(('maximum netbox', 'max netbox', 'netbox maximum', 'max netbox version'))
+            if version_at is not None and (minimum_at is not None or maximum_at is not None):
+                header_indexes = (version_at, minimum_at, maximum_at)
+            continue
+        if header_indexes is None:
+            continue
+        version_at, minimum_at, maximum_at = header_indexes
+        if len(columns) <= version_at or columns[version_at].removeprefix('v') != plugin_version:
+            continue
+        minimum = columns[minimum_at].removeprefix('v') if minimum_at is not None and len(columns) > minimum_at else ''
+        maximum = columns[maximum_at].removeprefix('v') if maximum_at is not None and len(columns) > maximum_at else ''
+        if (minimum and not (_TARGET.fullmatch(minimum) or re.fullmatch(r'\d+\.\d+\.[x*]', minimum)) or
+                maximum and not (_TARGET.fullmatch(maximum) or re.fullmatch(r'\d+\.\d+\.[x*]', maximum))):
+            return None
+        if not minimum and not maximum:
+            return None
+        matches.append((minimum or None, maximum or None))
+    if len(matches) != 1:
+        return None
+    return CompatibilityDeclaration(source, *matches[0], advisory=advisory)
+
+
+def _github_source_repo(metadata: dict) -> tuple[str, str] | None:
+    info = metadata.get('info', {})
+    if not isinstance(info, dict):
+        return None
+    links = info.get('project_urls')
+    if not isinstance(links, dict):
+        return None
+    for key in ('Source', 'Repository', 'Source Code', 'Code'):
+        candidate = links.get(key)
+        if not isinstance(candidate, str):
+            continue
+        try:
+            parsed = urlsplit(candidate)
+            port = parsed.port
+        except ValueError:
+            continue
+        if (parsed.scheme != 'https' or parsed.hostname != 'github.com' or
+                parsed.username or parsed.password or port or parsed.query or parsed.fragment):
+            continue
+        parts = parsed.path.strip('/').removesuffix('.git').split('/')
+        if len(parts) == 2 and all(_PACKAGE.fullmatch(x) for x in parts):
+            return parts[0], parts[1]
+    return None
+
+
+def fetch_release_declaration(metadata: dict, version: str, *,
+                              opener: Callable = urlopen) -> CompatibilityDeclaration | None:
+    """Check a plugin publisher's GitHub release-tag COMPATIBILITY.md, if present.
+
+    Uses only the repository claimed by the selected PyPI release, pinned to an
+    exact version tag. Never falls back to a mutable main README.
+    """
+    if _release_key(version) is None:
+        raise CompatibilityError('Invalid plugin version')
+    repo = _github_source_repo(metadata)
+    if repo is None:
+        return None
+    owner, name = repo
+    for tag in ('v' + version, version):
+        url = f'https://raw.githubusercontent.com/{owner}/{name}/{tag}/COMPATIBILITY.md'
+        request = Request(url, headers={'User-Agent': 'netbox-ops-upgrade-check'})
+        try:
+            with opener(request, timeout=8) as response:
+                data = response.read(128 * 1024 + 1)
+        except (HTTPError, URLError, OSError, TimeoutError):
+            continue
+        if len(data) > 128 * 1024:
+            continue
+        try:
+            doc = data.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if result := parse_compatibility_document(doc, version, url):
+            return result
+    return None
+
+
+def review_plugin_upgrade(package: str, netbox_steps: Sequence[str],
+                          python_versions: Sequence[str], *, version: str | None = None,
+                          catalog: CompatibilityDeclaration | None = None,
+                          preflights: Sequence[DependencyPreflight | None] | None = None,
+                          fetcher: Callable = fetch_pypi_json,
+                          docs_fetcher: Callable = fetch_release_declaration) -> PluginReview:
+    """Read-only orchestration for the shared upgrade planner (#82)."""
+    _validate_package(package)
+    if not netbox_steps or len(netbox_steps) != len(python_versions):
+        raise CompatibilityError('Specify Python runtime for each NetBox stage')
+    warnings: list[str] = []
+    project = None
+    listing = None
+    try:
+        project = fetcher(package)
+        listing = discover_stable_releases(package, project, python_versions[-1])
+        warnings.extend(listing.warnings)
+    except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
+        warnings.append('Cannot retrieve the PyPI release listing; check it manually')
+    selected = version or (listing.latest if listing else None)
+    if selected is None:
+        return PluginReview(package, None, listing, (), tuple(warnings))
+    if _release_key(selected) is None:
+        raise CompatibilityError('Select a stable, numeric release version')
+    if listing and selected not in {item.version for item in listing.stable}:
+        warnings.append('Selected version was not found among published non-yanked releases')
+    metadata = None
+    try:
+        metadata = fetcher(package, selected)
+    except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
+        warnings.append('Cannot retrieve selected plugin metadata; compatibility remains uncertain')
+    declaration = None
+    if metadata is not None:
+        try:
+            declaration = docs_fetcher(metadata, selected)
+        except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
+            warnings.append('Cannot verify plugin release documentation')
+    alternatives = [item.version for item in listing.stable if item.version != selected] if listing else []
+    release_files = project.get('releases', {}).get(selected) if isinstance(project, dict) else None
+    stages = assess_upgrade_stages(package, selected, netbox_steps, python_versions, metadata,
+                                   published_files=release_files, declaration=declaration, catalog=catalog, preflights=preflights,
+                                   alternatives=alternatives)
+    return PluginReview(package, selected, listing, stages, tuple(warnings))
