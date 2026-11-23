@@ -154,3 +154,130 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(result.status, 'passed')
         command, kwargs = calls[0]
         self.assertIn('--dry-run', command)
+        self.assertIn('--ignore-installed', command)
+        self.assertIn('--only-binary=:all:', command)
+        self.assertIn('--isolated', command)
+        self.assertEqual(kwargs['timeout'], 120)
+        self.assertNotIn('PIP_INDEX_URL', kwargs['env'])
+
+    def test_resolver_without_core_is_unknown(self):
+        def run(command, **kwargs):
+            Path(command[command.index('--report') + 1]).write_text('{"install": []}')
+            return subprocess.CompletedProcess(command, 0, '', '')
+        result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], [], '3.12', runner=run)
+        self.assertEqual(result.status, 'unknown')
+
+    def test_resolver_nonconflict_failure_is_unknown(self):
+        runner = lambda command, **kwargs: subprocess.CompletedProcess(command, 1, '', 'No matching distribution')
+        result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], ['django==5.2'],
+                                               '3.12', runner=runner)
+        self.assertEqual(result.status, 'unknown')
+
+    def test_resolver_proven_conflict_blocks(self):
+        runner = lambda command, **kwargs: subprocess.CompletedProcess(command, 1, '', 'ERROR: ResolutionImpossible')
+        result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], ['django==5.2'],
+                                               '3.12', runner=runner)
+        self.assertEqual(result.status, 'blocked')
+
+    def test_unsafe_package_arguments_rejected(self):
+        with self.assertRaises(CompatibilityError):
+            isolated_dependency_preflight(['--extra-index-url=https://evil.test'], ['django==5.2'], '3.12')
+        with self.assertRaises(CompatibilityError):
+            isolated_dependency_preflight(['demo==1.0\n--allow-external'], ['django==5.2'], '3.12')
+
+    def test_preflight_timeout_is_unknown(self):
+        def run(*args, **kwargs):
+            raise subprocess.TimeoutExpired('pip', 120)
+        result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], ['django==5.2'],
+                                               '3.12', runner=run)
+        self.assertEqual(result.status, 'unknown')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class OrchestrationTests(unittest.TestCase):
+    @staticmethod
+    def metadata():
+        return {'info': {'name': 'netbox-plugin-demo', 'version': '2.0.0',
+                         'requires_python': '>=3.12,<3.15',
+                         'requires_dist': ['netbox (>=4.5,<4.7)'],
+                         'project_urls': {'Source': 'https://github.com/example/netbox-plugin-demo'}}}
+
+    def test_parse_release_document_with_wildcard(self):
+        from netbox_ops.plugin_compatibility import parse_compatibility_document
+        markdown = '''| Plugin version | Minimum NetBox | Maximum NetBox |
+| --- | --- | --- |
+| 1.9.0 | 4.3.0 | 4.4.x |
+| 2.0.0 | 4.5.0 | 4.6.x |
+'''
+        declaration = parse_compatibility_document(markdown, '2.0.0', 'https://github.com/example/repo')
+        self.assertEqual(declaration.min_netbox, '4.5.0')
+        self.assertEqual(declaration.max_netbox, '4.6.x')
+        assessment = assess_compatibility('netbox-plugin-demo', '2.0.0', '4.7.0', '3.12',
+                                           self.metadata(), declaration=declaration)
+        self.assertEqual(assessment.status, 'blocked')  # PyPI NetBox constraint
+        self.assertTrue(any(e.status == 'warns' for e in assessment.evidence))
+
+    def test_rejects_ambiguous_document_rows(self):
+        from netbox_ops.plugin_compatibility import parse_compatibility_document
+        doc = '| Plugin version | Min NetBox | Max NetBox |\n|2.0.0|4.5.0|4.6.0|\n|2.0.0|4.5.0|4.6.0|'
+        self.assertIsNone(parse_compatibility_document(doc, '2.0.0', 'https://example.com'))
+
+    def test_release_docs_pinned_to_exact_git_tag(self):
+        from netbox_ops.plugin_compatibility import fetch_release_declaration
+        requested = []
+
+        def opener(request, timeout):
+            requested.append(request.full_url)
+            return FakeResponse(b'| Plugin version | Min NetBox | Max NetBox |\n|2.0.0|4.5.0|4.6.x|')
+
+        declaration = fetch_release_declaration(self.metadata(), '2.0.0', opener=opener)
+        self.assertEqual(declaration.max_netbox, '4.6.x')
+        self.assertEqual(requested, ['https://raw.githubusercontent.com/example/netbox-plugin-demo/v2.0.0/COMPATIBILITY.md'])
+
+    def test_no_untrusted_project_url_fetch(self):
+        from netbox_ops.plugin_compatibility import fetch_release_declaration
+        metadata = self.metadata()
+        metadata['info']['project_urls']['Source'] = 'https://github.com.attacker.example/example/repo'
+        fetches = []
+        def opener(*args, **kwargs):
+            fetches.append(args)
+            return FakeResponse(b'')
+        self.assertIsNone(fetch_release_declaration(metadata, '2.0.0', opener=opener))
+        self.assertEqual(fetches, [])
+
+    def test_review_latest_and_every_stage(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+        calls = []
+        project = {'releases': {
+            '2.0.0': [{'packagetype': 'bdist_wheel', 'requires_python': '>=3.12'}],
+            '1.9.0': [{'packagetype': 'bdist_wheel', 'requires_python': '>=3.10'}],
+            '2.1.0rc1': [{'packagetype': 'bdist_wheel'}],
+        }}
+        def fetcher(*args):
+            calls.append(args)
+            return project if len(args) == 1 else self.metadata()
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0', '4.7.0'],
+                                       ['3.12', '3.12'], fetcher=fetcher,
+                                       docs_fetcher=lambda *_: None)
+        self.assertEqual(review.selected_version, '2.0.0')
+        self.assertEqual([s.status for s in review.stages], ['uncertain', 'blocked'])
+        self.assertEqual(review.stages[0].alternatives, ('1.9.0',))
+        self.assertEqual(calls, [('netbox-plugin-demo',), ('netbox-plugin-demo', '2.0.0')])
+
+    def test_pypi_error_never_proves_incompatibility(self):
+        from urllib.error import URLError
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+        def fetcher(*_):
+            raise URLError('Connection refused')
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12.1'],
+                                       version='2.0.0', fetcher=fetcher)
+        self.assertEqual(review.stages[0].status, 'uncertain')
+        self.assertTrue(review.warnings)
+
+    def test_file_level_python_conflict_proven(self):
+        result = assess_compatibility('netbox-plugin-demo', '2.0.0', '4.5.0', '3.12.0',
+                                      self.metadata(), published_files=[{'requires_python': '>=3.13'}])
+        self.assertEqual(result.status, 'blocked')
