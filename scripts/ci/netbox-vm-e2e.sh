@@ -75,6 +75,8 @@ elif action == 'mutate':
 elif action == 'verify':
     assert Tag.objects.get(slug=slug).name == original, 'Original tag was not restored'
     assert not Tag.objects.filter(name=modified).exists(), 'Modified tag survived restore'
+elif action == 'verify_modified':
+    assert Tag.objects.get(slug=slug).name == modified, 'Unselected database data changed'
 else:
     raise SystemExit(f'Invalid test action: {action}')
 PY
@@ -197,3 +199,74 @@ wait_for_http || fail 'NetBox HTTP is unavailable after media restore'
 rm -f -- "$fixture"
 rmdir -- "$fixture_dir"
 echo 'PASS: real NetBox media backup and restore with content, ownership and mode checks'
+
+echo 'Preparing database and media fixtures for combined restore checks'
+[[ ! -e "$fixture_dir" && ! -L "$fixture_dir" ]] || fail 'Combined fixture directory already exists'
+install -d -o netbox -g netbox -m 750 "$fixture_dir"
+printf 'netbox-ops original combined media fixture\n' > "$fixture"
+chown netbox:netbox "$fixture"
+chmod 640 "$fixture"
+combined_original_sha=$(sha256sum "$fixture" | cut -d' ' -f1)
+netbox_tag verify
+
+echo 'Backing up the real NetBox database and media together'
+[[ -z "$("${cli[@]}" backup list --kind combined)" ]] ||
+  fail 'Expected no combined backups in disposable VM'
+"${cli[@]}" backup combined
+mapfile -t combined_backups < <("${cli[@]}" backup list --kind combined)
+[[ "${#combined_backups[@]}" -eq 1 ]] || fail 'Expected one combined backup'
+combined_backup="${combined_backups[0]}"
+[[ "$combined_backup" == "$backup_dir/"* && -f "$combined_backup" && ! -L "$combined_backup" ]] ||
+  fail 'Combined backup is missing or unsafe'
+"${cli[@]}" backup verify --kind combined --file "$combined_backup"
+
+combined_mutate_media() {
+  printf 'netbox-ops modified combined media fixture\n' > "$fixture"
+  [[ "$(sha256sum "$fixture" | cut -d' ' -f1)" != "$combined_original_sha" ]] ||
+    fail 'Combined media mutation did not change the contents'
+}
+combined_verify_media_original() {
+  [[ -f "$fixture" && ! -L "$fixture" ]] || fail 'Combined media fixture is missing'
+  [[ "$(sha256sum "$fixture" | cut -d' ' -f1)" == "$combined_original_sha" ]] ||
+    fail 'Original combined media content was not restored'
+  [[ "$(stat -c '%U:%G' "$fixture")" == netbox:netbox ]] ||
+    fail 'Combined media ownership changed'
+  [[ "$(stat -c '%a' "$fixture")" == 640 ]] ||
+    fail 'Combined media permissions changed'
+}
+combined_verify_healthy() {
+  systemctl is-active --quiet netbox.service netbox-rq.service nginx.service \
+    redis-server.service postgresql@16-main.service ||
+    fail 'NetBox services are unhealthy after combined restore'
+  wait_for_http || fail 'NetBox HTTP is unavailable after combined restore'
+}
+
+echo 'Testing full combined restore of both modified data sets'
+netbox_tag mutate
+combined_mutate_media
+"${cli[@]}" restore combined --file "$combined_backup" --yes --acknowledge-data-loss
+netbox_tag verify
+combined_verify_media_original
+combined_verify_healthy
+echo 'PASS: combined restore recovered database and media'
+
+echo 'Testing database-only restore preserves modified media'
+netbox_tag mutate
+combined_mutate_media
+modified_media_sha=$(sha256sum "$fixture" | cut -d' ' -f1)
+"${cli[@]}" restore combined --file "$combined_backup" --only db --yes --acknowledge-data-loss
+netbox_tag verify
+[[ "$(sha256sum "$fixture" | cut -d' ' -f1)" == "$modified_media_sha" ]] ||
+  fail 'Database-only restore changed unselected media'
+combined_verify_healthy
+echo 'PASS: database-only restore preserved unselected media'
+
+echo 'Testing media-only restore preserves modified database data'
+netbox_tag mutate
+"${cli[@]}" restore combined --file "$combined_backup" --only media --yes --acknowledge-data-loss
+netbox_tag verify_modified
+combined_verify_media_original
+combined_verify_healthy
+rm -f -- "$fixture"
+rmdir -- "$fixture_dir"
+echo 'PASS: media-only restore preserved unselected database data'
