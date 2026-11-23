@@ -270,3 +270,38 @@ combined_verify_healthy
 rm -f -- "$fixture"
 rmdir -- "$fixture_dir"
 echo 'PASS: media-only restore preserved unselected database data'
+
+
+echo 'Testing a rejected corrupt combined archive without changing live data'
+# The disposable VM is the only place where the test archive is deliberately damaged.
+# The database tag is currently modified, while the media fixture was cleaned up.
+netbox_tag verify_modified
+[[ ! -e "$fixture_dir" ]] || fail 'Media fixture unexpectedly survived cleanup'
+python3 - "$combined_backup" <<'PY'
+import sys
+from pathlib import Path
+
+archive = Path(sys.argv[1])
+with archive.open('r+b') as stream:
+    stream.seek(-1, 2)
+    last = stream.read(1)
+    assert last, 'Empty archive'
+    stream.seek(-1, 2)
+    stream.write(bytes([last[0] ^ 0x01]))
+PY
+failure_log=$(mktemp)
+if "${cli[@]}" restore combined --file "$combined_backup" --yes --acknowledge-data-loss >"$failure_log" 2>&1; then
+  cat "$failure_log" >&2
+  rm -f -- "$failure_log"
+  fail 'Restore unexpectedly accepted a corrupt combined archive'
+fi
+echo 'Expected restore rejection diagnostics:'
+cat "$failure_log"
+rm -f -- "$failure_log"
+netbox_tag verify_modified
+[[ ! -e "$fixture_dir" ]] || fail 'Rejected restore changed media data'
+combined_verify_healthy
+remaining=$(runuser -u postgres -- psql -X -A -t -d postgres \
+  -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'")
+[[ "$remaining" == 0 ]] || fail 'Rejected restore left a staging database'
+echo 'PASS: corrupt archive rejected without changing live data or service health'
