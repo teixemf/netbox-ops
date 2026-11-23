@@ -60,9 +60,7 @@ class ReleaseArchiveTests(unittest.TestCase):
     def test_reject_symlink_hardlink_and_devices(self):
         for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE):
             with self.subTest(kind=kind):
-                build_archive(self.archive)
-                with tarfile.open(self.archive, "a") if False else tarfile.open(
-                        self.archive, "w:gz") as bundle:
+                with tarfile.open(self.archive, "w:gz") as bundle:
                     for name in REQUIRED:
                         member = tarfile.TarInfo(name)
                         member.size = 1
