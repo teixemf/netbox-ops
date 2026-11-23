@@ -10,7 +10,7 @@ from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import (
     ExecutionApproval, UpgradeExecutionError, validate_execution_approval,
 )
-from netbox_ops.upgrade_plan import UpgradePlan, UpgradeStage
+from netbox_ops.upgrade_plan import UpgradeStage
 
 
 class ExecutionApprovalTests(unittest.TestCase):
