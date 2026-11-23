@@ -48,6 +48,42 @@ wait_for_http || fail 'NetBox HTTP is unavailable after restart'
 "${cli[@]}" services status --service netbox-rq
 echo 'PASS: service restart and recovery'
 
+# Operate on a real NetBox model, not a synthetic PostgreSQL-only table.
+# The outer script requires an explicitly marked disposable QEMU/KVM guest.
+netbox_tag() {
+  local action=$1
+  (cd /opt/netbox/netbox &&
+    runuser -u netbox -- env DJANGO_SETTINGS_MODULE=netbox.settings \
+      /opt/netbox/venv/bin/python - "$action" <<'PY'
+import sys
+import django
+
+django.setup()
+from extras.models import Tag
+
+slug = 'netbox-ops-ci-db-restore'
+original = 'NetBox Ops CI original'
+modified = 'NetBox Ops CI modified'
+action = sys.argv[1]
+
+if action == 'seed':
+    assert not Tag.objects.filter(slug=slug).exists(), 'Test tag already exists'
+    Tag.objects.create(name=original, slug=slug, color='9e9e9e')
+elif action == 'mutate':
+    assert Tag.objects.filter(slug=slug).update(name=modified) == 1, 'Tag mutation failed'
+    assert Tag.objects.get(slug=slug).name == modified, 'Tag was not modified'
+elif action == 'verify':
+    assert Tag.objects.get(slug=slug).name == original, 'Original tag was not restored'
+    assert not Tag.objects.filter(name=modified).exists(), 'Modified tag survived restore'
+else:
+    raise SystemExit(f'Invalid test action: {action}')
+PY
+  )
+}
+
+echo 'Creating a real NetBox tag as identifiable backup test data'
+netbox_tag seed
+
 echo 'Creating a real NetBox PostgreSQL backup through netbox-ops'
 [[ -d "$backup_dir" ]] || fail 'Backup directory is missing'
 [[ -z "$("${cli[@]}" backup list --kind db)" ]] ||
@@ -83,3 +119,38 @@ systemctl is-active --quiet netbox.service netbox-rq.service ||
   fail 'NetBox services stopped during the backup'
 wait_for_http || fail 'NetBox HTTP is unavailable after backup'
 echo 'PASS: real NetBox database backup, verification and contents'
+
+echo 'Modifying the NetBox tag, then restoring the real database backup'
+netbox_tag mutate
+"${cli[@]}" restore db --file "$backup_file" --yes --acknowledge-data-loss
+netbox_tag verify
+
+systemctl is-active --quiet netbox.service netbox-rq.service nginx.service \
+  redis-server.service postgresql@16-main.service ||
+  fail 'A NetBox service did not recover after database restore'
+wait_for_http || fail 'NetBox HTTP is unavailable after database restore'
+"${cli[@]}" services status
+echo 'PASS: database restore recovered the original NetBox tag and healthy services'
+
+echo 'Checking the pre-restore safety backup and database staging cleanup'
+mapfile -t backups_after < <("${cli[@]}" backup list --kind db)
+[[ "${#backups_after[@]}" -eq 2 ]] || fail 'Expected original and pre-restore database backups'
+safety_file=''
+for candidate in "${backups_after[@]}"; do
+  if [[ "$candidate" == *-pre-restore-* ]]; then safety_file=$candidate; fi
+done
+[[ -n "$safety_file" ]] || fail 'Restore did not create a pre-restore safety backup'
+"${cli[@]}" backup verify --kind db --file "$safety_file"
+python3 - "$safety_file.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+assert manifest['kind'] == 'db', 'Unexpected safety backup kind'
+assert manifest['purpose'] == 'pre_restore', 'Backup is not tagged as pre-restore'
+PY
+remaining=$(runuser -u postgres -- psql -X -A -t -d postgres \
+  -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'nbo_stage_%'")
+[[ "$remaining" == 0 ]] || fail 'A staged restore database was left behind'
+echo 'PASS: pre-restore safety backup and staging cleanup'
