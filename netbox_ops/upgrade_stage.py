@@ -12,6 +12,7 @@ from .upgrade_checkout import checkout_pinned_stage
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import UpgradeExecutionError
 from .upgrade_git import PinnedStage
+from .upgrade_runtime import upgrade_environment
 from .upgrade_services import require_quiesced_writers
 from .services import SystemdServices
 
@@ -84,9 +85,7 @@ def run_stage(
     script = root / 'upgrade.sh'
     if script.resolve() != script or not script.is_file():
         raise UpgradeExecutionError('NetBox upgrade script is missing or unsafe')
-    env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root',
-           'LANG': 'C.UTF-8', 'PYTHON': str(selected_python),
-           'PIP_NO_INPUT': '1', 'GIT_TERMINAL_PROMPT': '0'}
+    env = upgrade_environment(selected_python)
     commands = (
         ('upgrade script', ['/bin/bash', str(script)], 3600),
         ('Django system check', [str(live.python), str(root / 'netbox/manage.py'),
