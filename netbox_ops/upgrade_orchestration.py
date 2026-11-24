@@ -1,4 +1,4 @@
-"""Coordinate NetBox-only upgrades under the shared operation lock."""
+"""Coordinate approved NetBox and plugin-only upgrades under the shared lock."""
 from __future__ import annotations
 
 import os
@@ -62,7 +62,7 @@ def _execute_upgrade(
         fresh = rebuild_plan()
         validate_execution_approval(plan, approval, fresh_plan=fresh, operation=operation)
         live = plan.source.installation
-        # This NetBox-only executor uses the currently selected interpreter.
+        # Both executors use the currently selected interpreter.
         # An explicitly different runtime requires a separately approved workflow.
         if any(version != live.python_version for _, version in plan.source.python_by_stage):
             raise UpgradeExecutionError('Changing the selected Python runtime is not supported')
