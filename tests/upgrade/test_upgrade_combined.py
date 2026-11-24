@@ -108,6 +108,17 @@ class CombinedStageTests(unittest.TestCase):
                                    self.approval, resolver=self.resolver, probe=self.probe,
                                    reviewer=self.reviewer)
 
+    def test_recheck_rejects_new_release_warning(self):
+        prepared = self.prepare()[0]
+
+        def warning(*args, **kwargs):
+            return replace(self.reviewer(*args, **kwargs), warnings=('New release warning',))
+
+        with self.assertRaisesRegex(UpgradeExecutionError, 'new unvalidated plugin warnings'):
+            recheck_combined_stage(Mock(), self.install, self.plan.stages[0], prepared,
+                                   self.approval, resolver=self.resolver, probe=self.probe,
+                                   reviewer=warning)
+
     def test_recheck_rejects_new_plugin_conflict(self):
         prepared = self.prepare()[0]
 
