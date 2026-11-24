@@ -9,7 +9,7 @@ from typing import Sequence
 
 from . import __version__
 from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, Configuration, load_config
-from .i18n import LANGUAGES, Translator
+from .i18n import LANGUAGES, Translator, detect_language
 from .menu import MENU_ACTIONS
 from .services import (CRITICAL_SERVICES, ExclusiveLock, ServiceError, SystemdServices,
                        challenge, order_services, perform_service_batch as perform_service_batch, write_audit)
@@ -19,7 +19,7 @@ from .services import (CRITICAL_SERVICES, ExclusiveLock, ServiceError, SystemdSe
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='netbox-ops',
         description='NetBox maintenance CLI. Run without arguments for interactive menu.')
-    parser.add_argument('--lang', choices=LANGUAGES, default='pt', help='Interface language (pt/en).')
+    parser.add_argument('--lang', choices=LANGUAGES, default=detect_language(), help='Interface language (pt/en; default: system locale).')
     parser.add_argument('--no-tui', action='store_true',
                         help='Use the original numbered text menu (terminal fallback).')
     parser.add_argument('--config', type=Path, default=CONFIG_PATH,
