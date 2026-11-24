@@ -139,7 +139,7 @@ elif [[ "$mode" == verify ]]; then
   scenario="${NETBOX_VM_UPGRADE_SCENARIO:-}"
   if [[ -n "$scenario" ]]; then
     case "$scenario" in
-      netbox|plugins|combined|intermediate|failure) attempts=(1) ;;
+      netbox|plugins|combined|cross-minor|failure) attempts=(1) ;;
       *) echo 'Invalid upgrade test scenario' >&2; exit 2 ;;
     esac
   fi
