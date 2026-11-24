@@ -53,7 +53,15 @@ def execute_netbox_upgrade(
             phase = 'start writers'
             start_upgrade_writers(systemd)
             phase = 'functional health check'
-            health_check()
+            try:
+                health_check()
+            except Exception:
+                # Stop both writers even if one has already become unhealthy.
+                phase = 'functional health check; maintenance unverified'
+                systemd.stop(['netbox-rq', 'netbox'])
+                require_quiesced_writers(systemd)
+                phase = 'functional health check; writers stopped'
+                raise
             write_audit('NetBox upgrade completed')
             return recovery
         except Exception:
