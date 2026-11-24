@@ -232,7 +232,8 @@ def launch_prepared_release(prepared: PreparedRelease) -> int:
         launched = False
         try:
             bundle = _build_bundle(prepared, ACTIVE, interpreter)
-            write_audit(f'SELF-UPGRADE handoff requested target=v{prepared.target}', path=LOG_PATH)
+            write_audit(f'SELF-UPGRADE handoff requested installed=v{prepared.installed.version} '
+                        f'next=v{prepared.release.version} target=v{prepared.target}', path=LOG_PATH)
             child = subprocess.Popen(
                 [str(interpreter), '-I', '-B', str(bundle / 'runner.py'),
                  'apply', str(descriptor), str(lock.fd)],
@@ -250,7 +251,8 @@ def launch_prepared_release(prepared: PreparedRelease) -> int:
 
 def _preflight(active: Path, staged: Path, record: dict) -> None:
     local = inspect_installation()
-    if _snapshot(local) != record['installed']:
+    if (_snapshot(local) != record['installed']
+            or stat.S_IMODE(active.stat().st_mode) != record['mode']):
         raise SwapError('Installed release changed after handoff')
     if _identity(staged) != tuple(record['identity']):
         raise SwapError('Prepared installation identity changed')
@@ -268,6 +270,8 @@ def _preflight(active: Path, staged: Path, record: dict) -> None:
     if _digest_tree(staged) != record['digest']:
         raise SwapError('Prepared installation content changed')
     validate_installation_runtime(staged, steps[0])
+    if _digest_tree(staged) != record['digest']:
+        raise SwapError('Prepared installation changed during validation')
 
 
 def _validate(active: Path, record: dict) -> None:
