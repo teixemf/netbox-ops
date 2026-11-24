@@ -157,3 +157,29 @@ Progress counts validated stages, not estimated time or downloaded bytes.
 A successful execution displays the recovery directory. On failure, consult
 the safe diagnostic, audit log and recovery record before taking further action.
 Real end-to-end upgrade tests remain in #88.
+
+
+## Disposable VM validation
+
+The `VM E2E - NetBox upgrades` workflow reuses the pinned, checksum-verified
+Ubuntu baseline. Each matrix job creates an independent QCOW2 overlay and a
+fresh database with a real upstream Git release; it never downgrades the
+baseline database or publishes a new image.
+
+The scenarios cover NetBox 4.7.2 to 4.7.3, NetBox Inventory 2.7.0 to 2.7.1
+without a NetBox change, a combined upgrade, a required 3.7.x intermediate
+release between 3.6.9 and 4.0.11 using a separate Python 3.11 test runtime,
+and an injected final health validation failure after real migrations.
+
+Each case rejects a wrong plan fingerprint before downtime, verifies the
+protected combined archive and recovery metadata, and checks real database
+and media fixtures, Git revision, configuration integrity and unchanged
+PostgreSQL, Redis and Nginx service start timestamps. Success requires the
+expected NetBox status and RQ workers; the failure scenario instead requires
+stopped writers, a pending marker and a recovery diagnostic. Failure injection
+is confined to the test process; no production failure switch exists.
+
+Run the workflow on a pull request to dev or manually through GitHub Actions.
+Never run the guest fixture on an ordinary host. The script requires the
+explicit CI marker and QEMU/KVM virtualization, and the host harness checks
+the unchanged baseline hash.
