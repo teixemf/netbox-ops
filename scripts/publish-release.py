@@ -92,7 +92,8 @@ class GitHub:
 
 def require_main(api, commit):
     ref = api.request('GET', '/git/ref/heads/main')
-    if ref.get('object', {}) != {**ref.get('object', {}), 'type': 'commit', 'sha': commit}:
+    obj = ref.get('object', {})
+    if obj.get('type') != 'commit' or obj.get('sha') != commit:
         raise PublishError('main changed since validation; run the workflow again')
 
 
@@ -194,11 +195,13 @@ def publish(api, *, tag, commit, notes, assets):
         raise PublishError('Release tag disappeared before publication')
     current = api.request('GET', f'/releases/{number}')
     release_id(current, tag, notes)
-    if not current['draft']:
+    if not current['draft'] or current['id'] != number:
         raise PublishError('Draft was changed concurrently; review the release')
     published = api.request('PATCH', f'/releases/{number}', {'draft': False})
     release_id(published, tag, notes)
-    if published['draft'] or checked_assets(api, number, assets) != set(assets):
+    if (published['draft'] or published['id'] != number
+            or checked_assets(api, number, assets) != set(assets)
+            or not tag_exists(api, tag, commit)):
         raise PublishError('Publication could not be verified')
     return 'published and verified'
 
