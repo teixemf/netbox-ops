@@ -152,6 +152,10 @@ elif [[ "$mode" == verify ]]; then
       ssh_guest 'sudo touch /var/tmp/ci-isolation-marker'
     else
       ssh_guest 'sudo test ! -e /var/tmp/ci-isolation-marker'
+      if [[ "${NETBOX_VM_SELF_UPGRADE_E2E:-0}" == 1 ]]; then
+        ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
+        ssh_guest 'sudo /usr/bin/python3 -I -B /opt/netbox-ops/scripts/ci/netbox-vm-self-upgrade.py'
+      fi
     fi
     test "$(sha256sum netbox-ubuntu24.qcow2 | cut -d' ' -f1)" = "$base_hash"
     ssh_guest 'sudo systemctl poweroff --no-block' || true
