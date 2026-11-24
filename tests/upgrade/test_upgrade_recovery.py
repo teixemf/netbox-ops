@@ -131,6 +131,16 @@ class UpgradeRecoveryTests(unittest.TestCase):
             self.capture()
         self.assert_incomplete()
 
+    def test_failed_manifest_publication_leaves_no_completion_marker(self):
+        with patch('netbox_ops.upgrade_recovery.os.replace',
+                   side_effect=OSError('publication failed')):
+            with self.assertRaises(UpgradeExecutionError):
+                self.capture()
+        self.assert_incomplete()
+        directory = next(self.backups.iterdir())
+        self.assertTrue((directory / '.recovery.pending').is_file())
+        self.assertTrue(any(directory.glob('*.combined.tar.gz')))
+
     def test_insecure_backup_directory_is_rejected(self):
         self.backups.chmod(0o755)
         with self.assertRaises(UpgradeExecutionError):
