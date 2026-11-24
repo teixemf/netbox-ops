@@ -267,5 +267,19 @@
   "self_upgrade_notes_truncated": "Release notes truncated.",
   "self_upgrade_invalid_version": "Invalid stable version.",
   "self_upgrade_discovery_failed": "Unable to read official releases.",
-  "self_upgrade_release_missing": "Official release {version} not found."
+  "self_upgrade_release_missing": "Official release {version} not found.",
+  "self_upgrade_compatible": "Compatible — installation not enabled",
+  "self_upgrade_incompatible": "Incompatible — installation blocked",
+  "self_upgrade_reason_downgrade_blocked": "Downgrades are not allowed.",
+  "self_upgrade_reason_already_installed": "This version is already installed.",
+  "self_upgrade_reason_unknown_local_environment": "The local installation environment could not be verified.",
+  "self_upgrade_reason_too_many_intermediate_steps": "The upgrade path exceeds the supported step limit.",
+  "self_upgrade_reason_release_unavailable": "A required official release is unavailable.",
+  "self_upgrade_reason_missing_or_invalid_metadata": "Compatibility metadata is missing, invalid or unavailable.",
+  "self_upgrade_reason_unsupported_python": "The installed Python version is not supported.",
+  "self_upgrade_reason_unsupported_linux": "The installed Linux family is not supported.",
+  "self_upgrade_reason_unsupported_layout": "The installation layout is not supported.",
+  "self_upgrade_reason_verified_plan": "The release requirements are compatible with the verified local environment.",
+  "self_upgrade_blocked_at": "Blocked at version {version}.",
+  "self_upgrade_path": "Required upgrade path: {steps}"
 }

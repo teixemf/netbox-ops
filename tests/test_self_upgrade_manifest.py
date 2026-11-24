@@ -12,7 +12,7 @@ from urllib.request import Request
 from netbox_ops.self_upgrade_catalogue import CompatibilityCatalogue
 from netbox_ops.self_upgrade_compatibility import LocalEnvironment
 from netbox_ops.self_upgrade_manifest import (
-    ManifestError, _OfficialAssetRedirect, parse_manifest, read_release_requirements,
+    ManifestError, _OfficialAssetRedirect, encode_manifest, parse_manifest, read_release_requirements,
 )
 from netbox_ops.self_upgrade_releases import (
     DOWNLOAD_PREFIX, MAX_MANIFEST_BYTES, OfficialRelease, Version,
@@ -62,6 +62,19 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(result.layouts, frozenset({'archive'}))
         self.assertEqual(result.linux_families, frozenset({'debian', 'rhel'}))
         self.assertIsNone(result.python_max_exclusive)
+
+    def test_shared_encoder_round_trip_and_reject_invalid_requirements(self):
+        requirements = parse_manifest(
+            payload('v0.6.0', python_max_exclusive='3.15', required_intermediates=['v0.5.1']),
+            self.version,
+        )
+        encoded = encode_manifest(requirements)
+        self.assertEqual(parse_manifest(encoded, self.version), requirements)
+        self.assertEqual(encode_manifest(requirements), encoded)
+        with self.assertRaises(ManifestError):
+            encode_manifest(replace(requirements, python_min=(3, 16)))
+        with self.assertRaises(ManifestError):
+            encode_manifest(replace(requirements, layouts=frozenset({'Invalid'})))
 
     def test_invalid_schema_and_requirements(self):
         for changes in (
