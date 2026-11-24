@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from .upgrade_discovery import inspect_git_installation
+from .upgrade_discovery import _trusted_origin, inspect_git_installation
 from .upgrade_execution import UpgradeExecutionError
 from .upgrade_git import OFFICIAL_REMOTE, PinnedStage
 
@@ -52,11 +52,10 @@ def fetch_pinned_stage(
     if not _VERSION.fullmatch(stage.version) or not _SHA.fullmatch(stage.commit):
         raise UpgradeExecutionError('Invalid pinned NetBox release')
     live = inspector(root)
-    if live.root != root or live.origin != OFFICIAL_REMOTE:
-        # SSH-origin checkouts are recognised by discovery too, but we always
-        # fetch upgrade tags from the canonical HTTPS remote.
-        if live.root != root:
-            raise UpgradeExecutionError('NetBox Git root changed during fetch')
+    # Discovery verifies ownership, checkout structure and the official origin.
+    # Do not trust a custom inspector that returns a foreign remote.
+    if live.root != root or not _trusted_origin(live.origin):
+        raise UpgradeExecutionError('Unsupported NetBox Git installation during fetch')
     ref = 'refs/tags/v' + stage.version
     _run_git(root, ['fetch', '--no-tags', '--', OFFICIAL_REMOTE, ref],
              runner=runner, timeout=180)
@@ -81,7 +80,8 @@ def checkout_pinned_stage(
     if not _VERSION.fullmatch(stage.version):
         raise UpgradeExecutionError('Invalid NetBox stage version')
     live = inspector(root)
-    if live.root != root or live.commit != expected_commit:
+    if (live.root != root or live.commit != expected_commit
+            or not _trusted_origin(live.origin)):
         raise UpgradeExecutionError('NetBox Git checkout changed before stage')
     resolved = _run_git(root, ['rev-parse', '--verify', stage.commit + '^{commit}'],
                         runner=runner)
