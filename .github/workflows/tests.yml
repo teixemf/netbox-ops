@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_call:
   push:
     branches: [main, dev]
   pull_request:
@@ -39,6 +40,8 @@ jobs:
           bash scripts/build-release.sh
           archive="$(find dist -maxdepth 1 -type f -name 'netbox-ops-v*.tar.gz' -print -quit)"
           test -n "$archive"
+          tag="$(basename "$archive" .tar.gz)"
+          python3 scripts/release-candidate.py validate "$archive" "${tag#netbox-ops-}"
           tar -tzf "$archive" > /tmp/netbox-ops-archive-files
           grep -Fxq 'netbox-ops/install.sh' /tmp/netbox-ops-archive-files
           grep -Fxq 'netbox-ops/netbox_ops.py' /tmp/netbox-ops-archive-files

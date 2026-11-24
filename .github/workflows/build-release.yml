@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing annotated release tag (e.g. v0.5.0)'
+        description: 'Planned stable release tag (e.g. v0.6.0); no tag is created'
         required: true
         type: string
 
@@ -12,59 +12,60 @@ permissions:
   contents: read
 
 jobs:
-  package:
-    name: Build Linux archive
+  preflight:
+    name: Validate release source
     runs-on: ubuntu-latest
     steps:
-      - name: Check out release tag
+      - name: Check planned tag and source branch
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          test "$SOURCE_REF" = refs/heads/main
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+  tests:
+    needs: preflight
+    uses: ./.github/workflows/tests.yml
+
+  package:
+    name: Validate and build release candidate
+    needs: [preflight, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tested main commit
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Verify annotated release tag
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        shell: bash
-        run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo 'Expected a release tag such as v0.5.0'
-            exit 1
-          fi
-          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
-          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Build and validate release archive
+      - name: Build and validate release assets
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           bash -n scripts/build-release.sh
-          bash scripts/build-release.sh "$RELEASE_TAG"
-          archive="dist/netbox-ops-${RELEASE_TAG}.tar.gz"
+          bash scripts/build-release.sh
+          archive="dist/netbox-ops-$RELEASE_TAG.tar.gz"
+          python3 scripts/release-candidate.py validate "$archive" "$RELEASE_TAG"
 
-          gzip -t "$archive"
-          tar -tzf "$archive" > "$RUNNER_TEMP/netbox-ops-release-files"
-          grep -Fxq 'netbox-ops/install.sh' "$RUNNER_TEMP/netbox-ops-release-files"
-          grep -Fxq 'netbox-ops/upgrade.sh' "$RUNNER_TEMP/netbox-ops-release-files"
-          grep -Fxq 'netbox-ops/netbox_ops.py' "$RUNNER_TEMP/netbox-ops-release-files"
-          if grep -Eq '^netbox-ops/(\.github/|tests/|scripts/)' "$RUNNER_TEMP/netbox-ops-release-files"; then
-            echo 'Unexpected development files in release archive'
-            exit 1
-          fi
-
-          extracted="$(mktemp -d)"
-          trap 'rm -rf -- "$extracted"' EXIT
-          tar -xzf "$archive" -C "$extracted"
-          test -x "$extracted/netbox-ops/install.sh"
-          test -x "$extracted/netbox-ops/upgrade.sh"
-
-      - name: Upload release archive
+      - name: Upload validated release candidate
         uses: actions/upload-artifact@v4
         with:
           name: netbox-ops-${{ inputs.tag }}
-          path: dist/netbox-ops-${{ inputs.tag }}.tar.gz
+          path: |
+            dist/netbox-ops-${{ inputs.tag }}.tar.gz
+            dist/netbox-ops-${{ inputs.tag }}.tar.gz.sha256
+            dist/netbox-ops-${{ inputs.tag }}.compatibility.json
+            dist/netbox-ops-${{ inputs.tag }}.notes.md
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
