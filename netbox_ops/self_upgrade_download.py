@@ -7,11 +7,12 @@ import stat
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from .self_upgrade_archive import (
     MAX_ARCHIVE_BYTES, ReleaseArchiveError, verify_release_archive,
 )
+from .self_upgrade_manifest import ManifestError, _open as _open_official_asset
 from .self_upgrade_releases import DOWNLOAD_PREFIX, OfficialRelease
 
 MAX_CHECKSUM_BYTES = 256
@@ -32,13 +33,13 @@ def _download(url: str, destination: Path, limit: int, *, opener) -> bytes | Non
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise ReleaseArchiveError(f'Unable to download release asset: {exc}') from exc
+    except (HTTPError, URLError, TimeoutError, OSError, ManifestError) as exc:
+        raise ReleaseArchiveError('Unable to download official release asset') from exc
     return destination.read_bytes() if limit == MAX_CHECKSUM_BYTES else None
 
 
 def download_release(release: OfficialRelease, *, temp_root: Path = Path('/tmp'),
-                     opener=urlopen) -> Path:
+                     opener=_open_official_asset) -> Path:
     """Return a verified archive in a private /tmp directory.
 
     The caller owns the returned directory and must remove it after staging.
@@ -50,6 +51,8 @@ def download_release(release: OfficialRelease, *, temp_root: Path = Path('/tmp')
     if (release.tag != f'v{release.version}' or release.archive.name != archive_name or release.checksum.name != checksum_name
             or release.archive.url != f'{DOWNLOAD_PREFIX}{release.tag}/{archive_name}'
             or release.checksum.url != f'{DOWNLOAD_PREFIX}{release.tag}/{checksum_name}'
+            or type(release.archive.size) is not int
+            or type(release.checksum.size) is not int
             or not 0 < release.archive.size <= MAX_ARCHIVE_BYTES
             or not 0 < release.checksum.size <= MAX_CHECKSUM_BYTES):
         raise ReleaseArchiveError('Invalid official release assets')
@@ -63,6 +66,8 @@ def download_release(release: OfficialRelease, *, temp_root: Path = Path('/tmp')
     if info.st_uid not in (0, os.geteuid()):
         raise ReleaseArchiveError('Unsafe temporary directory owner')
 
+    if shutil.disk_usage(temp_root).free < release.archive.size + release.checksum.size + 1024 * 1024:
+        raise ReleaseArchiveError('Not enough free space for release download')
     directory = Path(tempfile.mkdtemp(prefix='netbox-ops-upgrade-', dir=temp_root))
     try:
         archive = directory / archive_name
