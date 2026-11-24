@@ -1,7 +1,7 @@
 """Read the NetBox application release, never the Django management version.
 
 Read release.yaml for recent installations and a literal settings.VERSION for
-older releases. Never import the NetBox venv or its local configuration.
+early NetBox 4 releases. Never import the NetBox venv or its local configuration.
 """
 from __future__ import annotations
 import ast
@@ -24,7 +24,8 @@ def read_netbox_version(release_file: Path = DEFAULT_RELEASE) -> str:
                 if match:
                     return match.group(1).removeprefix('v')
     except FileNotFoundError:
-        # Older releases store a literal VERSION in netbox/settings.py.
+        # Early NetBox 4 releases store a literal VERSION in netbox/settings.py.
+        # Reading older metadata only identifies unsupported installations.
         # Do not import or execute settings, or fall back on malformed YAML.
         try:
             settings = release_file.parent / 'netbox/settings.py'
