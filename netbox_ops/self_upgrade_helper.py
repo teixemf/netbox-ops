@@ -41,6 +41,8 @@ def run_approved_swap(
         write_audit('SELF-UPGRADE transaction requested', path=audit_path)
         # Recheck approval only after taking the exclusive lock.
         try:
+            if state.exists() or state.is_symlink() or backup.exists() or backup.is_symlink():
+                raise SwapError('Existing transaction requires recovery first')
             preflight(staged)
         except Exception as exc:
             write_audit(f'SELF-UPGRADE preflight failed type={type(exc).__name__}',
