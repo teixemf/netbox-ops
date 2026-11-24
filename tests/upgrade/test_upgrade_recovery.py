@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from netbox_ops.config import Configuration
 from netbox_ops.upgrade_execution import UpgradeExecutionError
+from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_recovery import _capture_quiesced_recovery
 
 
@@ -33,7 +34,8 @@ class UpgradeRecoveryTests(unittest.TestCase):
         self.cfg = Configuration(units={}, backup_directory=self.backups)
         self.plan = SimpleNamespace(
             source=SimpleNamespace(
-                installation=SimpleNamespace(root=self.root, commit='a' * 40),
+                installation=SimpleNamespace(root=self.root, commit='a' * 40,
+                                             python_version='3.12.1', reference='HEAD'),
                 inventory=SimpleNamespace(
                     requirements_hash=hashlib.sha256(self.requirements).hexdigest(),
                 ),
@@ -43,6 +45,7 @@ class UpgradeRecoveryTests(unittest.TestCase):
             stages=[SimpleNamespace(netbox_version='4.4.1')],
             plugins=[SimpleNamespace(package='example-plugin', installed_version='1.2.3')],
         )
+        self.pinned_stages = (PinnedStage('4.4.1', 'b' * 40),)
         self.systemd = Mock()
         self.systemd.status.return_value = [
             SimpleNamespace(name=name, loaded='loaded', active='inactive')
@@ -66,7 +69,8 @@ class UpgradeRecoveryTests(unittest.TestCase):
         return SimpleNamespace(path=archive, kind=kind)
 
     def capture(self):
-        return _capture_quiesced_recovery(self.cfg, self.plan, systemd=self.systemd)
+        return _capture_quiesced_recovery(self.cfg, self.plan, systemd=self.systemd,
+                                           pinned_stages=self.pinned_stages)
 
     def assert_incomplete(self):
         for directory in self.backups.iterdir():
@@ -85,6 +89,8 @@ class UpgradeRecoveryTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
         record = json.loads(recovery.manifest.read_text())
         self.assertEqual(record['git_commit'], 'a' * 40)
+        self.assertEqual(record['stage_commits'], [{'version': '4.4.1', 'commit': 'b' * 40}])
+        self.assertEqual(record['python_version'], '3.12.1')
         self.assertEqual(record['plugin_versions'], [['example-plugin', '1.2.3']])
         self.assertEqual(record['archive'], recovery.archive.name)
         self.assertNotIn(self.secret.decode().strip(), recovery.manifest.read_text())
@@ -93,6 +99,13 @@ class UpgradeRecoveryTests(unittest.TestCase):
         self.manager.backup.assert_not_called()
         self.systemd.stop.assert_not_called()
         self.systemd.start.assert_not_called()
+
+    def test_unapproved_pinned_stage_blocks_capture(self):
+        self.pinned_stages = (PinnedStage('4.5.0', 'b' * 40),)
+        with self.assertRaises(UpgradeExecutionError):
+            self.capture()
+        self.manager_class.assert_not_called()
+        self.assertEqual(list(self.backups.iterdir()), [])
 
     def test_active_writer_blocks_capture(self):
         self.systemd.status.return_value[0].active = 'active'
