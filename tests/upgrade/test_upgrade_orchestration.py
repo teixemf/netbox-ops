@@ -235,3 +235,89 @@ class PluginOrchestrationTests(unittest.TestCase):
         self.assertEqual(self.calls.SystemdServices.return_value.stop.call_args_list,
                          [call(['netbox-rq']), call(['netbox'])])
         self.calls.finish_maintenance.assert_not_called()
+
+
+class CombinedOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        PluginOrchestrationTests.setUp(self)
+        for name in ('prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage'):
+            self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
+        self.plan.target_netbox = '4.6.1'
+        self.plan.warnings = ()
+        self.plan.stages = (
+            SimpleNamespace(plugin_versions=(('example-plugin', '1.0.0'),)),
+            SimpleNamespace(plugin_versions=(('example-plugin', '2.0.0'),)),
+        )
+        self.pinned = (PinnedStage('4.5.1', 'b' * 40), PinnedStage('4.6.1', 'c' * 40))
+        self.calls.pin_release_stages.return_value = self.pinned
+        self.prepared = ('prepared-first', 'prepared-final')
+        self.calls.prepare_combined_stages.return_value = self.prepared
+        self.intermediate = SimpleNamespace(root=self.installation.root, version='4.5.1')
+        self.final = SimpleNamespace(root=self.installation.root, version='4.6.1')
+        self.calls.run_combined_stage.side_effect = [
+            (self.intermediate, self.baseline.plugins),
+            (self.final, (('example_plugin', '2.0.0'),)),
+        ]
+
+    def execute(self):
+        return orchestration.execute_combined_upgrade(
+            Mock(), self.plan, Mock(), rebuild_plan=self.calls.rebuild,
+            health_url='https://netbox.example/api/status/',
+        )
+
+    def test_single_recovery_and_sequential_combined_stages(self):
+        calls = self.calls
+        self.assertIs(self.execute(), calls._capture_quiesced_recovery.return_value)
+        names = [item[0] for item in calls.mock_calls]
+        ordered = ('prepare_combined_stages', 'begin_maintenance', 'stop_upgrade_writers',
+                   '_capture_quiesced_recovery', 'recheck_combined_stage',
+                   'fetch_pinned_stage', 'run_combined_stage', 'start_upgrade_writers',
+                   'wait_for_netbox_health', 'finish_maintenance')
+        positions = [names.index(name) for name in ordered]
+        self.assertEqual(positions, sorted(positions))
+        calls._capture_quiesced_recovery.assert_called_once()
+        calls.stop_upgrade_writers.assert_called_once()
+        calls.start_upgrade_writers.assert_called_once()
+        self.assertEqual(calls.recheck_combined_stage.call_count, 2)
+        self.assertEqual(calls.run_combined_stage.call_count, 2)
+        self.assertIs(calls.run_combined_stage.call_args.args[0], self.intermediate)
+        self.assertEqual(calls.run_combined_stage.call_args.args[2], 'prepared-final')
+        calls.run_stage.assert_not_called()
+        calls.run_plugin_stage.assert_not_called()
+        self.assertEqual(calls.wait_for_netbox_health.call_args.args[2].plugins,
+                         (('example_plugin', '2.0.0'),))
+
+    def test_final_preflight_conflict_stops_after_first_stage(self):
+        self.calls.recheck_combined_stage.side_effect = [None, UpgradeExecutionError('conflict')]
+        with self.assertRaisesRegex(UpgradeExecutionError,
+                                    'completed stages: 1/2; last completed release: 4.5.1') as caught:
+            self.execute()
+        self.assertIn('stage 2 preflight', str(caught.exception))
+        self.assertIn('pre-upgrade-test', str(caught.exception))
+        self.calls.run_combined_stage.assert_called_once()
+        self.calls.start_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
+
+    def test_full_preflight_failure_never_enters_maintenance(self):
+        self.calls.prepare_combined_stages.side_effect = UpgradeExecutionError('conflict')
+        with self.assertRaises(UpgradeExecutionError):
+            self.execute()
+        self.calls.begin_maintenance.assert_not_called()
+        self.calls._capture_quiesced_recovery.assert_not_called()
+
+    def test_intermediate_plugin_change_stops_before_second_stage(self):
+        self.calls.run_combined_stage.side_effect = [(self.intermediate, (('example_plugin', '2.0.0'),))]
+        with self.assertRaisesRegex(UpgradeExecutionError, 'completed stages: 0/2'):
+            self.execute()
+        self.calls.run_combined_stage.assert_called_once()
+        self.calls.start_upgrade_writers.assert_not_called()
+
+    def test_second_stage_failure_never_restarts_and_reports_recovery(self):
+        self.calls.run_combined_stage.side_effect = [
+            (self.intermediate, self.baseline.plugins), RuntimeError('private secret'),
+        ]
+        with self.assertRaisesRegex(UpgradeExecutionError, 'completed stages: 1/2') as caught:
+            self.execute()
+        self.assertNotIn('private secret', str(caught.exception))
+        self.calls.start_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()

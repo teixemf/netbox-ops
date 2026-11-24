@@ -42,7 +42,7 @@ class UpgradeRecoveryTests(unittest.TestCase):
             ),
             current_netbox='4.4.0', target_netbox='4.4.1',
             fingerprint='approved',
-            stages=[SimpleNamespace(netbox_version='4.4.1')],
+            stages=[SimpleNamespace(netbox_version='4.4.1', plugin_versions=(('example-plugin', '1.2.3'),))],
             plugins=[SimpleNamespace(package='example-plugin', installed_version='1.2.3')],
         )
         self.pinned_stages = (PinnedStage('4.4.1', 'b' * 40),)
@@ -89,7 +89,8 @@ class UpgradeRecoveryTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
         record = json.loads(recovery.manifest.read_text())
         self.assertEqual(record['git_commit'], 'a' * 40)
-        self.assertEqual(record['stage_commits'], [{'version': '4.4.1', 'commit': 'b' * 40}])
+        self.assertEqual(record['stage_commits'], [{'version': '4.4.1', 'commit': 'b' * 40,
+                                                    'plugin_versions': [['example-plugin', '1.2.3']]}])
         self.assertEqual(record['python_version'], '3.12.1')
         self.assertEqual(record['plugin_versions'], [['example-plugin', '1.2.3']])
         self.assertEqual(record['archive'], recovery.archive.name)

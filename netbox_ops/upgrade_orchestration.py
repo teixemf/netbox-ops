@@ -1,4 +1,4 @@
-"""Coordinate approved NetBox and plugin-only upgrades under the shared lock."""
+"""Coordinate approved NetBox, plugin and combined upgrades under the shared lock."""
 from __future__ import annotations
 
 import os
@@ -12,6 +12,7 @@ from .upgrade_execution import (
     validate_netbox_only_pins,
 )
 from .upgrade_checkout import fetch_pinned_stage
+from .upgrade_combined import prepare_combined_stages, recheck_combined_stage, run_combined_stage
 from .upgrade_git import PinnedStage, pin_release_stages
 from .upgrade_health import read_netbox_health, wait_for_netbox_health
 from .plugin_inventory import inventory_plugins, normalize_name
@@ -50,6 +51,18 @@ def execute_plugin_upgrade(
                             operation='plugins')
 
 
+def execute_combined_upgrade(
+    cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
+    rebuild_plan: Callable[[], UpgradePlan],
+    health_url: str,
+    authorization: str | None = None,
+) -> UpgradeRecovery:
+    """Execute NetBox and selected plugin stages in one maintenance window."""
+    return _execute_upgrade(cfg, plan, approval, rebuild_plan=rebuild_plan,
+                            health_url=health_url, authorization=authorization,
+                            operation='combined')
+
+
 def _execute_upgrade(
     cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
     rebuild_plan: Callable[[], UpgradePlan],
@@ -62,7 +75,7 @@ def _execute_upgrade(
         fresh = rebuild_plan()
         validate_execution_approval(plan, approval, fresh_plan=fresh, operation=operation)
         live = plan.source.installation
-        # Both executors use the currently selected interpreter.
+        # All executors use the currently selected interpreter.
         # An explicitly different runtime requires a separately approved workflow.
         if any(version != live.python_version for _, version in plan.source.python_by_stage):
             raise UpgradeExecutionError('Changing the selected Python runtime is not supported')
@@ -72,18 +85,22 @@ def _execute_upgrade(
         else:
             if inventory_plugins(live) != plan.source.inventory:
                 raise UpgradeExecutionError('Plugin inventory changed before dependency preflight')
-            prepared = preflight_plugin_upgrade(plan, approval)
+            if operation == 'plugins':
+                prepared = preflight_plugin_upgrade(plan, approval)
         base_python = resolve_base_python(live)
         validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
         _private_directory(cfg.backup_directory)
         baseline = read_netbox_health(health_url, authorization=authorization)
         if baseline.version != plan.current_netbox:
             raise UpgradeExecutionError('HTTP status does not match the installed NetBox release')
-        stages = (pin_release_stages(plan) if operation == 'netbox' else
+        stages = (pin_release_stages(plan) if operation != 'plugins' else
                   (PinnedStage(live.version, live.commit),))
+        combined = (prepare_combined_stages(cfg, plan, approval, stages)
+                    if operation == 'combined' else ())
         systemd = SystemdServices(cfg)
         recovery = None
         phase = 'stop writers'
+        completed = 0
         write_audit(f'NetBox {operation} upgrade maintenance requested')
         begin_maintenance()
         try:
@@ -100,15 +117,36 @@ def _execute_upgrade(
                 if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
                     raise UpgradeExecutionError('Configured plugin registry changed during installation')
                 expected_health = replace(baseline, plugins=loaded)
+                completed = 1
                 write_audit('NetBox plugin stage completed')
             for index, (stage, planned) in enumerate(zip(stages, plan.stages, strict=True), 1):
                 if operation == 'plugins':
                     break
+                if operation == 'combined':
+                    phase = f'stage {index} preflight'
+                    require_quiesced_writers(systemd)
+                    validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
+                    recheck_combined_stage(
+                        cfg, live, planned, combined[index - 1], approval,
+                        approved_warnings=plan.warnings,
+                    )
                 phase = f'stage {index} fetch'
                 require_quiesced_writers(systemd)
                 write_audit(f'NetBox upgrade starting stage={index} version={stage.version} commit={stage.commit}')
                 fetch_pinned_stage(live.root, stage)
                 phase = f'stage {index} checkout and upgrade script'
+                if operation == 'combined':
+                    live, loaded = run_combined_stage(
+                        live, plan, combined[index - 1], base_python, systemd=systemd,
+                    )
+                    if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
+                        raise UpgradeExecutionError('Configured plugin registry changed during combined upgrade')
+                    if index < len(stages) and loaded != baseline.plugins:
+                        raise UpgradeExecutionError('Plugin registry changed before the final stage')
+                    expected_health = replace(baseline, plugins=loaded)
+                    completed = index
+                    write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
+                    continue
                 live = run_stage(live, stage, systemd=systemd)
                 phase = f'stage {index} plugin validation'
                 actual = inventory_plugins(live)
@@ -120,6 +158,7 @@ def _execute_upgrade(
                 if any(installed.get(normalize_name(name)) != version
                        for name, version in planned.plugin_versions):
                     raise UpgradeExecutionError('An approved plugin version changed during the stage')
+                completed = index
                 write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
             phase = 'start writers'
             try:
@@ -149,10 +188,12 @@ def _execute_upgrade(
             # A partial stop/start may require manual service inspection.
             location = recovery.directory.name if recovery else 'not verified'
             try:
-                write_audit(f'NetBox upgrade failed phase={phase} recovery={location}')
+                write_audit(f'NetBox upgrade failed phase={phase} completed={completed} recovery={location}')
             except Exception:
                 pass
+            last = stages[completed - 1].version if completed else 'none'
             raise UpgradeExecutionError(
                 f'Upgrade failed during {phase}; recovery: {location}; '
-                'inspect service state before manual recovery'
+                f'completed stages: {completed}/{len(stages)}; last completed release: {last}; '
+                'inspect service state and recovery.json before manual recovery; no automatic rollback'
             ) from None

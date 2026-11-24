@@ -89,3 +89,32 @@ If installation, migrations, static collection or validation fails, retain the
 recovery point and pending marker; do not restart writers automatically or
 assume restoring the old requirements is sufficient after database migrations.
 CLI/TUI wiring and disposable-VM testing remain in #87 and #88.
+
+
+## Combined upgrades
+
+`execute_combined_upgrade` uses one approved plan, one operation lock, one
+verified recovery point and one maintenance window. It pins the official Git
+commits and resolves the exact core and local package requirements of every
+required NetBox release before downtime.
+
+Intermediate releases retain the original plugin pins. The final release
+receives the selected plugin pins after checkout, before the official
+`upgrade.sh` runs. Unselected requirements are preserved, and exact package
+constraints are passed to the script to prevent dependency resolution from
+silently changing approved versions. The combined backend uses the same
+wheel-only dependency policy and existing Python runtime as the plugin-only
+backend.
+
+Before each stage it verifies the live PostgreSQL and Redis prerequisites,
+refreshes compatibility for the stage's exact plugin versions and reruns
+dependency resolution. A new conflict or newly unverified requirement stops
+the operation. Each completed stage must pass dependency, package-version,
+Django migration and plugin registry checks. The writers remain stopped
+between stages; HTTP and worker health are verified after the final start.
+
+Recovery metadata contains the planned Git revisions and plugin versions for
+each stage. Failure reports include the number and release of the last
+validated stage, if any. Review the pending marker, audit log and recovery
+record before performing manual recovery. A failed stage may already have
+applied migrations; there is no automatic full rollback.
