@@ -40,7 +40,7 @@ ARCHIVE="$TEMP/$STEM.tar.gz"
 # Only commit-tracked installation files; never include local secrets or runtime data.
 git archive --format=tar --prefix=netbox-ops/ "$REF" \
     LICENSE README.md CHANGELOG.md config.example.json \
-    install.sh upgrade.sh netbox_ops.py netbox_ops \
+    install.sh upgrade.sh uninstall.sh netbox_ops.py netbox_ops \
     | gzip -n > "$ARCHIVE"
 
 # Validate the committed package before exposing any output artifacts.

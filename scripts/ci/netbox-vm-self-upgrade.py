@@ -41,7 +41,7 @@ UNITS = ('netbox.service', 'netbox-rq.service', 'nginx.service',
 PRESERVED = (Path('/etc/netbox-ops/config.json'),
              Path('/opt/netbox/netbox/netbox/configuration.py'), LAUNCHER)
 FILES = ('LICENSE', 'README.md', 'CHANGELOG.md', 'config.example.json',
-         'install.sh', 'upgrade.sh', 'netbox_ops.py', 'netbox_ops')
+         'install.sh', 'upgrade.sh', 'uninstall.sh', 'netbox_ops.py', 'netbox_ops')
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C', 'LC_ALL': 'C'}
 
 

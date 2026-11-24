@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Check Bash syntax
-        run: bash -n install.sh upgrade.sh
+        run: bash -n install.sh upgrade.sh uninstall.sh
       - name: Run unit and regression tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
 
@@ -58,6 +58,7 @@ jobs:
           tar -xzf "$archive" -C "$extracted"
           test -x "$extracted/netbox-ops/install.sh"
           test -x "$extracted/netbox-ops/upgrade.sh"
+          test -x "$extracted/netbox-ops/uninstall.sh"
 
   integration:
     name: PostgreSQL integration / ${{ matrix.distro }}

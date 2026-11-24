@@ -59,6 +59,10 @@ New `combined` backups contain the PostgreSQL database and NetBox media files, n
 
 Review `config.example.json` and the configuration stored under `/etc/netbox-ops` before performing operations. Backups are stored under `/var/lib/netbox-ops/backups` by default.
 
+## Uninstall
+
+Run `sudo /opt/netbox-ops/uninstall.sh` from an interactive terminal. Exit other netbox-ops sessions first. The script previews the fixed application paths and requires typing `UNINSTALL`. It preserves configuration, logs and all backups by default. Configuration and known audit logs can be removed only with separate typed confirmations. Customized launchers or logrotate policies are left untouched; unknown installation files, unsafe paths and pending upgrades block removal. Review and move any locally stored data out of the application directory before uninstalling. The script never removes NetBox, system packages or unrelated services. To retry a partial removal, run the uninstaller from a trusted, root-owned extracted release.
+
 ## Project status
 
 **Current version: 0.5.0 — early development.**

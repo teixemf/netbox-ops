@@ -23,7 +23,7 @@ _REQUIRED_FILES = frozenset({
     'LICENSE', 'README.md', 'CHANGELOG.md', 'config.example.json',
     'install.sh', 'upgrade.sh', 'netbox_ops.py',
 })
-_ALLOWED_TOP = _REQUIRED_FILES | {'netbox_ops', 'venv', '__pycache__'}
+_ALLOWED_TOP = _REQUIRED_FILES | {'netbox_ops', 'venv', '__pycache__', 'uninstall.sh'}
 _PYTHON_NAME = re.compile(r'python(?:3(?:\.[0-9]+t?)?)?')
 
 
@@ -86,7 +86,7 @@ def _check_tree(root: Path, uid: int, *, allow_python_links: bool) -> os.stat_re
     top = {entry.name for entry in root.iterdir()}
     if not _REQUIRED_FILES | {'netbox_ops', 'venv'} <= top or top - _ALLOWED_TOP:
         raise ReleaseArchiveError('Unknown installation layout or local files')
-    for name in _REQUIRED_FILES:
+    for name in _REQUIRED_FILES | ({'uninstall.sh'} if 'uninstall.sh' in top else set()):
         if not (root / name).is_file() or (root / name).is_symlink():
             raise ReleaseArchiveError('Missing release file')
     for name in ('netbox_ops', 'venv'):

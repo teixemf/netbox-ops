@@ -25,7 +25,7 @@ _REQUIRED = frozenset({
     "netbox-ops/CHANGELOG.md", "netbox-ops/config.example.json",
 })
 _ROOT_FILES = frozenset(PurePosixPath(name).name for name in _REQUIRED
-                        if len(PurePosixPath(name).parts) == 2)
+                        if len(PurePosixPath(name).parts) == 2) | {'uninstall.sh'}
 
 
 class ReleaseArchiveError(Exception):
