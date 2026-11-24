@@ -138,6 +138,12 @@ def prepare_combined_stages(
         core = git(live.root, ['show', pinned.commit + ':requirements.txt']).encode('utf-8')
         pins = prepare_plugin_upgrade(plan, local, core, stage_index=index)
         resolved = _resolve(pins, live, approval, resolver)
+        prior_passed = any(
+            stage_version == planned.netbox_version and item.status == 'passed' and item.checked_core
+            for _, stage_version, item in plan.source.preflights
+        )
+        if prior_passed and (resolved.status != 'passed' or not resolved.checked_core):
+            raise UpgradeExecutionError('Approved combined dependency verification became uncertain')
         prepared.append(CombinedStage(pinned, core, pins, resolved))
     return tuple(prepared)
 
@@ -146,7 +152,7 @@ def recheck_combined_stage(
     cfg: Configuration, live: GitNetBoxInstallation, planned: UpgradeStage,
     prepared: CombinedStage, approval: ExecutionApproval, *,
     resolver: Callable = isolated_dependency_preflight, probe: Callable = probe_server_versions,
-    reviewer: Callable = review_plugin_upgrade,
+    reviewer: Callable = review_plugin_upgrade, approved_warnings: tuple[str, ...] = (),
 ) -> None:
     """Reject new conflicts or uncertainty immediately before each checkout."""
     _check_servers(cfg, live, planned, approval, probe=probe)
@@ -161,6 +167,8 @@ def recheck_combined_stage(
                               version=version, preflights=[result])
         except Exception:
             raise UpgradeExecutionError('Cannot refresh combined plugin compatibility') from None
+        if any(warning not in approved_warnings for warning in review.warnings):
+            raise UpgradeExecutionError('Combined stage has new unvalidated plugin warnings')
         if review.selected_version != version or len(review.stages) != 1:
             raise UpgradeExecutionError('Combined plugin compatibility could not be verified')
         check = review.stages[0]
