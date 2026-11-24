@@ -71,7 +71,8 @@ def validate_installation_runtime(root: Path, expected: Version) -> None:
 
 
 def prepare_staged_runtime(staged: Path, expected: Version, *,
-                           python: Path | None = None) -> None:
+                           python: Path | None = None,
+                           expected_python: tuple[int, int] | None = None) -> None:
     """Build a relocatable launcher runtime, with no packages or service actions.
 
     The venv is created with copies and without pip. The existing launcher uses
@@ -100,6 +101,8 @@ def prepare_staged_runtime(staged: Path, expected: Version, *,
         raise ReleaseArchiveError('Cannot determine Python version') from exc
     if major != 3 or minor < 12:
         raise ReleaseArchiveError('Python 3.12 or newer is required')
+    if expected_python is not None and (major, minor) != expected_python:
+        raise ReleaseArchiveError('Base Python changed since compatibility verification')
     try:
         _run([str(interpreter), '-I', '-B', '-m', 'venv', '--copies',
               '--without-pip', str(venv)], staged, timeout=120)
@@ -113,6 +116,11 @@ def prepare_staged_runtime(staged: Path, expected: Version, *,
             elif (not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))
                   or info.st_uid != os.geteuid() or info.st_mode & 0o6022):
                 raise ReleaseArchiveError('Unsafe virtual environment entry')
+        if expected_python is not None:
+            actual = _run([str(venv / 'bin/python'), '-I', '-B', '-c',
+                           'import sys; print(*sys.version_info[:2])'], staged, timeout=15)
+            if actual != ' '.join(map(str, expected_python)):
+                raise ReleaseArchiveError('Staged Python differs from verified requirements')
         validate_installation_runtime(staged, expected)
     except BaseException:
         if venv.is_dir() and not venv.is_symlink():
@@ -123,7 +131,8 @@ def prepare_staged_runtime(staged: Path, expected: Version, *,
 def stage_installation(archive: Path, checksum: bytes, expected: Version, *,
                        python: Path | None = None,
                        temp_root: Path = Path('/tmp'),
-                       install_parent: Path = Path('/opt')) -> Path:
+                       install_parent: Path = Path('/opt'),
+                       expected_python: tuple[int, int] | None = None) -> Path:
     """Prepare a complete candidate after the caller approves compatibility.
 
     A failure removes the candidate without touching the active installation.
@@ -134,7 +143,12 @@ def stage_installation(archive: Path, checksum: bytes, expected: Version, *,
     staged = stage_release(archive, checksum, temp_root=temp_root,
                            install_parent=install_parent)
     try:
-        prepare_staged_runtime(staged, expected, python=python)
+        # Check the package's declared version before executing its Python code.
+        from .self_upgrade_installation import _read_version
+
+        if _read_version(staged) != expected:
+            raise ReleaseArchiveError('Staged package version does not match the selected release')
+        prepare_staged_runtime(staged, expected, python=python, expected_python=expected_python)
         return staged
     except BaseException:
         shutil.rmtree(staged)

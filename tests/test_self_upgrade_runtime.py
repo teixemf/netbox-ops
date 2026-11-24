@@ -40,7 +40,11 @@ class RuntimeTests(unittest.TestCase):
         archive = self.parent / 'netbox-ops-v0.6.0.tar.gz'
         files = {
             'netbox-ops/netbox_ops.py': f'print("netbox-ops {version}")'.encode(),
-            'netbox-ops/netbox_ops/__init__.py': b'',
+            'netbox-ops/netbox_ops/__init__.py': f'__version__ = "{version}"\n'.encode(),
+            'netbox-ops/LICENSE': b'license',
+            'netbox-ops/README.md': b'readme',
+            'netbox-ops/CHANGELOG.md': b'changes',
+            'netbox-ops/config.example.json': b'{}',
             'netbox-ops/install.sh': b'#!/bin/sh\nexit 99\n',
             'netbox-ops/upgrade.sh': b'#!/bin/sh\nexit 99\n',
         }
@@ -88,6 +92,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse((self.staged / 'venv').exists())
         self.assertTrue((self.staged / 'netbox_ops.py').is_file())
         self.assertEqual((self.active / 'keep').read_text(), 'original')
+
+    def test_base_python_change_blocks_before_building_venv(self):
+        with self.assertRaisesRegex(ReleaseArchiveError, 'Base Python changed'):
+            prepare_staged_runtime(self.staged, self.version, expected_python=(99, 0))
+        self.assertFalse((self.staged / 'venv').exists())
+
+    def test_staged_version_mismatch_blocks_package_execution(self):
+        archive, checksum = self.make_archive(version='0.7.0')
+        with patch('netbox_ops.self_upgrade_runtime.prepare_staged_runtime') as runtime:
+            with self.assertRaisesRegex(ReleaseArchiveError, 'Staged package version'):
+                stage_installation(archive, checksum, self.version,
+                                   temp_root=self.parent, install_parent=self.parent)
+        runtime.assert_not_called()
+        self.assertEqual(list(self.parent.glob('.netbox-ops-stage-*')), [self.staged])
 
     def test_preexisting_venv_is_not_modified(self):
         venv = self.staged / 'venv'

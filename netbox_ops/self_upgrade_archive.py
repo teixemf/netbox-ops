@@ -5,19 +5,27 @@ are separate steps; callers must never extract a failed verification.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import re
 import tarfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 256 * 1024 * 1024
 MAX_MEMBERS = 2000
+# Include tar headers, padding and bounded extended metadata in the stream limit.
+MAX_TAR_BYTES = MAX_EXTRACTED_BYTES + MAX_MEMBERS * 1024 + 16 * 1024 * 1024
 _CHECKSUM = re.compile(r"^([0-9a-fA-F]{64})  (netbox-ops-v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz)$")
 _REQUIRED = frozenset({
     "netbox-ops/netbox_ops.py", "netbox-ops/install.sh",
     "netbox-ops/upgrade.sh", "netbox-ops/netbox_ops/__init__.py",
+    "netbox-ops/LICENSE", "netbox-ops/README.md",
+    "netbox-ops/CHANGELOG.md", "netbox-ops/config.example.json",
 })
+_ROOT_FILES = frozenset(PurePosixPath(name).name for name in _REQUIRED
+                        if len(PurePosixPath(name).parts) == 2)
 
 
 class ReleaseArchiveError(Exception):
@@ -49,8 +57,23 @@ def verify_checksum(archive: Path, checksum: bytes) -> None:
         raise ReleaseArchiveError("Archive SHA-256 mismatch")
 
 
+
+def _check_tar_stream(archive: Path) -> None:
+    """Bound the full decompressed stream before tarfile parses extended headers."""
+    try:
+        total = 0
+        with gzip.open(archive, 'rb') as stream:
+            while chunk := stream.read(min(1024 * 1024, MAX_TAR_BYTES + 1 - total)):
+                total += len(chunk)
+                if total > MAX_TAR_BYTES:
+                    raise ReleaseArchiveError("Compressed archive expands beyond tar stream limit")
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ReleaseArchiveError("Invalid compressed archive") from exc
+
+
 def validate_archive(archive: Path) -> None:
     """Reject unsafe tar entries and unsupported installation layouts."""
+    _check_tar_stream(archive)
     seen: set[str] = set()
     files: set[str] = set()
     total = 0
@@ -69,16 +92,27 @@ def validate_archive(archive: Path) -> None:
                     if not (name in ("netbox-ops", "netbox-ops/") and member.isdir()):
                         raise ReleaseArchiveError(f"Unsafe archive path: {name}")
                 name = str(path)
-                if len(path.parts) >= 2 and path.parts[1] in {"venv", ".git", "__pycache__"}:
-                    raise ReleaseArchiveError("Archive contains installation runtime or Git data")
+                if len(path.parts) >= 2:
+                    top = path.parts[1]
+                    if top == "netbox_ops":
+                        if len(path.parts) == 2 and not member.isdir():
+                            raise ReleaseArchiveError("Invalid package directory")
+                        if any(part in {".git", "venv", "__pycache__"} for part in path.parts[2:]):
+                            raise ReleaseArchiveError("Archive contains installation runtime or Git data")
+                    elif top not in _ROOT_FILES or len(path.parts) != 2 or not member.isfile():
+                        raise ReleaseArchiveError("Unknown release archive layout")
+                if any(not char.isprintable() for char in name):
+                    raise ReleaseArchiveError("Unsafe archive path characters")
                 if name in seen:
                     raise ReleaseArchiveError("Duplicate archive member")
                 seen.add(name)
                 if member.mode & 0o6000:
                     raise ReleaseArchiveError("Archive contains privileged permissions")
                 if member.isdir():
+                    if member.size != 0:
+                        raise ReleaseArchiveError("Directory contains unexpected data")
                     continue
-                if not member.isfile():
+                if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) or member.sparse is not None:
                     raise ReleaseArchiveError("Archive contains links or special files")
                 if member.size < 0 or member.size > MAX_EXTRACTED_BYTES:
                     raise ReleaseArchiveError("Invalid member size")

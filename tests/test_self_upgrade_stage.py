@@ -25,7 +25,9 @@ class StageTests(unittest.TestCase):
         self.archive = self.root / 'netbox-ops-v0.6.0.tar.gz'
         with tarfile.open(self.archive, 'w:gz') as bundle:
             for name in ('netbox-ops/netbox_ops.py', 'netbox-ops/install.sh',
-                         'netbox-ops/upgrade.sh', 'netbox-ops/netbox_ops/__init__.py'):
+                         'netbox-ops/upgrade.sh', 'netbox-ops/netbox_ops/__init__.py',
+                     'netbox-ops/LICENSE', 'netbox-ops/README.md',
+                     'netbox-ops/CHANGELOG.md', 'netbox-ops/config.example.json'):
                 item = tarfile.TarInfo(name)
                 item.size = 1
                 item.mode = 0o755

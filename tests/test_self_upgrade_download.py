@@ -7,6 +7,8 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from netbox_ops.self_upgrade_archive import ReleaseArchiveError
 from netbox_ops.self_upgrade_download import download_release
@@ -30,7 +32,9 @@ def package():
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w:gz') as bundle:
         for name in ('netbox-ops/netbox_ops.py', 'netbox-ops/install.sh',
-                     'netbox-ops/upgrade.sh', 'netbox-ops/netbox_ops/__init__.py'):
+                     'netbox-ops/upgrade.sh', 'netbox-ops/netbox_ops/__init__.py',
+                     'netbox-ops/LICENSE', 'netbox-ops/README.md',
+                     'netbox-ops/CHANGELOG.md', 'netbox-ops/config.example.json'):
             info = tarfile.TarInfo(name)
             info.size = 1
             bundle.addfile(info, io.BytesIO(b'x'))
@@ -101,6 +105,24 @@ class DownloadTests(unittest.TestCase):
         with self.assertRaises(ReleaseArchiveError):
             download_release(self.release, temp_root=link,
                              opener=lambda *_args, **_kwargs: self.fail('network used'))
+
+    def test_insufficient_download_space_blocks_before_network(self):
+        with patch('netbox_ops.self_upgrade_download.shutil.disk_usage',
+                   return_value=SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(ReleaseArchiveError, 'free space'):
+                download_release(self.release, temp_root=self.root,
+                                 opener=lambda *_a, **_k: self.fail('network used'))
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_redirect_refusal_cleans_download(self):
+        from netbox_ops.self_upgrade_manifest import ManifestError
+
+        def refuse(*args, **kwargs):
+            raise ManifestError('Unexpected compatibility asset redirect')
+
+        with self.assertRaisesRegex(ReleaseArchiveError, 'Unable to download official'):
+            download_release(self.release, temp_root=self.root, opener=refuse)
+        self.assertEqual(list(self.root.iterdir()), [])
 
     def test_reject_tag_version_mismatch(self):
         from dataclasses import replace
