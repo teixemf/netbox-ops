@@ -26,6 +26,7 @@ class StageTests(unittest.TestCase):
         self.live.version = self.stage.version
         self.inspector = Mock(return_value=self.live)
         self.checkout = Mock()
+        self.base_python = Mock(return_value=Path('/usr/bin/python3.12'))
         self.runner = Mock(return_value=SimpleNamespace(returncode=0))
         self.systemd = Mock()
         self.systemd.status.return_value = [
@@ -36,16 +37,23 @@ class StageTests(unittest.TestCase):
     def run_upgrade(self):
         return run_stage(self.old, self.stage, systemd=self.systemd,
                          runner=self.runner, inspector=self.inspector,
-                         checkout=self.checkout)
+                         checkout=self.checkout, base_python=self.base_python)
 
     def test_success_uses_selected_python_and_checks_migrations(self):
         self.assertIs(self.run_upgrade(), self.live)
         calls = self.runner.call_args_list
         self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[0].kwargs['env']['PYTHON'], str(self.old.python))
+        self.assertEqual(calls[0].kwargs['env']['PYTHON'], '/usr/bin/python3.12')
         self.assertEqual(calls[1].args[0][0], str(self.old.python))
         self.assertEqual(calls[2].args[0][-2:], ['migrate', '--check'])
         self.systemd.start.assert_not_called()
+
+    def test_missing_base_python_blocks_checkout(self):
+        self.base_python.side_effect = UpgradeExecutionError('base Python unavailable')
+        with self.assertRaises(UpgradeExecutionError):
+            self.run_upgrade()
+        self.checkout.assert_not_called()
+        self.runner.assert_not_called()
 
     def test_active_writer_blocks_checkout(self):
         self.systemd.status.return_value[0].active = 'active'
