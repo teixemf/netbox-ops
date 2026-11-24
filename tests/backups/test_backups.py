@@ -62,6 +62,26 @@ class FileBackupTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.configfile.stat().st_mode), 0o600)
         self.assertEqual(len(self.ops.list_backups('media')), 2)  # includes pre-restore safety copy
 
+    def test_recovery_restore_preserves_marker_and_stopped_writers(self):
+        marker = self.base / 'upgrade.pending'
+        marker.write_text('recovery evidence')
+        systemd = MagicMock()
+        systemd.status.return_value = [
+            SimpleNamespace(name='netbox', loaded='loaded', active='inactive'),
+            SimpleNamespace(name='netbox-rq', loaded='loaded', active='inactive'),
+        ]
+        with patch('netbox_ops.services.UPGRADE_PENDING_PATH', marker), \
+             patch('netbox_ops.backups.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.backups.write_audit'), \
+             patch('netbox_ops.backups._version', return_value='4.4.1'):
+            result = self.ops.backup('media')
+            self.photo.write_text('changed')
+            report = self.ops.restore('media', result.path)
+        self.assertEqual(self.photo.read_text(), 'original')
+        self.assertIn('recovery remains pending', report.detail)
+        self.assertEqual(marker.read_text(), 'recovery evidence')
+        systemd.start.assert_not_called()
+
     def test_sha_tamper_is_rejected_before_changes(self):
         with patch('netbox_ops.backups.write_audit'), patch('netbox_ops.backups._version', return_value='4.4.1'):
             result = self.ops.backup('media')
