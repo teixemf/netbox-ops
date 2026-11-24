@@ -164,6 +164,22 @@ elif [[ "$mode" == verify ]]; then
     else
       ssh_guest 'sudo test ! -e /var/tmp/ci-isolation-marker'
     fi
+    # Self-upgrade runs only in the isolated second boot.
+    if (( attempt == 2 )) && [[ "${NETBOX_VM_SELF_UPGRADE_E2E:-0}" == 1 ]]; then
+      from_tag="${NETBOX_VM_SELF_UPGRADE_FROM:-}"
+      target_tag="${NETBOX_VM_SELF_UPGRADE_TARGET:-}"
+      ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
+      if [[ -n "$from_tag" || -n "$target_tag" ]]; then
+        if [[ ! "$from_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ||
+              ! "$target_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+          echo 'Invalid official self-upgrade release pair' >&2
+          exit 2
+        fi
+        ssh_guest "sudo /usr/bin/python3 -I -B /opt/netbox-ops/scripts/ci/netbox-vm-self-upgrade.py --official-from $from_tag --official-target $target_tag"
+      else
+        ssh_guest 'sudo /usr/bin/python3 -I -B /opt/netbox-ops/scripts/ci/netbox-vm-self-upgrade.py'
+      fi
+    fi
     test "$(sha256sum netbox-ubuntu24.qcow2 | cut -d' ' -f1)" = "$base_hash"
     ssh_guest 'sudo systemctl poweroff --no-block' || true
     stop_vm

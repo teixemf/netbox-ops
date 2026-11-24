@@ -1,0 +1,12 @@
+{
+  "python_min": "3.12",
+  "python_max_exclusive": null,
+  "linux_families": [
+    "debian",
+    "rhel"
+  ],
+  "layouts": [
+    "archive"
+  ],
+  "required_intermediates": []
+}

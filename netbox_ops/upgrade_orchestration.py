@@ -27,6 +27,34 @@ from .upgrade_services import (
 from .upgrade_stage import resolve_base_python, run_stage
 
 
+# Only fixed, reviewed backend messages may be included in a recovery diagnostic.
+# Never pass through arbitrary exception text or subprocess output.
+_SAFE_STAGE_ERRORS = frozenset({
+    'NetBox Git command unavailable or timed out',
+    'NetBox Git command failed',
+    'Pinned NetBox commit is not available locally',
+    'NetBox Git checkout changed before stage',
+    'Tracked NetBox files changed before checkout',
+    'NetBox checkout did not reach the approved revision',
+    'Stage checkout or selected Python changed',
+    'Cannot verify a matching base Python outside the NetBox venv',
+    'NetBox upgrade script is missing or unsafe',
+    'NetBox stage changed during upgrade',
+    'Combined stage local requirements or configured plugins changed',
+    'Checked out core requirements differ from preflight',
+    'Local requirements changed after checkout',
+    'Combined stage installed versions differ from approved pins',
+    'Installed plugin or core versions differ from approved pins',
+    'Plugin dependency check failed',
+    'Cannot verify the configured plugin registry',
+    *(
+        f'NetBox {label} {reason}'
+        for label in ('upgrade script', 'Django system check', 'migration check')
+        for reason in ('failed', 'unavailable or timed out')
+    ),
+})
+
+
 def execute_netbox_upgrade(
     cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
     rebuild_plan: Callable[[], UpgradePlan],
@@ -205,7 +233,7 @@ def _execute_upgrade(
             finish_maintenance()
             report('complete', completed)
             return recovery
-        except Exception:
+        except Exception as exc:
             # Do not include command output or arbitrary exception text.
             # A partial stop/start may require manual service inspection.
             location = recovery.directory.name if recovery else 'not verified'
@@ -215,8 +243,10 @@ def _execute_upgrade(
                 pass
             report('failed', completed)
             last = stages[completed - 1].version if completed else 'none'
+            detail = str(exc) if isinstance(exc, UpgradeExecutionError) and str(exc) in _SAFE_STAGE_ERRORS else ''
+            diagnostic = f'detail: {detail}; ' if detail else ''
             raise UpgradeExecutionError(
                 f'Upgrade failed during {phase}; recovery: {location}; '
                 f'completed stages: {completed}/{len(stages)}; last completed release: {last}; '
-                'inspect service state and recovery.json before manual recovery; no automatic rollback'
+                f'{diagnostic}inspect service state and recovery.json before manual recovery; no automatic rollback'
             ) from None

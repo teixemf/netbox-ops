@@ -16,6 +16,18 @@ marker=/var/lib/netbox-ops/upgrade.pending
 [[ -d "$root" && ! -e "$root/.git" && ! -e "$marker" ]]
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 umask 022
+# A cloud-image timer may otherwise restart PostgreSQL during fixture migration.
+# Stop future timer activations and let any running APT transaction finish.
+systemctl stop apt-daily.timer apt-daily-upgrade.timer
+for unit in apt-daily.service apt-daily-upgrade.service; do
+  for attempt in $(seq 1 180); do
+    state=$(systemctl show -p ActiveState --value "$unit")
+    case "$state" in inactive|failed) break ;; esac
+    sleep 2
+  done
+  case "$(systemctl show -p ActiveState --value "$unit")" in inactive|failed) ;; *) exit 1 ;; esac
+done
+systemctl mask --runtime apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer
 apt-get update -qq
 NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git
 old=4.7.2
@@ -59,11 +71,11 @@ for dir in media scripts reports; do
 done
 runuser -u postgres -- dropdb --if-exists netbox
 runuser -u postgres -- createdb --owner=netbox netbox
-# The 4.7.2 tag leaves pymdown-extensions unpinned; 13.x breaks
-# its documentation builder. Use the exact pin from upstream 4.7.3
+# Both source tags leave pymdown-extensions unpinned; 13.x breaks
+# their documentation builders. Use the exact pin from upstream 4.7.3
 # only while creating the source fixture. The tested upgrade receives
 # no fixture constraint, and executes the unmodified official script.
-if [[ "$old" == 4.7.2 ]]; then
+if [[ "$old" == 4.7.2 || "$old" == 4.4.10 ]]; then
   printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
   (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
 else

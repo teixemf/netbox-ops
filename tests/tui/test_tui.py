@@ -26,6 +26,28 @@ class MenuNavigationTests(unittest.TestCase):
         self.assertEqual(SECTIONS, {0: 'menu_services', 1: 'menu_backups',
                                     2: 'menu_updates', 6: 'menu_maintenance'})
         self.assertIn('Manage services', en[0][0])
+        for items in (pt, en):
+            self.assertEqual([item[0].split()[0] for item in items],
+                             ['1', '2', '3', '4', '5', '6', '7', 'L', 'Q'])
+
+    def test_numeric_shortcuts_open_main_menu_actions(self):
+        for key, method, args in (('1', '_manage', ()), ('2', '_backups', ()),
+                                  ('4', '_upgrade', ('netbox',)), ('5', '_upgrade', ('plugins',)),
+                                  ('6', '_upgrade', ('stack',)), ('7', '_self_upgrade', ())):
+            with self.subTest(key=key):
+                screen = FakeScreen([ord(key), ord('q')], dimensions=(16, 60))
+                menu = CursesMenu(screen, Translator('en'))
+                systemd = MagicMock()
+                systemd.status.return_value = []
+                with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+                     patch('netbox_ops.tui.load_config'), \
+                     patch('netbox_ops.backups.BackupManager') as backups, \
+                     patch.object(menu, method, return_value=None) as action:
+                    backups.return_value.storage_stats.return_value = (0, 0, 0)
+                    menu.versions.request = MagicMock()
+                    self.assertEqual(menu._main(), 0)
+                action.assert_called_once_with(*args)
+                self.assertTrue(any(text.startswith('Q  ') for _, _, text, _ in screen.frames[0]))
 
     def test_arrows_wrap_home_end_and_pages(self):
         self.assertEqual(move_selection(0, curses.KEY_UP, 15), 14)

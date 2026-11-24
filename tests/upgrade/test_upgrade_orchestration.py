@@ -86,6 +86,19 @@ class OrchestrationTests(unittest.TestCase):
                 finally:
                     operation.side_effect = None
 
+    def test_stage_failure_reports_only_reviewed_diagnostics(self):
+        for message, visible in (
+            ('NetBox upgrade script failed', True),
+            ('NetBox upgrade script failed: secret token', False),
+        ):
+            with self.subTest(message=message):
+                self.calls.run_stage.side_effect = UpgradeExecutionError(message)
+                with self.assertRaises(UpgradeExecutionError) as error:
+                    self.execute()
+                self.assertEqual('detail: NetBox upgrade script failed;' in str(error.exception), visible)
+                self.assertNotIn('secret token', str(error.exception))
+        self.calls.start_upgrade_writers.assert_not_called()
+
     def test_health_failure_reports_recovery_without_secrets(self):
         self.calls.wait_for_netbox_health.side_effect = RuntimeError('secret password')
         with self.assertRaisesRegex(UpgradeExecutionError, 'functional health check') as error:
