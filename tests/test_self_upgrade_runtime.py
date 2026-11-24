@@ -1,7 +1,10 @@
 """Offline runtime staging tests using disposable temporary directories."""
 from __future__ import annotations
 
+import hashlib
+import io
 import shutil
+import tarfile
 import sys
 import tempfile
 import unittest
@@ -11,7 +14,7 @@ from unittest.mock import patch
 from netbox_ops.self_upgrade_archive import ReleaseArchiveError
 from netbox_ops.self_upgrade_releases import Version
 from netbox_ops.self_upgrade_runtime import (
-    prepare_staged_runtime, validate_installation_runtime,
+    prepare_staged_runtime, stage_installation, validate_installation_runtime,
 )
 
 
@@ -32,6 +35,44 @@ class RuntimeTests(unittest.TestCase):
             'print("netbox-ops 0.6.0")\n'
         )
         self.version = Version.parse('v0.6.0')
+
+    def make_archive(self, version='0.6.0'):
+        archive = self.parent / 'netbox-ops-v0.6.0.tar.gz'
+        files = {
+            'netbox-ops/netbox_ops.py': f'print("netbox-ops {version}")'.encode(),
+            'netbox-ops/netbox_ops/__init__.py': b'',
+            'netbox-ops/install.sh': b'#!/bin/sh\nexit 99\n',
+            'netbox-ops/upgrade.sh': b'#!/bin/sh\nexit 99\n',
+        }
+        with tarfile.open(archive, 'w:gz') as bundle:
+            for name, content in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                member.mode = 0o755
+                bundle.addfile(member, io.BytesIO(content))
+        checksum = f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}'.encode()
+        return archive, checksum
+
+    def test_stage_installation_builds_complete_candidate(self):
+        archive, checksum = self.make_archive()
+        result = stage_installation(archive, checksum, self.version,
+                                    temp_root=self.parent, install_parent=self.parent)
+        validate_installation_runtime(result, self.version)
+        self.assertEqual((self.active / 'keep').read_text(), 'original')
+
+    def test_stage_installation_cleans_failed_candidate(self):
+        archive, checksum = self.make_archive(version='0.7.0')
+        with self.assertRaises(ReleaseArchiveError):
+            stage_installation(archive, checksum, self.version,
+                               temp_root=self.parent, install_parent=self.parent)
+        self.assertEqual(list(self.parent.glob('.netbox-ops-stage-*')), [self.staged])
+        self.assertEqual((self.active / 'keep').read_text(), 'original')
+
+    def test_stage_installation_rejects_wrong_archive_name(self):
+        archive, checksum = self.make_archive()
+        with self.assertRaises(ReleaseArchiveError):
+            stage_installation(archive, checksum, Version.parse('v0.7.0'),
+                               temp_root=self.parent, install_parent=self.parent)
 
     def test_runtime_works_before_and_after_same_filesystem_rename(self):
         prepare_staged_runtime(self.staged, self.version)
