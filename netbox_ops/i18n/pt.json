@@ -267,5 +267,19 @@
   "self_upgrade_notes_truncated": "Notas da release truncadas.",
   "self_upgrade_invalid_version": "Versão estável inválida.",
   "self_upgrade_discovery_failed": "Não foi possível consultar as releases oficiais.",
-  "self_upgrade_release_missing": "Release oficial {version} não encontrada."
+  "self_upgrade_release_missing": "Release oficial {version} não encontrada.",
+  "self_upgrade_compatible": "Compatível — instalação ainda não disponível",
+  "self_upgrade_incompatible": "Incompatível — instalação bloqueada",
+  "self_upgrade_reason_downgrade_blocked": "Não são permitidos downgrades.",
+  "self_upgrade_reason_already_installed": "Esta versão já está instalada.",
+  "self_upgrade_reason_unknown_local_environment": "Não foi possível verificar o ambiente da instalação local.",
+  "self_upgrade_reason_too_many_intermediate_steps": "O percurso de upgrade excede o limite de etapas suportado.",
+  "self_upgrade_reason_release_unavailable": "Uma release oficial obrigatória não está disponível.",
+  "self_upgrade_reason_missing_or_invalid_metadata": "Os metadados de compatibilidade estão ausentes, inválidos ou indisponíveis.",
+  "self_upgrade_reason_unsupported_python": "A versão de Python instalada não é suportada.",
+  "self_upgrade_reason_unsupported_linux": "A família Linux instalada não é suportada.",
+  "self_upgrade_reason_unsupported_layout": "A estrutura da instalação não é suportada.",
+  "self_upgrade_reason_verified_plan": "Os requisitos da release são compatíveis com o ambiente local verificado.",
+  "self_upgrade_blocked_at": "Bloqueado na versão {version}.",
+  "self_upgrade_path": "Percurso de upgrade obrigatório: {steps}"
 }
