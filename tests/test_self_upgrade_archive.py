@@ -17,6 +17,8 @@ REQUIRED = (
     "netbox-ops/install.sh",
     "netbox-ops/upgrade.sh",
     "netbox-ops/netbox_ops/__init__.py",
+    "netbox-ops/LICENSE", "netbox-ops/README.md",
+    "netbox-ops/CHANGELOG.md", "netbox-ops/config.example.json",
 )
 
 
@@ -57,7 +59,9 @@ class ReleaseArchiveTests(unittest.TestCase):
 
     def test_reject_runtime_files_and_conflicting_paths(self):
         for name in ("netbox-ops/venv/bin/python", "netbox-ops/.git/config",
-                     "netbox-ops/netbox_ops.py/child", "netbox-ops/netbox_ops"):
+                     "netbox-ops/netbox_ops.py/child", "netbox-ops/netbox_ops",
+                     "netbox-ops/local.conf", "netbox-ops/netbox_ops/__pycache__/bad.pyc",
+                     "netbox-ops/netbox_ops/line\nfeed.py"):
             with self.subTest(name=name):
                 build_archive(self.archive, (name,))
                 with self.assertRaises(ReleaseArchiveError):
