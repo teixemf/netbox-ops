@@ -3,10 +3,11 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from netbox_ops import upgrade_orchestration as orchestration
 from netbox_ops.upgrade_execution import UpgradeExecutionError
+from netbox_ops.upgrade_git import PinnedStage
 
 
 class OrchestrationTests(unittest.TestCase):
@@ -17,13 +18,16 @@ class OrchestrationTests(unittest.TestCase):
             'write_audit', 'begin_maintenance', 'finish_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
             'require_quiesced_writers', 'run_stage', 'start_upgrade_writers',
             'resolve_base_python', 'read_netbox_health', 'wait_for_netbox_health',
-            'fetch_pinned_stage', 'inventory_plugins',
+            'fetch_pinned_stage', 'inventory_plugins', 'validate_netbox_only_pins',
+            'validate_upgrade_runtime', '_private_directory',
         )
         for name in names:
             self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
         self.enterContext(patch.object(orchestration.os, 'geteuid', return_value=0))
         self.enterContext(patch.object(orchestration, 'ExclusiveLock', nullcontext))
-        self.calls.pin_release_stages.return_value = ('first', 'second')
+        self.calls.pin_release_stages.return_value = (
+            PinnedStage('4.4.0', 'b' * 40), PinnedStage('4.4.1', 'c' * 40),
+        )
         self.installation = SimpleNamespace(root=Path('/opt/netbox'), python_version='3.12.1')
         self.inventory = SimpleNamespace(requirements_hash='hash', enabled=(), packages=())
         self.plan = SimpleNamespace(
@@ -49,7 +53,8 @@ class OrchestrationTests(unittest.TestCase):
         result = self.execute()
         self.assertIs(result, calls._capture_quiesced_recovery.return_value)
         names = [call[0] for call in calls.mock_calls]
-        ordered = ('rebuild', 'validate_execution_approval', 'resolve_base_python', 'read_netbox_health',
+        ordered = ('rebuild', 'validate_execution_approval', 'validate_netbox_only_pins', 'resolve_base_python',
+                   'validate_upgrade_runtime', '_private_directory', 'read_netbox_health',
                    'pin_release_stages',
                    'begin_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
                    'fetch_pinned_stage', 'run_stage', 'inventory_plugins', 'start_upgrade_writers',
@@ -61,7 +66,8 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_failure_never_starts_writers(self):
         for failure in (
-            'validate_execution_approval', 'pin_release_stages', 'stop_upgrade_writers',
+            'validate_execution_approval', 'validate_netbox_only_pins', 'validate_upgrade_runtime',
+            'pin_release_stages', 'stop_upgrade_writers',
             '_capture_quiesced_recovery', 'fetch_pinned_stage', 'run_stage',
         ):
             with self.subTest(failure=failure):
@@ -86,17 +92,28 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn('pre-upgrade-test', str(error.exception))
         self.assertNotIn('secret', str(error.exception))
         self.calls.start_upgrade_writers.assert_called_once()
-        self.calls.SystemdServices.return_value.stop.assert_called_once_with(
-            ['netbox-rq', 'netbox']
-        )
+        self.assertEqual(self.calls.SystemdServices.return_value.stop.call_args_list,
+                         [call(['netbox-rq']), call(['netbox'])])
         self.assertIn('writers stopped', str(error.exception))
 
     def test_health_failure_with_failed_stop_reports_uncertain_state(self):
         self.calls.wait_for_netbox_health.side_effect = RuntimeError('health failed')
         self.calls.SystemdServices.return_value.stop.side_effect = RuntimeError('stop failed')
+        self.calls.require_quiesced_writers.side_effect = [None, None, UpgradeExecutionError('not stopped')]
         with self.assertRaisesRegex(UpgradeExecutionError, 'maintenance unverified'):
             self.execute()
         self.calls.start_upgrade_writers.assert_called_once()
+        self.assertEqual(self.calls.SystemdServices.return_value.stop.call_args_list,
+                         [call(['netbox-rq']), call(['netbox'])])
+
+    def test_failed_start_quiesces_both_writers(self):
+        self.calls.start_upgrade_writers.side_effect = RuntimeError('start failed')
+        with self.assertRaisesRegex(UpgradeExecutionError, 'start writers; writers stopped'):
+            self.execute()
+        self.assertEqual(self.calls.SystemdServices.return_value.stop.call_args_list,
+                         [call(['netbox-rq']), call(['netbox'])])
+        self.calls.wait_for_netbox_health.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
 
     def test_wrong_baseline_version_blocks_before_maintenance(self):
         self.calls.read_netbox_health.return_value.version = '4.1.0'
