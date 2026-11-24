@@ -135,7 +135,15 @@ elif [[ "$mode" == verify ]]; then
   # Ship the current PR checkout to each disposable VM, not the baseline.
   tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.github \
     --exclude=venv --exclude=__pycache__ -czf source.tar.gz .
-  for attempt in 1 2; do
+  attempts=(1 2)
+  scenario="${NETBOX_VM_UPGRADE_SCENARIO:-}"
+  if [[ -n "$scenario" ]]; then
+    case "$scenario" in
+      netbox|plugins|combined|intermediate|failure) attempts=(1) ;;
+      *) echo 'Invalid upgrade test scenario' >&2; exit 2 ;;
+    esac
+  fi
+  for attempt in "${attempts[@]}"; do
     started=$SECONDS
     qemu-img create -f qcow2 -F qcow2 -b "$PWD/netbox-ubuntu24.qcow2" "overlay-$attempt.qcow2"
     boot_vm "overlay-$attempt.qcow2" "$attempt"
@@ -144,7 +152,10 @@ elif [[ "$mode" == verify ]]; then
       "$GITHUB_WORKSPACE/scripts/ci/netbox-vm-guest.sh" source.tar.gz \
       ubuntu@127.0.0.1:/home/ubuntu/
     ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh provision'
-    if (( attempt == 1 )); then
+    if [[ -n "$scenario" ]]; then
+      ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
+      ssh_guest "sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-upgrade-e2e.sh $scenario"
+    elif (( attempt == 1 )); then
       if [[ "${NETBOX_VM_E2E:-0}" == 1 ]]; then
         ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
         ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-e2e.sh'
@@ -161,8 +172,12 @@ elif [[ "$mode" == verify ]]; then
   sha256sum -c SHA256SUMS.txt
   {
     echo '## Reusable NetBox baseline verified'
-    echo 'Two isolated boots succeeded using the current checkout, with a pre-migrated NetBox schema.'
-    echo 'The base image hash remained unchanged; the second boot has no marker from the first.'
+    if [[ -n "$scenario" ]]; then
+      echo "PASS: $scenario upgrade checks in disposable overlay; baseline hash unchanged."
+    else
+      echo 'Two isolated boots succeeded using the current checkout, with a pre-migrated NetBox schema.'
+      echo 'The base image hash remained unchanged; the second boot has no marker from the first.'
+    fi
   } >> "$GITHUB_STEP_SUMMARY"
 else
   echo "Usage: $0 build|verify" >&2
