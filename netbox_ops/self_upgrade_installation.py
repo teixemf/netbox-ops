@@ -52,7 +52,11 @@ def _check_python_link(root: Path, path: Path, uid: int) -> None:
         if path.readlink() != Path('lib') or not target.is_dir():
             raise ReleaseArchiveError('Unexpected virtual environment link')
         return
-    if path.parent != root / 'venv/bin' or not _PYTHON_NAME.fullmatch(path.name):
+    # CPython 3.14 creates a Unicode pi-thon alias in POSIX venvs.
+    # Allow only that exact alias, and only if it resolves to the main Python.
+    alias = (path == root / 'venv/bin/𝜋thon'
+             and target == (root / 'venv/bin/python').resolve(strict=True))
+    if path.parent != root / 'venv/bin' or (not alias and not _PYTHON_NAME.fullmatch(path.name)):
         raise ReleaseArchiveError(f'Unexpected installation symlink: {path.relative_to(root)}')
     if not target.is_file() or not os.access(target, os.X_OK):
         raise ReleaseArchiveError('Invalid virtual environment Python link')
