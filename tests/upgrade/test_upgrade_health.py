@@ -52,6 +52,15 @@ class UpgradeHealthTests(unittest.TestCase):
             read_netbox_health(URL, authorization='Bearer secret', opener=self.opener)
         self.assertNotIn('secret', str(caught.exception))
 
+    def test_older_status_without_hostname_and_plugin_version(self):
+        self.payload.pop('hostname')
+        self.payload['plugins']['example_plugin'] = None
+        old = read_netbox_health(URL, opener=self.opener)
+        self.assertIsNone(old.hostname)
+        new = NetBoxHealth('4.4.2', 'netbox', old.plugins, 1)
+        with patch('netbox_ops.upgrade_health.read_netbox_health', return_value=new):
+            self.assertEqual(wait_for_netbox_health(URL, '4.4.2', old, attempts=1), new)
+
     def test_credentials_require_https(self):
         with self.assertRaises(UpgradeExecutionError):
             read_netbox_health('http://127.0.0.1/api/status/',
