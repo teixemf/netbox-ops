@@ -57,7 +57,10 @@ def _check_paths(active: Path, staged: Path, backup: Path, state: Path) -> None:
     if state.is_symlink():
         raise SwapError('Symlinked transaction state')
     for path in (active, staged, backup):
-        _identity(path)
+        if _identity(path) is not None and parent == Path('/opt'):
+            entry = path.lstat()
+            if entry.st_uid != 0 or entry.st_mode & 0o022:
+                raise SwapError('Installation directory is not root-controlled')
 
 
 def _write_state(path: Path, data: dict) -> None:
