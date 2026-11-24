@@ -207,6 +207,14 @@ def begin_swap(active, staged, backup, state):
             os._exit(86)
     with patch('netbox_ops.self_upgrade_transaction.os.rename', side_effect=interrupted):
         return _original_begin(active, staged, backup, state)
+
+_original_cleanup = cleanup_swap
+def cleanup_swap(active, staged, backup, state):
+    from ._vm_fixture import mode
+    if mode() == 'cleanup_crash':
+        # Validation is already durably committed; recovery must retain the new tree.
+        os._exit(87)
+    return _original_cleanup(active, staged, backup, state)
 ''')
     assets = work / 'assets' / version_tag
     assets.mkdir(parents=True)
@@ -314,22 +322,32 @@ def fixture_scenarios(work):
         print(f'PASS: production CLI/helper fixture {mode}; services unchanged', flush=True)
 
     # Re-evaluate the original target from the newly installed intermediate.
+    # Interrupt after validation is committed but before the previous tree is removed.
+    (work / 'mode').write_text('cleanup_crash')
     assert f'Required upgrade path: v{target}' in cli('plan', f'v{target}')
     assert 'Upgrade submitted' in cli('install', f'v{target}', '--confirm', f'UPGRADE v{target}')
     result = wait_for_helper()
+    assert result['phase'] == 'applying', result
+    assert version() == str(target)
+    assert BACKUP.is_dir() and HANDOFF.is_dir() and STATE.is_file()
+    assert json.loads(STATE.read_text())['phase'] == 'validated'
+    cli('status', expected=4)
+    assert 'cleanup' in run([HANDOFF / 'recover'])
+    result = json.loads(RESULT.read_text())
     assert result['phase'] == 'completed' and result['step'] == f'v{target}', result
     assert result['installed'] == f'v{middle}' and result['target'] == f'v{target}', result
     assert 'completed and validated' in cli('status')
     cli('install', f'v{old}', '--confirm', f'UPGRADE v{old}', expected=3)
     assert_clean(target)
     assert services() == before_services and preserved() == before_files
-    print('PASS: mandatory intermediate path completed; downgrade blocked', flush=True)
+    print('PASS: mandatory intermediate path completed; validated cleanup recovered; downgrade blocked', flush=True)
 
     with AUDIT.open('rb') as stream:
         stream.seek(offset)
         audit = stream.read().decode()
     for message in ('SELF-UPGRADE rollback completed',
                     'SELF-UPGRADE recovery finished result=rollback',
+                    'SELF-UPGRADE recovery finished result=cleanup',
                     'SELF-UPGRADE finished'):
         assert message in audit, message
 
