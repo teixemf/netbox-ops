@@ -37,7 +37,7 @@ mv "$root" "$scratch/archive-install"
 git clone --quiet --depth 1 --branch "v$old" https://github.com/netbox-community/netbox.git "$root"
 install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netbox/configuration.py"
 # Keep both supported database configuration forms for early NetBox 4 releases.
-printf '\\nDATABASE = DATABASES["default"]\\n' >> "$root/netbox/netbox/configuration.py"
+printf '\nDATABASE = DATABASES["default"]\n' >> "$root/netbox/netbox/configuration.py"
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
