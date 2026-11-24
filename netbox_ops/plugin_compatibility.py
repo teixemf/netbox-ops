@@ -30,7 +30,7 @@ _STABLE = re.compile(r'^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,4}(?:\.post\d+)?$')
 _TARGET = re.compile(r'^v?\d+\.\d+\.\d+$')
 _SPEC = re.compile(r'\s*(<=|>=|==|!=|~=|<|>)\s*(\d+(?:\.\d+){0,4}(?:\.\*)?)\s*')
 _DIST = re.compile(r'^\s*([A-Za-z0-9_.-]+)\s*(?:\(([^)]*)\)|([^;]*?))?\s*(?:;\s*(.*))?$')
-_PIN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}==\d+[A-Za-z0-9.+_-]*$')
+_PIN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?==\d+[A-Za-z0-9.+_-]*$')
 
 
 class CompatibilityError(Exception):
