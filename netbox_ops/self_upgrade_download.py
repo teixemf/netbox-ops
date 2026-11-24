@@ -19,8 +19,8 @@ MAX_CHECKSUM_BYTES = 256
 CHUNK_BYTES = 1024 * 1024
 
 
-def _download(url: str, destination: Path, limit: int, *, opener) -> bytes | None:
-    """Stream a bounded asset; return checksum bytes only for small assets."""
+def _download(url: str, destination: Path, limit: int, *, opener) -> None:
+    """Stream at most the advertised asset size into a private file."""
     request = Request(url, headers={'User-Agent': 'netbox-ops/self-upgrade'})
     try:
         with opener(request, timeout=30) as response:
@@ -35,7 +35,6 @@ def _download(url: str, destination: Path, limit: int, *, opener) -> bytes | Non
                 os.fsync(output.fileno())
     except (HTTPError, URLError, TimeoutError, OSError, ManifestError) as exc:
         raise ReleaseArchiveError('Unable to download official release asset') from exc
-    return destination.read_bytes() if limit == MAX_CHECKSUM_BYTES else None
 
 
 def download_release(release: OfficialRelease, *, temp_root: Path = Path('/tmp'),
@@ -72,14 +71,14 @@ def download_release(release: OfficialRelease, *, temp_root: Path = Path('/tmp')
     try:
         archive = directory / archive_name
         checksum_file = directory / checksum_name
-        _download(release.archive.url, archive, MAX_ARCHIVE_BYTES, opener=opener)
+        _download(release.archive.url, archive, release.archive.size, opener=opener)
         if archive.stat().st_size != release.archive.size:
             raise ReleaseArchiveError('Archive size differs from GitHub metadata')
-        checksum = _download(release.checksum.url, checksum_file,
-                             MAX_CHECKSUM_BYTES, opener=opener)
+        _download(release.checksum.url, checksum_file,
+                  release.checksum.size, opener=opener)
         if checksum_file.stat().st_size != release.checksum.size:
             raise ReleaseArchiveError('Checksum size differs from GitHub metadata')
-        verify_release_archive(archive, checksum or b'')
+        verify_release_archive(archive, checksum_file.read_bytes())
         return archive
     except BaseException:
         shutil.rmtree(directory)
