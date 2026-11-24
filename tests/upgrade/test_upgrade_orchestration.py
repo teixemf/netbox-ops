@@ -70,3 +70,14 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn('pre-upgrade-test', str(error.exception))
         self.assertNotIn('secret', str(error.exception))
         self.calls.start_upgrade_writers.assert_called_once()
+        self.calls.SystemdServices.return_value.stop.assert_called_once_with(
+            ['netbox-rq', 'netbox']
+        )
+        self.assertIn('writers stopped', str(error.exception))
+
+    def test_health_failure_with_failed_stop_reports_uncertain_state(self):
+        self.calls.health.side_effect = RuntimeError('health failed')
+        self.calls.SystemdServices.return_value.stop.side_effect = RuntimeError('stop failed')
+        with self.assertRaisesRegex(UpgradeExecutionError, 'maintenance unverified'):
+            self.execute()
+        self.calls.start_upgrade_writers.assert_called_once()
