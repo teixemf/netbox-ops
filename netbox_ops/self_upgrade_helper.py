@@ -21,6 +21,8 @@ def wait_for_initiator_exit(pid: int, timeout_seconds: int = 60) -> None:
     """Wait for the initiating CLI to exit, using a Linux pidfd (no PID polls)."""
     if type(pid) is not int or pid <= 1 or pid == os.getpid():
         raise SwapError('Invalid initiating process ID')
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
+        raise SwapError('Invalid initiating process timeout')
     try:
         descriptor = os.pidfd_open(pid)
     except ProcessLookupError:
@@ -30,7 +32,8 @@ def wait_for_initiator_exit(pid: int, timeout_seconds: int = 60) -> None:
     try:
         poller = select.poll()
         poller.register(descriptor, select.POLLIN)
-        if not poller.poll(timeout_seconds * 1000):
+        events = poller.poll(timeout_seconds * 1000)
+        if not events or not any(flags & select.POLLIN for _, flags in events):
             raise SwapError('Initiating process did not exit')
     finally:
         os.close(descriptor)
