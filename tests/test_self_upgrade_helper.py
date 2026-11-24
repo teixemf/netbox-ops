@@ -38,7 +38,7 @@ class HelperTests(unittest.TestCase):
                 self.staged,
                 initiator_pid=12345,
                 preflight=preflight if preflight is not None else lambda current, candidate: None,
-                validate=validate if validate is not None else lambda current, candidate: None,
+                validate=validate if validate is not None else lambda path: None,
                 active=self.active,
             )
             lock.assert_called_once()
