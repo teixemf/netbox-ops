@@ -1,0 +1,104 @@
+"""Offline tests for the locked, audited self-upgrade coordinator."""
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from netbox_ops.self_upgrade_helper import run_approved_swap
+from netbox_ops.self_upgrade_transaction import SwapError
+
+
+class HelperTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        root.chmod(0o700)
+        self.active = root / 'netbox-ops'
+        self.staged = root / '.netbox-ops-stage-test'
+        self.active.mkdir()
+        self.staged.mkdir()
+        (self.active / 'version').write_text('old')
+        (self.staged / 'version').write_text('new')
+        self.log = []
+
+    def run_helper(self, preflight=None, validate=None):
+        from netbox_ops import self_upgrade_helper as helper
+        self.log = []
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock') as lock,
+              patch.object(helper, 'write_audit', side_effect=lambda msg, **kw: self.log.append(msg))):
+            run_approved_swap(
+                self.staged,
+                preflight=preflight if preflight is not None else lambda path: None,
+                validate=validate if validate is not None else lambda path: None,
+                active=self.active,
+            )
+            lock.assert_called_once()
+
+    def test_success_requires_preflight_and_validation(self):
+        checks = []
+
+        def before(path):
+            checks.append(('before', (path / 'version').read_text()))
+
+        def after(path):
+            checks.append(('after', (path / 'version').read_text()))
+
+        self.run_helper(preflight=before, validate=after)
+        self.assertEqual(checks, [('before', 'new'), ('after', 'new')])
+        self.assertEqual((self.active / 'version').read_text(), 'new')
+        self.assertFalse((self.active.parent / '.netbox-ops-backup').exists())
+        self.assertIn('SELF-UPGRADE finished', self.log)
+
+    def test_failed_preflight_never_moves_installation(self):
+        def deny(path):
+            raise ValueError('incompatible release')
+
+        with self.assertRaises(ValueError):
+            self.run_helper(preflight=deny)
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertTrue(self.staged.exists())
+        self.assertFalse((self.active.parent / '.netbox-ops-transaction.json').exists())
+        self.assertTrue(any('preflight failed' in line for line in self.log))
+
+    def test_failed_validation_rolls_back(self):
+        def reject(path):
+            raise ValueError('invalid candidate')
+
+        with self.assertRaises(ValueError):
+            self.run_helper(validate=reject)
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertEqual((self.staged / 'version').read_text(), 'new')
+        self.assertFalse((self.active.parent / '.netbox-ops-transaction.json').exists())
+        self.assertIn('SELF-UPGRADE rollback completed', self.log)
+
+    def test_unprivileged_helper_fails_closed(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with patch.object(helper.os, 'geteuid', return_value=1000):
+            with self.assertRaises(SwapError):
+                run_approved_swap(self.staged, preflight=lambda path: None,
+                                  validate=lambda path: None, active=self.active)
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+
+    def test_existing_transaction_is_not_overwritten(self):
+        state = self.active.parent / '.netbox-ops-transaction.json'
+        state.write_text('existing transaction')
+        with self.assertRaises(SwapError):
+            self.run_helper()
+        self.assertEqual(state.read_text(), 'existing transaction')
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+
+    def test_no_service_operation_in_coordinator(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock'),
+              patch.object(helper, 'write_audit')):
+            self.run_helper()
+        self.assertEqual((self.active / 'version').read_text(), 'new')
+
+
+if __name__ == '__main__':
+    unittest.main()
