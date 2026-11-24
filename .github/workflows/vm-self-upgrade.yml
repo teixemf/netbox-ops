@@ -6,6 +6,9 @@ on:
     paths:
       - '.github/workflows/vm-self-upgrade.yml'
       - 'netbox_ops/self_upgrade_*.py'
+      - 'netbox_ops/release_requirements.json'
+      - 'scripts/build-release.sh'
+      - 'scripts/release-candidate.py'
       - 'netbox_ops/cli.py'
       - 'netbox_ops/tui.py'
       - 'scripts/ci/netbox-vm-self-upgrade.py'
@@ -49,6 +52,20 @@ jobs:
             exit 1
           fi
           echo "Pinned baseline: $BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build unpublished release candidates
+        if: ${{ inputs.official_from == '' && inputs.official_target == '' }}
+        run: python3 -I -B scripts/ci/netbox-vm-self-upgrade.py --build-candidates "$GITHUB_WORKSPACE/.ci-self-upgrade-assets"
+
+      - name: Upload unpublished candidate evidence
+        if: ${{ inputs.official_from == '' && inputs.official_target == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpublished-self-upgrade-candidates
+          path: .ci-self-upgrade-assets/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Install virtualization tools
         run: |
