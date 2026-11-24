@@ -590,10 +590,14 @@ def review_plugin_upgrade(package: str, netbox_steps: Sequence[str],
     release_files = None
     if listing is not None:
         entries = project['releases']
-        release_files = entries.get(selected)
-        if _published_files(release_files):
-            release_status = 'verified'
-        elif selected not in entries or isinstance(release_files, list):
+        entry = entries.get(selected)
+        if isinstance(entry, list):
+            release_files = _published_files(entry)
+            if release_files:
+                release_status = 'verified'
+            elif all(isinstance(item, dict) for item in entry):
+                release_status = 'unavailable'
+        elif selected not in entries:
             release_status = 'unavailable'
     metadata = None
     try:
@@ -610,8 +614,13 @@ def review_plugin_upgrade(package: str, netbox_steps: Sequence[str],
                         and info.get('version') == selected)
     if identity_matches and isinstance(metadata.get('urls'), list):
         # An exact release response can resolve a stale project listing.
-        release_files = metadata['urls']
-        release_status = 'verified' if _published_files(release_files) else 'unavailable'
+        release_files = _published_files(metadata['urls'])
+        if release_files:
+            release_status = 'verified'
+        elif all(isinstance(item, dict) for item in metadata['urls']):
+            release_status = 'unavailable'
+        else:
+            release_status = 'unknown'
     if release_status == 'unavailable':
         warnings.append('Selected version was not found among published non-yanked releases')
     elif release_status == 'unknown':

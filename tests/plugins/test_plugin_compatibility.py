@@ -337,6 +337,18 @@ class OrchestrationTests(unittest.TestCase):
                                        version='2.0.0', fetcher=fetcher)
         self.assertEqual(review.release_status, 'unknown')
 
+    def test_malformed_release_entry_stays_unknown(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+
+        def fetcher(*args):
+            if len(args) == 1:
+                return {'releases': {'2.0.0': 42}}
+            raise OSError('Offline')
+
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12'],
+                                       version='2.0.0', fetcher=fetcher)
+        self.assertEqual(review.release_status, 'unknown')
+
     def test_file_level_python_conflict_proven(self):
         result = assess_compatibility('netbox-plugin-demo', '2.0.0', '4.5.0', '3.12.0',
                                       self.metadata(), published_files=[{'requires_python': '>=3.13'}])

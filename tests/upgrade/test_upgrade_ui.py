@@ -19,7 +19,7 @@ from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_plan import build_upgrade_plan
 from netbox_ops.upgrade_ui import (
-    UpgradeContext, execute_plan, make_plan, official_tags, parse_plugins,
+    UpgradeContext, execute_plan, make_plan, official_tags, parse_plugins, summary_lines,
 )
 from tests.helpers.fake_screen import FakeScreen
 
@@ -89,6 +89,21 @@ class SharedInterfaceTests(InterfaceFixture):
                 with self.subTest(fingerprint=fingerprint), self.assertRaises(UpgradeExecutionError):
                     execute_plan(self.cfg, 'netbox', plan, fingerprint=fingerprint,
                                  acknowledge_unknowns=unknowns, health_url='https://host/api/status/')
+            executor.assert_not_called()
+
+    def test_unverified_target_is_displayed_but_never_executed(self):
+        def unavailable(*args, **kwargs):
+            return replace(self.reviewer(*args, **kwargs), release_status='unknown')
+
+        with patch('netbox_ops.upgrade_ui.build_upgrade_plan',
+                   side_effect=lambda *args, **kwargs: build_upgrade_plan(
+                       *args, **kwargs, reviewer=unavailable)):
+            plan = make_plan(self.context, 'plugins', None, {'example-plugin': '9.0.0'})
+        self.assertIn('example-plugin: 1.0.0 -> 9.0.0', summary_lines(plan, self.t))
+        with patch('netbox_ops.upgrade_ui.execute_plugin_upgrade') as executor:
+            with self.assertRaises(UpgradeExecutionError):
+                execute_plan(self.cfg, 'plugins', plan, fingerprint=plan.fingerprint,
+                             acknowledge_unknowns=True, health_url='https://host/api/status/')
             executor.assert_not_called()
 
     def test_dispatches_all_three_executors_and_rebuilds_exact_selection(self):
