@@ -56,3 +56,36 @@ A pending marker at `/var/lib/netbox-ops/upgrade.pending` blocks another
 upgrade until an administrator has investigated and safely resolved the
 interrupted operation. Do not remove it simply to retry. The executor never
 automatically restores the database or claims a successful rollback.
+
+
+## Plugin-only upgrades
+
+`execute_plugin_upgrade` uses the same approved-plan, maintenance, backup and
+recovery workflow without fetching a NetBox release or changing the Git revision.
+The planner offers the newest stable plugin release or an explicit alternative;
+only selected packages receive new pins.
+
+The current backend supports exact, ordinary PyPI requirements (including
+extras). Resolve ambiguous local requirements, duplicate entries or unpinned
+unselected packages before execution. All enabled plugins must map to installed
+distributions. Unselected local pins and comments are preserved, and installed
+core dependency versions must match the current NetBox release requirements.
+
+Before downtime the isolated wheel-only resolver checks all proposed local pins
+together with the exact core pins using NetBox's current Python. A proven
+dependency conflict blocks execution; an inconclusive result requires explicit
+strong confirmation. Plugins available only as source distributions are not
+installed by this backend.
+
+Once the verified backup is captured, the executor atomically writes the
+approved pins and installs them together with the core pins in the existing
+NetBox virtualenv. Unlike the NetBox version upgrade script, this does not
+rebuild the entire virtualenv. It runs pip's dependency check and verifies
+installed package versions before applying Django migrations and collecting
+static files. Only NetBox services are started afterward. The final HTTP status
+must match the locally loaded plugin registry and unchanged NetBox release.
+
+If installation, migrations, static collection or validation fails, retain the
+recovery point and pending marker; do not restart writers automatically or
+assume restoring the old requirements is sufficient after database migrations.
+CLI/TUI wiring and disposable-VM testing remain in #87 and #88.
