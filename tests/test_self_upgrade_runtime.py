@@ -40,7 +40,11 @@ class RuntimeTests(unittest.TestCase):
         archive = self.parent / 'netbox-ops-v0.6.0.tar.gz'
         files = {
             'netbox-ops/netbox_ops.py': f'print("netbox-ops {version}")'.encode(),
-            'netbox-ops/netbox_ops/__init__.py': b'',
+            'netbox-ops/netbox_ops/__init__.py': f'__version__ = "{version}"\n'.encode(),
+            'netbox-ops/LICENSE': b'license',
+            'netbox-ops/README.md': b'readme',
+            'netbox-ops/CHANGELOG.md': b'changes',
+            'netbox-ops/config.example.json': b'{}',
             'netbox-ops/install.sh': b'#!/bin/sh\nexit 99\n',
             'netbox-ops/upgrade.sh': b'#!/bin/sh\nexit 99\n',
         }
