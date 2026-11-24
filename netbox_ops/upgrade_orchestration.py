@@ -126,7 +126,10 @@ def _execute_upgrade(
                     phase = f'stage {index} preflight'
                     require_quiesced_writers(systemd)
                     validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
-                    recheck_combined_stage(cfg, live, planned, combined[index - 1], approval)
+                    recheck_combined_stage(
+                        cfg, live, planned, combined[index - 1], approval,
+                        approved_warnings=plan.warnings,
+                    )
                 phase = f'stage {index} fetch'
                 require_quiesced_writers(systemd)
                 write_audit(f'NetBox upgrade starting stage={index} version={stage.version} commit={stage.commit}')
