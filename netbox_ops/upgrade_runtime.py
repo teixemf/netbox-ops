@@ -1,6 +1,7 @@
 """Read-only checks that the backup and upgrade target the running installation."""
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import subprocess
@@ -22,6 +23,7 @@ _IDENTITY_SQL = (
 )
 
 _PROBE = """
+import json
 import os
 from pathlib import Path
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
@@ -36,6 +38,8 @@ if db.get('ENGINE') != 'django.db.backends.postgresql':
 if db.get('NAME') != os.environ.pop('NBO_EXPECTED_DB'):
     raise SystemExit(1)
 if Path(settings.MEDIA_ROOT).resolve(strict=True) != Path(os.environ.pop('NBO_EXPECTED_MEDIA')):
+    raise SystemExit(1)
+if sorted(settings.PLUGINS) != json.loads(os.environ.pop('NBO_EXPECTED_PLUGINS')):
     raise SystemExit(1)
 with connections['default'].cursor() as cursor:
     cursor.execute(%r)
@@ -54,6 +58,7 @@ def upgrade_environment(base_python: Path) -> dict[str, str]:
 
 def validate_upgrade_runtime(
     cfg: Configuration, installation: GitNetBoxInstallation, base_python: Path,
+    enabled_plugins: tuple[str, ...],
     *, runner: Callable = subprocess.run, discover: Callable = netbox_runtime,
     sql: Callable = _sql,
 ) -> None:
@@ -99,6 +104,7 @@ def validate_upgrade_runtime(
                 env = dict(environment)
                 env['NBO_EXPECTED_DB'] = cfg.database
                 env['NBO_EXPECTED_MEDIA'] = str(media)
+                env['NBO_EXPECTED_PLUGINS'] = json.dumps(sorted(enabled_plugins))
                 result = runner(
                     [str(runtime.python), '-c', _PROBE], cwd=runtime.working_directory,
                     env=env, user=account.pw_uid, group=account.pw_gid,
