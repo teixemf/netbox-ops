@@ -44,6 +44,30 @@ class StageTests(unittest.TestCase):
         self.assertTrue((staged / 'install.sh').is_file())
         self.assertFalse(list(self.tmp.iterdir()))
 
+    def test_verified_snapshot_is_used_if_original_changes(self):
+        from netbox_ops.self_upgrade_archive import verify_release_archive
+
+        def verify_then_change(snapshot, checksum):
+            verify_release_archive(snapshot, checksum)
+            self.archive.write_bytes(b'changed after verification')
+
+        with patch('netbox_ops.self_upgrade_stage.verify_release_archive',
+                   side_effect=verify_then_change):
+            staged = stage_release(self.archive, self.checksum,
+                                   temp_root=self.tmp, install_parent=self.opt)
+        self.assertEqual((staged / 'install.sh').read_bytes(), b'x')
+        self.assertFalse(list(self.tmp.iterdir()))
+
+    def test_reject_symlinked_archive(self):
+        original = self.archive.with_name('original.tar.gz')
+        self.archive.rename(original)
+        self.archive.symlink_to(original)
+        with self.assertRaises(OSError):
+            stage_release(self.archive, self.checksum,
+                          temp_root=self.tmp, install_parent=self.opt)
+        self.assertFalse(list(self.tmp.iterdir()))
+        self.assertFalse(list(self.opt.iterdir()))
+
     def test_bad_checksum_never_creates_staging(self):
         with self.assertRaises(ReleaseArchiveError):
             stage_release(self.archive, b'bad', temp_root=self.tmp,
