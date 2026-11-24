@@ -70,6 +70,12 @@ def validate_execution_approval(
             raise UpgradeExecutionError('A plugin-only plan must preserve the NetBox version')
         if fresh_plan.source.inventory != plan.source.inventory:
             raise UpgradeExecutionError('Plugin inventory changed during preflight')
+    elif operation == 'combined':
+        if (not plan.selected_plugins or plan.current_netbox == plan.target_netbox
+                or any(stage.kind != 'netbox' for stage in plan.stages)):
+            raise UpgradeExecutionError('Combined plans require NetBox stages and selected plugins')
+        if fresh_plan.source.inventory != plan.source.inventory:
+            raise UpgradeExecutionError('Plugin inventory changed during preflight')
     else:
         raise UpgradeExecutionError('Unsupported upgrade operation')
     live = inspector(original.root)
@@ -84,9 +90,9 @@ def validate_execution_approval(
     if operation == 'netbox' and plan.target_netbox == previous:
         raise UpgradeExecutionError('No NetBox version change was approved')
     for stage in plan.stages:
-        if stage.previous_netbox != previous or (operation == 'netbox' and stage.netbox_version == previous):
+        if stage.previous_netbox != previous or (operation != 'plugins' and stage.netbox_version == previous):
             raise UpgradeExecutionError('NetBox stages are out of order')
-        if operation == 'netbox' and 'v' + stage.netbox_version not in plan.source.available_tags:
+        if operation != 'plugins' and 'v' + stage.netbox_version not in plan.source.available_tags:
             raise UpgradeExecutionError('Unverified NetBox Git release tag')
         previous = stage.netbox_version
         if any(check.status == 'blocked' for check in stage.prerequisites):
