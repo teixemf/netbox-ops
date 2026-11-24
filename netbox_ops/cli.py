@@ -106,7 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
     stack_selector.add_argument('--plugin', action='append', help='Selected plugins (reserved).')
 
     top.add_parser('platform', help='Show OS family, systemd units and PostgreSQL tools (read-only).')
-    top.add_parser('self-upgrade', help='Upgrade netbox-ops itself (not implemented).')
+    self_upgrade = top.add_parser('self-upgrade', help='Inspect official netbox-ops releases.')
+    self_actions = self_upgrade.add_subparsers(dest='action')
+    self_actions.add_parser('list', help='List official stable releases (read-only).')
+    details = self_actions.add_parser('show', help='Show a release changelog (read-only).')
+    details.add_argument('version', help='Stable release version, e.g. v0.6.0.')
     return parser
 
 
@@ -263,6 +267,9 @@ def perform_backup_action(group: str, action: str, cfg: Configuration,
 
 def dispatch(args: argparse.Namespace, t: Translator) -> int:
     action = getattr(args, 'action', '')
+    if args.command == 'self-upgrade' and action in ('list', 'show'):
+        from .self_upgrade_ui import run_catalogue
+        return run_catalogue(action, t, target=getattr(args, 'version', None))
     if args.command == 'platform':
         from .platform import detect_platform, pg_binary, PlatformError
         profile = detect_platform()

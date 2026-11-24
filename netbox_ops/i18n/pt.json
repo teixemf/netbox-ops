@@ -255,5 +255,17 @@
   "nbo_restore_db_desc": "Repor apenas os dados PostgreSQL; conservar imagens e anexos.",
   "nbo_restore_media_desc": "Repor apenas imagens e ficheiros; conservar a base de dados.",
   "nbo_restore_all_desc": "Repor base de dados e imagens; operação completa.",
-  "nbo_restore_scope_warning": "O restauro exige confirmação adicional e cria salvaguardas prévias."
+  "nbo_restore_scope_warning": "O restauro exige confirmação adicional e cria salvaguardas prévias.",
+  "self_upgrade_installed": "netbox-ops instalado: {version}",
+  "self_upgrade_older": "Versão anterior — downgrade bloqueado",
+  "self_upgrade_current": "Versão instalada",
+  "self_upgrade_unverified": "Compatibilidade não verificada — instalação bloqueada",
+  "self_upgrade_empty": "Não foram encontradas releases estáveis oficiais.",
+  "self_upgrade_read_only": "Consulta apenas. A instalação por self-upgrade ainda não está activa.",
+  "self_upgrade_changelog": "Notas da release:",
+  "self_upgrade_no_notes": "Não foram publicadas notas da release.",
+  "self_upgrade_notes_truncated": "Notas da release truncadas.",
+  "self_upgrade_invalid_version": "Versão estável inválida.",
+  "self_upgrade_discovery_failed": "Não foi possível consultar as releases oficiais.",
+  "self_upgrade_release_missing": "Release oficial {version} não encontrada."
 }

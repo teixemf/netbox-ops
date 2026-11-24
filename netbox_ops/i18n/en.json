@@ -255,5 +255,17 @@
   "nbo_restore_db_desc": "Restore PostgreSQL data only; preserve media files.",
   "nbo_restore_media_desc": "Restore uploaded images and files only; preserve database.",
   "nbo_restore_all_desc": "Restore database and media together.",
-  "nbo_restore_scope_warning": "Restore requires confirmation and makes a precautionary backup."
+  "nbo_restore_scope_warning": "Restore requires confirmation and makes a precautionary backup.",
+  "self_upgrade_installed": "Installed netbox-ops: {version}",
+  "self_upgrade_older": "Older version — downgrade blocked",
+  "self_upgrade_current": "Installed version",
+  "self_upgrade_unverified": "Compatibility not verified — installation blocked",
+  "self_upgrade_empty": "No official stable releases found.",
+  "self_upgrade_read_only": "Read-only view. Self-upgrade installation is not enabled.",
+  "self_upgrade_changelog": "Release notes:",
+  "self_upgrade_no_notes": "No release notes published.",
+  "self_upgrade_notes_truncated": "Release notes truncated.",
+  "self_upgrade_invalid_version": "Invalid stable version.",
+  "self_upgrade_discovery_failed": "Unable to read official releases.",
+  "self_upgrade_release_missing": "Official release {version} not found."
 }
