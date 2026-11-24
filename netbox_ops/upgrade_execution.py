@@ -40,9 +40,10 @@ def validate_execution_approval(
     # A freshly rebuilt plan is mandatory for any caller that intends to
     # execute an upgrade. Approval of an earlier plan is not reusable after
     # dependencies, requirements or upstream metadata change.
-    if fresh_plan is not None:
-        if fresh_plan.fingerprint != plan.fingerprint or not fresh_plan.can_execute:
-            raise UpgradeExecutionError('Upgrade plan changed during preflight')
+    if fresh_plan is None:
+        raise UpgradeExecutionError('Fresh preflight evidence is required before execution')
+    if fresh_plan.fingerprint != plan.fingerprint or not fresh_plan.can_execute:
+        raise UpgradeExecutionError('Upgrade plan changed during preflight')
     if not plan.can_execute:
         raise UpgradeExecutionError('Upgrade plan has blockers or no stages')
     if not plan.stages or any(stage.blockers for stage in plan.stages):
