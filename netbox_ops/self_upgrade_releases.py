@@ -87,13 +87,24 @@ def parse_releases(payload: object) -> list[OfficialRelease]:
             version = Version.parse(tag)
         except ValueError:
             continue
+        # Count stable tags before validating assets or release notes.
+        if version in seen_versions:
+            found.pop(version, None)
+            continue
+        seen_versions.add(version)
         assets = item.get('assets')
         if not isinstance(assets, list) or len(assets) > 100:
             continue
         archive_name = f'netbox-ops-{tag}.tar.gz'
         checksum_name = f'{archive_name}.sha256'
-        archive = [_official_asset(asset, archive_name, tag) for asset in assets]
-        checksum = [_official_asset(asset, checksum_name, tag) for asset in assets]
+        archive = [asset for asset in assets if isinstance(asset, dict)
+                   and asset.get('name') == archive_name]
+        checksum = [asset for asset in assets if isinstance(asset, dict)
+                    and asset.get('name') == checksum_name]
+        if len(archive) != 1 or len(checksum) != 1:
+            continue
+        archive = [_official_asset(asset, archive_name, tag) for asset in archive]
+        checksum = [_official_asset(asset, checksum_name, tag) for asset in checksum]
         valid_archives = [asset for asset in archive if asset is not None]
         valid_checksums = [asset for asset in checksum if asset is not None]
         if len(valid_archives) != 1 or len(valid_checksums) != 1:
@@ -102,11 +113,6 @@ def parse_releases(payload: object) -> list[OfficialRelease]:
         published = item.get('published_at')
         if not isinstance(body, str) or not isinstance(published, str) or not published:
             continue
-        # Duplicate tags or ambiguous assets must never become upgrade targets.
-        if version in seen_versions:
-            found.pop(version, None)
-            continue
-        seen_versions.add(version)
         found[version] = OfficialRelease(
             version, tag, body, published, valid_archives[0], valid_checksums[0]
         )

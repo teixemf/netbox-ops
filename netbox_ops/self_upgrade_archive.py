@@ -66,17 +66,20 @@ def validate_archive(archive: Path) -> None:
                         or not path.parts or path.parts[0] != "netbox-ops"
                         or len(path.parts) < 2):
                     # The root directory is allowed only as netbox-ops/.
-                    if not (name == "netbox-ops/" and member.isdir()):
+                    if not (name in ("netbox-ops", "netbox-ops/") and member.isdir()):
                         raise ReleaseArchiveError(f"Unsafe archive path: {name}")
+                name = str(path)
+                if len(path.parts) >= 2 and path.parts[1] in {"venv", ".git", "__pycache__"}:
+                    raise ReleaseArchiveError("Archive contains installation runtime or Git data")
                 if name in seen:
                     raise ReleaseArchiveError("Duplicate archive member")
                 seen.add(name)
+                if member.mode & 0o6000:
+                    raise ReleaseArchiveError("Archive contains privileged permissions")
                 if member.isdir():
                     continue
                 if not member.isfile():
                     raise ReleaseArchiveError("Archive contains links or special files")
-                if member.mode & 0o6000:
-                    raise ReleaseArchiveError("Archive contains privileged file permissions")
                 if member.size < 0 or member.size > MAX_EXTRACTED_BYTES:
                     raise ReleaseArchiveError("Invalid member size")
                 total += member.size
@@ -85,6 +88,8 @@ def validate_archive(archive: Path) -> None:
                 files.add(name)
     except (OSError, EOFError, tarfile.TarError) as exc:
         raise ReleaseArchiveError("Invalid compressed archive") from exc
+    if any(str(parent) in files for name in seen for parent in PurePosixPath(name).parents):
+        raise ReleaseArchiveError("Archive contains conflicting file and directory paths")
     if not _REQUIRED.issubset(files):
         raise ReleaseArchiveError("Release is missing required installation files")
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import stat
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -45,16 +47,21 @@ def download_release(release: OfficialRelease, *, temp_root: Path = Path('/tmp')
     """
     archive_name = f'netbox-ops-{release.tag}.tar.gz'
     checksum_name = f'{archive_name}.sha256'
-    if (release.archive.name != archive_name or release.checksum.name != checksum_name
+    if (release.tag != f'v{release.version}' or release.archive.name != archive_name or release.checksum.name != checksum_name
             or release.archive.url != f'{DOWNLOAD_PREFIX}{release.tag}/{archive_name}'
             or release.checksum.url != f'{DOWNLOAD_PREFIX}{release.tag}/{checksum_name}'
             or not 0 < release.archive.size <= MAX_ARCHIVE_BYTES
             or not 0 < release.checksum.size <= MAX_CHECKSUM_BYTES):
         raise ReleaseArchiveError('Invalid official release assets')
-    # Require a real /tmp parent, not an attacker-controlled alternate location.
-    if temp_root != Path('/tmp') and not temp_root.is_dir():
-        raise ReleaseArchiveError('Temporary directory is unavailable')
-    import shutil
+    # Never create private downloads under an untrusted writable parent.
+    if (not temp_root.is_absolute() or temp_root.resolve() != temp_root
+            or not temp_root.is_dir()):
+        raise ReleaseArchiveError('Unsafe temporary directory')
+    info = temp_root.stat()
+    if info.st_mode & 0o022 and (not info.st_mode & stat.S_ISVTX or info.st_uid != 0):
+        raise ReleaseArchiveError('Unsafe temporary directory permissions')
+    if info.st_uid not in (0, os.geteuid()):
+        raise ReleaseArchiveError('Unsafe temporary directory owner')
 
     directory = Path(tempfile.mkdtemp(prefix='netbox-ops-upgrade-', dir=temp_root))
     try:

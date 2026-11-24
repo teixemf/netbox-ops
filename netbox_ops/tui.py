@@ -856,6 +856,9 @@ class CursesMenu:
                     elif data == ('services', 'manage'):
                         self.stdscr.timeout(-1)
                         self._manage()
+                    elif data == ('self-upgrade', ''):
+                        self.stdscr.timeout(-1)
+                        self._self_upgrade()
                     elif data == ('backup', 'manage'):
                         self.stdscr.timeout(-1)
                         self._backups()
@@ -869,6 +872,35 @@ class CursesMenu:
                     cursor = None
         finally:
             self.stdscr.timeout(-1)
+
+    def _self_upgrade(self) -> None:
+        """Browse official releases without enabling installation."""
+        from .self_upgrade_releases import ReleaseDiscoveryError, Version, discover_releases
+        from .self_upgrade_ui import catalogue_lines, changelog_lines
+
+        title = self.t('menu_13')
+        try:
+            installed = Version.parse(f'v{__version__}')
+        except ValueError:
+            self._show_lines(title, [(self.t('self_upgrade_invalid_version'), 'failure')])
+            return
+        try:
+            releases = sorted(discover_releases(), key=lambda item: item.version, reverse=True)
+        except (ReleaseDiscoveryError, OSError):
+            self._show_lines(title, [(self.t('self_upgrade_discovery_failed'), 'failure')])
+            return
+        lines = catalogue_lines(releases, self.t, installed)
+        if not releases:
+            self._show_lines(title, [(line, 'muted') for line in lines])
+            return
+        title = f"{title} — {lines[0]}"
+        entries = [(line, '') for line in lines[1:-1]]
+        while True:
+            selected = self._choose(title, entries, self.t('tui_back_hint'))
+            if not isinstance(selected, int):
+                return
+            details = changelog_lines(releases[selected], self.t, installed)
+            self._show_lines(self.t('menu_13'), [(line, '') for line in details])
 
     def _render_journal(self, panel: JournalPanel, y: int, rows: int,
                         x: int, width: int, *, scroll: int = 0) -> None:
