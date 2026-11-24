@@ -74,6 +74,19 @@ class CheckoutStageTests(unittest.TestCase):
         self.inspector.assert_not_called()
         self.runner.assert_not_called()
 
+    def test_foreign_origin_blocks_fetch_and_checkout(self):
+        self.inspector.return_value.origin = 'https://github.com/attacker/netbox.git'
+        with self.assertRaises(UpgradeExecutionError):
+            self.fetch()
+        with self.assertRaises(UpgradeExecutionError):
+            self.checkout()
+        self.runner.assert_not_called()
+
+    def test_supported_ssh_origin_uses_official_https_fetch(self):
+        self.inspector.return_value.origin = 'git@github.com:netbox-community/netbox.git'
+        self.fetch()
+        self.assertIn(OFFICIAL_REMOTE, self.commands()[0])
+
     def test_invalid_commit_never_checks_out(self):
         self.stage = PinnedStage('4.4.1', '../secret')
         with self.assertRaises(UpgradeExecutionError):
