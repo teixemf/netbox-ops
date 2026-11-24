@@ -23,6 +23,9 @@ class HelperTests(unittest.TestCase):
         (self.active / 'version').write_text('old')
         (self.staged / 'version').write_text('new')
         self.log = []
+        waiter = patch('netbox_ops.self_upgrade_helper.wait_for_initiator_exit')
+        self.waiter = waiter.start()
+        self.addCleanup(waiter.stop)
 
     def run_helper(self, preflight=None, validate=None):
         from netbox_ops import self_upgrade_helper as helper
@@ -32,8 +35,9 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit', side_effect=lambda msg, **kw: self.log.append(msg))):
             run_approved_swap(
                 self.staged,
-                preflight=preflight if preflight is not None else lambda path: None,
-                validate=validate if validate is not None else lambda path: None,
+                initiator_pid=12345,
+                preflight=preflight if preflight is not None else lambda current, candidate: None,
+                validate=validate if validate is not None else lambda current, candidate: None,
                 active=self.active,
             )
             lock.assert_called_once()
@@ -41,20 +45,21 @@ class HelperTests(unittest.TestCase):
     def test_success_requires_preflight_and_validation(self):
         checks = []
 
-        def before(path):
-            checks.append(('before', (path / 'version').read_text()))
+        def before(current, candidate):
+            checks.append(('before', (current / 'version').read_text(),
+                           (candidate / 'version').read_text()))
 
         def after(path):
             checks.append(('after', (path / 'version').read_text()))
 
         self.run_helper(preflight=before, validate=after)
-        self.assertEqual(checks, [('before', 'new'), ('after', 'new')])
+        self.assertEqual(checks, [('before', 'old', 'new'), ('after', 'new')])
         self.assertEqual((self.active / 'version').read_text(), 'new')
         self.assertFalse((self.active.parent / '.netbox-ops-backup').exists())
         self.assertIn('SELF-UPGRADE finished', self.log)
 
     def test_failed_preflight_never_moves_installation(self):
-        def deny(path):
+        def deny(current, candidate):
             raise ValueError('incompatible release')
 
         with self.assertRaises(ValueError):
@@ -79,7 +84,7 @@ class HelperTests(unittest.TestCase):
         from netbox_ops import self_upgrade_helper as helper
         with patch.object(helper.os, 'geteuid', return_value=1000):
             with self.assertRaises(SwapError):
-                run_approved_swap(self.staged, preflight=lambda path: None,
+                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         self.assertEqual((self.active / 'version').read_text(), 'old')
 
@@ -99,14 +104,13 @@ class HelperTests(unittest.TestCase):
             self.run_helper()
         self.assertEqual((self.active / 'version').read_text(), 'new')
 
-
     def test_audit_failure_prevents_any_swap(self):
         from netbox_ops import self_upgrade_helper as helper
         with (patch.object(helper.os, 'geteuid', return_value=0),
               patch.object(helper, 'ExclusiveLock'),
               patch.object(helper, 'write_audit', side_effect=OSError('log unavailable'))):
             with self.assertRaises(OSError):
-                run_approved_swap(self.staged, preflight=lambda path: None,
+                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         self.assertEqual((self.active / 'version').read_text(), 'old')
         self.assertFalse((self.active.parent / '.netbox-ops-transaction.json').exists())
@@ -123,7 +127,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'ExclusiveLock'),
               patch.object(helper, 'write_audit', side_effect=audit)):
             with self.assertRaises(OSError):
-                run_approved_swap(self.staged, preflight=lambda path: None,
+                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         self.assertEqual((self.active / 'version').read_text(), 'old')
         self.assertIn('SELF-UPGRADE rollback completed', self.log)
@@ -139,7 +143,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit'),
               patch.object(helper, 'rollback_swap', side_effect=OSError('disk error'))):
             with self.assertRaises(SwapError):
-                run_approved_swap(self.staged, preflight=lambda path: None,
+                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
                                   validate=invalid, active=self.active)
         self.assertTrue((self.active.parent / '.netbox-ops-backup').exists())
         self.assertTrue((self.active.parent / '.netbox-ops-transaction.json').exists())
@@ -153,7 +157,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit'),
               patch.object(helper, 'cleanup_swap', side_effect=OSError('disk error'))):
             with self.assertRaises(OSError):
-                run_approved_swap(self.staged, preflight=lambda path: None,
+                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         backup = self.active.parent / '.netbox-ops-backup'
         state = self.active.parent / '.netbox-ops-transaction.json'
