@@ -6,6 +6,10 @@ work (#87 and #88).
 
 ## Supported setup
 
+NetBox 4.0 and newer are in scope. NetBox 3.x and earlier, including upgrades
+from 3.x to 4.x, are unsupported. New major-version transitions require a
+reviewed upstream upgrade rule; their availability is not assumed.
+
 - A recognized, root-controlled Git checkout of the official NetBox repository
   at `/opt/netbox`, with the existing supported Python runtime.
 - Configured NetBox web and RQ services, local PostgreSQL, and a media directory
@@ -167,9 +171,11 @@ fresh database with a real upstream Git release; it never downgrades the
 baseline database or publishes a new image.
 
 The scenarios cover NetBox 4.7.2 to 4.7.3, NetBox Inventory 2.7.0 to 2.7.1
-without a NetBox change, a combined upgrade, a required 3.7.x intermediate
-release between 3.6.9 and 4.0.11 using a separate Python 3.11 test runtime,
-and an injected final health validation failure after real migrations.
+without a NetBox change, a combined upgrade, a cross-minor upgrade from
+4.4.10 to 4.7.3, and an injected final health validation failure after real
+migrations. Required intermediate stages remain covered by unit tests using
+hypothetical reviewed major boundaries until a supported real transition
+is available.
 
 Each case rejects a wrong plan fingerprint before downtime, verifies the
 protected combined archive and recovery metadata, and checks real database
