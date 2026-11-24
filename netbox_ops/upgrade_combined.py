@@ -54,6 +54,7 @@ class CombinedStage:
     core: bytes
     pins: PluginUpgrade
     resolution: DependencyPreflight
+    wheelhouse: Path
 
 
 def probe_server_versions(
@@ -120,11 +121,39 @@ def _resolve(pins: PluginUpgrade, live: GitNetBoxInstallation,
     return result
 
 
+def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
+                          directory: Path, *, runner: Callable = subprocess.run) -> None:
+    """Prepare one wheel set for core, plugins and the upstream pip bootstrap.
+
+    Resolve together before downtime; the official script installs core and
+    plugins separately, so restrict both calls to this same resolved set.
+    """
+    directory.mkdir(mode=0o700)
+    env = upgrade_environment(live.python)
+    env.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR='1')
+    command = [
+        str(live.python), '-I', '-m', 'pip', '--isolated', 'download',
+        '--only-binary=:all:', '--no-input', '--disable-pip-version-check',
+        '--no-cache-dir', '--index-url', PYPI_INDEX, '--dest', str(directory),
+        '--timeout', '20', '--retries', '2',
+        'pip', 'wheel', *pins.core_pins, *pins.local_pins,
+    ]
+    try:
+        result = runner(command, cwd=directory, env=env, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=900, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise UpgradeExecutionError('Combined wheel download unavailable or timed out') from None
+    if result.returncode or not any(directory.glob('*.whl')):
+        raise UpgradeExecutionError('Cannot prepare all combined upgrade wheels before maintenance')
+
+
 def prepare_combined_stages(
     cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval,
-    stages: tuple[PinnedStage, ...], *,
+    stages: tuple[PinnedStage, ...], *, wheel_root: Path,
     fetch: Callable = fetch_pinned_stage, git: Callable = _run_git,
     resolver: Callable = isolated_dependency_preflight, probe: Callable = probe_server_versions,
+    download: Callable = download_stage_wheels,
 ) -> tuple[CombinedStage, ...]:
     """Resolve every target's official core requirements before downtime."""
     live = plan.source.installation
@@ -144,7 +173,9 @@ def prepare_combined_stages(
         )
         if prior_passed and (resolved.status != 'passed' or not resolved.checked_core):
             raise UpgradeExecutionError('Approved combined dependency verification became uncertain')
-        prepared.append(CombinedStage(pinned, core, pins, resolved))
+        wheelhouse = wheel_root / f'stage-{index + 1}'
+        download(pins, live, wheelhouse)
+        prepared.append(CombinedStage(pinned, core, pins, resolved, wheelhouse))
     return tuple(prepared)
 
 
@@ -195,6 +226,8 @@ def run_combined_stage(
 ) -> tuple[GitNetBoxInstallation, tuple[tuple[str, str | None], ...]]:
     """Use the official script with exact constraints and verify all approved pins."""
     root = live.root
+    if not prepared.wheelhouse.is_dir() or not any(prepared.wheelhouse.glob('*.whl')):
+        raise UpgradeExecutionError('Prepared combined wheel directory is unavailable')
     require_quiesced_writers(systemd)
     actual = inventory_reader(live)
     expected_before = {p.package: p.installed_version for p in plan.plugins}
@@ -222,8 +255,8 @@ def run_combined_stage(
             if prepared.pins.requirements != (local or b''):
                 _apply_requirements(root, prepared.pins)
             return {'PIP_CONSTRAINT': str(constraints), 'PIP_ONLY_BINARY': ':all:',
-                    'PIP_CONFIG_FILE': os.devnull, 'PIP_INDEX_URL': PYPI_INDEX,
-                    'PIP_NO_CACHE_DIR': '1'}
+                    'PIP_CONFIG_FILE': os.devnull, 'PIP_NO_INDEX': '1',
+                    'PIP_FIND_LINKS': str(prepared.wheelhouse), 'PIP_NO_CACHE_DIR': '1'}
 
         final = stage_runner(live, prepared.pinned, systemd=systemd, prepare_script=prepare_script)
     require_quiesced_writers(systemd)

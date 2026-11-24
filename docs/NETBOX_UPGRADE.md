@@ -108,7 +108,11 @@ receives the selected plugin pins after checkout, before the official
 constraints are passed to the script to prevent dependency resolution from
 silently changing approved versions. The combined backend uses the same
 wheel-only dependency policy and existing Python runtime as the plugin-only
-backend.
+backend. Before maintenance it downloads one complete wheel set per stage,
+including pip and wheel, into a private temporary directory. Both upstream
+installation calls use only that local wheel set, so an unavailable package
+fails before service interruption and dependency versions cannot change
+between preflight and installation. Temporary wheels are removed on exit.
 
 Before each stage it verifies the live PostgreSQL and Redis prerequisites,
 refreshes compatibility for the stage's exact plugin versions and reruns

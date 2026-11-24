@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 from dataclasses import replace
 from typing import Callable
 
@@ -40,6 +42,7 @@ _SAFE_STAGE_ERRORS = frozenset({
     'Cannot verify a matching base Python outside the NetBox venv',
     'NetBox upgrade script is missing or unsafe',
     'NetBox stage changed during upgrade',
+    'Prepared combined wheel directory is unavailable',
     'Combined stage local requirements or configured plugins changed',
     'Checked out core requirements differ from preflight',
     'Local requirements changed after checkout',
@@ -111,7 +114,7 @@ def _execute_upgrade(
     report('preflight')
     if os.geteuid() != 0:
         raise UpgradeExecutionError('Root privileges required for upgrade')
-    with ExclusiveLock():
+    with ExclusiveLock(), tempfile.TemporaryDirectory(prefix='netbox-ops-upgrade-') as wheel_root:
         fresh = rebuild_plan()
         validate_execution_approval(plan, approval, fresh_plan=fresh, operation=operation)
         live = plan.source.installation
@@ -135,7 +138,7 @@ def _execute_upgrade(
             raise UpgradeExecutionError('HTTP status does not match the installed NetBox release')
         stages = (pin_release_stages(plan) if operation != 'plugins' else
                   (PinnedStage(live.version, live.commit),))
-        combined = (prepare_combined_stages(cfg, plan, approval, stages)
+        combined = (prepare_combined_stages(cfg, plan, approval, stages, wheel_root=Path(wheel_root))
                     if operation == 'combined' else ())
         systemd = SystemdServices(cfg)
         recovery = None
