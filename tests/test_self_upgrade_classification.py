@@ -67,7 +67,7 @@ class CompatibilityInterfaceTests(unittest.TestCase):
         self.assertIn('v0.7.0  Compatible', out)
         self.assertIn('v0.4.0  Older version', out)
         self.assertNotIn('v0.4.0', self.requests)
-        self.assertIn('installation is not enabled', out)
+        self.assertIn('Installation requires a separate review and confirmation', out)
 
     def test_cli_details_show_mandatory_path(self):
         out = self.run_cli('--lang', 'en', 'self-upgrade', 'show', 'v0.7.0')
@@ -94,7 +94,7 @@ class CompatibilityInterfaceTests(unittest.TestCase):
               patch('netbox_ops.self_upgrade_releases.discover_releases', return_value=self.releases),
               patch('netbox_ops.self_upgrade_ui.detect_environment', return_value=self.environment),
               patch('netbox_ops.self_upgrade_ui.CompatibilityCatalogue', side_effect=self.catalogue),
-              patch.object(menu, '_choose', side_effect=[2, None]) as choose,
+              patch.object(menu, '_choose', side_effect=[2, None, None]) as choose,
               patch.object(menu, '_show_lines') as show):
             menu._self_upgrade()
         self.assertIn('v0.7.0  Compatible', choose.call_args_list[0].args[1][2][0])
