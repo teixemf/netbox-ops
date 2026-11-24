@@ -1,13 +1,15 @@
 """Coordinator for an external self-upgrade helper process.
 
-The calling CLI must exit before launching the swap, and must supply trusted
-preflight and post-install checks. This module has no public CLI entry point
-until release compatibility metadata and the launch handshake are available.
+The initiating process must exit before the swap. The external handoff
+supplies trusted preflight and post-install checks.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import select
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +53,31 @@ def wait_for_initiator_exit(descriptor: int, timeout_seconds: int = 60) -> None:
         raise SwapError('Initiating process did not exit')
 
 
+
+@contextmanager
+def operation_lock(path: Path, inherited_fd: int | None = None):
+    """Use the existing lock or its inherited open file description.
+
+    The launcher retains the same flock across exec and parent exit. The
+    child owns the descriptor until its final cleanup and closes it itself.
+    """
+    if inherited_fd is None:
+        with ExclusiveLock(path) as lock:
+            yield lock
+        return
+    try:
+        entry = os.fstat(inherited_fd)
+        named = path.lstat()
+        if (not stat.S_ISREG(entry.st_mode) or not stat.S_ISREG(named.st_mode)
+                or entry.st_uid != 0 or entry.st_mode & 0o077
+                or (entry.st_dev, entry.st_ino) != (named.st_dev, named.st_ino)):
+            raise SwapError('Invalid inherited operation lock')
+        fcntl.flock(inherited_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise SwapError('Cannot retain inherited operation lock') from exc
+    yield None
+
+
 def run_approved_swap(
     staged: Path, *,
     initiator_fd: int,
@@ -59,6 +86,7 @@ def run_approved_swap(
     active: Path = Path('/opt/netbox-ops'),
     lock_path: Path = LOCK_PATH,
     audit_path: Path = LOG_PATH,
+    lock_fd: int | None = None,
 ) -> None:
     """Perform one checked transaction in the separate helper process.
 
@@ -76,7 +104,7 @@ def run_approved_swap(
     backup = active.with_name('.netbox-ops-backup')
     state = active.with_name('.netbox-ops-transaction.json')
 
-    with ExclusiveLock(lock_path):
+    with operation_lock(lock_path, lock_fd):
         write_audit('SELF-UPGRADE transaction requested', path=audit_path)
         # Recheck approval only after taking the exclusive lock.
         try:
@@ -122,15 +150,16 @@ def recover_interrupted_upgrade(
     *, active: Path = Path('/opt/netbox-ops'),
     lock_path: Path = LOCK_PATH,
     audit_path: Path = LOG_PATH,
+    lock_fd: int | None = None,
 ) -> str:
     """Recover under the existing lock, using only persisted transaction state.
 
-    This entry point is internal until the standalone recovery launcher is
-    installed. It neither selects nor installs a new release.
+    The copied recovery entry point can call this even when the active tree
+    is absent. It neither selects nor installs a new release.
     """
     if os.geteuid() != 0:
         raise SwapError('Self-upgrade recovery requires root privileges')
-    with ExclusiveLock(lock_path):
+    with operation_lock(lock_path, lock_fd):
         write_audit('SELF-UPGRADE recovery requested', path=audit_path)
         try:
             result = recover_swap(active)
