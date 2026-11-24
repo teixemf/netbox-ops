@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .self_upgrade_transaction import (
-    SwapError, begin_swap, cleanup_swap, finish_swap, rollback_swap,
+    SwapError, begin_swap, cleanup_swap, finish_swap, recover_swap, rollback_swap,
 )
 from .services import ExclusiveLock, LOCK_PATH, LOG_PATH, write_audit
 
@@ -104,3 +104,27 @@ def run_approved_swap(
                         path=audit_path)
             raise
         write_audit('SELF-UPGRADE finished', path=audit_path)
+
+
+def recover_interrupted_upgrade(
+    *, active: Path = Path('/opt/netbox-ops'),
+    lock_path: Path = LOCK_PATH,
+    audit_path: Path = LOG_PATH,
+) -> str:
+    """Recover under the existing lock, using only persisted transaction state.
+
+    This entry point is internal until the standalone recovery launcher is
+    installed. It neither selects nor installs a new release.
+    """
+    if os.geteuid() != 0:
+        raise SwapError('Self-upgrade recovery requires root privileges')
+    with ExclusiveLock(lock_path):
+        write_audit('SELF-UPGRADE recovery requested', path=audit_path)
+        try:
+            result = recover_swap(active)
+        except Exception as exc:
+            write_audit(f'SELF-UPGRADE recovery failed type={type(exc).__name__}',
+                        path=audit_path)
+            raise
+        write_audit(f'SELF-UPGRADE recovery finished result={result}', path=audit_path)
+        return result

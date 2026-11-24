@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from netbox_ops.self_upgrade_helper import run_approved_swap, wait_for_initiator_exit
-from netbox_ops.self_upgrade_transaction import SwapError
+from netbox_ops.self_upgrade_helper import (
+    recover_interrupted_upgrade, run_approved_swap, wait_for_initiator_exit,
+)
+from netbox_ops.self_upgrade_transaction import SwapError, begin_swap, finish_swap
 
 
 class HelperTests(unittest.TestCase):
@@ -187,6 +189,40 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(state.exists())
         cleanup_swap(self.active, self.staged, backup, state)
         self.assertFalse(state.exists())
+
+
+    def test_recovery_uses_exclusive_lock_and_audit(self):
+        from netbox_ops import self_upgrade_helper as helper
+        backup = self.active.parent / '.netbox-ops-backup'
+        state = self.active.parent / '.netbox-ops-transaction.json'
+        begin_swap(self.active, self.staged, backup, state)
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock') as lock,
+              patch.object(helper, 'write_audit', side_effect=lambda msg, **kw: self.log.append(msg))):
+            self.assertEqual(recover_interrupted_upgrade(active=self.active), 'rollback')
+            lock.assert_called_once()
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertIn('SELF-UPGRADE recovery finished result=rollback', self.log)
+
+    def test_recovery_audit_failure_prevents_mutation(self):
+        from netbox_ops import self_upgrade_helper as helper
+        backup = self.active.parent / '.netbox-ops-backup'
+        state = self.active.parent / '.netbox-ops-transaction.json'
+        begin_swap(self.active, self.staged, backup, state)
+        finish_swap(self.active, self.staged, backup, state)
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock'),
+              patch.object(helper, 'write_audit', side_effect=OSError('log unavailable'))):
+            with self.assertRaises(OSError):
+                recover_interrupted_upgrade(active=self.active)
+        self.assertTrue(backup.exists())
+        self.assertTrue(state.exists())
+
+    def test_recovery_refuses_non_root(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with patch.object(helper.os, 'geteuid', return_value=1000):
+            with self.assertRaises(SwapError):
+                recover_interrupted_upgrade(active=self.active)
 
 
 if __name__ == '__main__':
