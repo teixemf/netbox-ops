@@ -1,6 +1,7 @@
 """Offline failure-injection tests for the self-upgrade swap transaction."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 from netbox_ops import self_upgrade_transaction as tx
 from netbox_ops.self_upgrade_transaction import (
-    SwapError, begin_swap, cleanup_swap, finish_swap, rollback_swap,
+    SwapError, begin_swap, cleanup_swap, finish_swap, recover_swap, rollback_swap,
 )
 
 
@@ -200,6 +201,70 @@ class SwapTransactionTests(unittest.TestCase):
         self.staged.mkdir()
         with self.assertRaises(SwapError):
             self.rollback()
+        self.assertTrue(self.backup.exists())
+
+
+    def test_recover_without_original_stage_argument_after_interruption(self):
+        original = os.rename
+
+        def interrupted(source, destination):
+            if source == self.staged:
+                raise KeyboardInterrupt
+            return original(source, destination)
+
+        with patch.object(tx.os, 'rename', side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.swap()
+        self.assertEqual(recover_swap(self.active), 'rollback')
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertFalse(self.state.exists())
+        self.assertEqual(recover_swap(self.active), 'none')
+
+    def test_recover_unvalidated_active_installation(self):
+        self.swap()
+        self.assertEqual(recover_swap(self.active), 'rollback')
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertEqual((self.staged / 'version').read_text(), 'new')
+
+    def test_recover_validated_installation_only_cleans_backup(self):
+        self.swap()
+        self.finish()
+        self.assertEqual(recover_swap(self.active), 'cleanup')
+        self.assertEqual((self.active / 'version').read_text(), 'new')
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(self.state.exists())
+
+    def test_recover_rejects_traversal_in_persisted_stage_name(self):
+        self.swap()
+        data = json.loads(self.state.read_text())
+        data['staged'] = '../netbox'
+        self.state.write_text(json.dumps(data))
+        with self.assertRaises(SwapError):
+            recover_swap(self.active)
+        self.assertTrue(self.backup.exists())
+        self.assertTrue(self.state.exists())
+
+    def test_recovery_does_not_guess_a_stage_path(self):
+        self.swap()
+        with self.assertRaises(SwapError):
+            rollback_swap(self.active, self.staged.with_name('.netbox-ops-stage-other'),
+                          self.backup, self.state)
+        self.assertTrue(self.backup.exists())
+        self.assertTrue(self.state.exists())
+
+    def test_orphan_backup_without_transaction_fails_closed(self):
+        self.active.rename(self.backup)
+        with self.assertRaises(SwapError):
+            recover_swap(self.active)
+        self.assertTrue(self.backup.exists())
+
+    def test_recovery_rejects_symlinked_transaction(self):
+        self.swap()
+        other = self.state.with_name('other.json')
+        self.state.rename(other)
+        self.state.symlink_to(other)
+        with self.assertRaises(SwapError):
+            recover_swap(self.active)
         self.assertTrue(self.backup.exists())
 
 
