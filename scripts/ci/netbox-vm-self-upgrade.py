@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the actual self-upgrade CLI and independent helper inside a CI VM.
 
-Fixture mode builds release-shaped packages from the checkout and substitutes
-only the GitHub asset transport and explicit failure injection in those packages.
+Fixture mode consumes unchanged candidate artifacts built on the CI host by
+scripts/build-release.sh from disposable local commits. Only test transport
+and explicit fault injection are added to those commits.
 Official mode uses the published packages and unmodified production transport.
 Never run this controller outside a disposable NetBox CI guest.
 """
@@ -33,6 +34,8 @@ RESULT = Path('/var/lib/netbox-ops/self-upgrade-result.json')
 AUDIT = Path('/var/log/netbox-ops/operations.log')
 LOCK = Path('/run/lock/netbox-ops.lock')
 MARKER = Path('/run/netbox-ops-ci-e2e')
+FIXTURE_ROOT = Path('/tmp/netbox-ops-vm-fixture')
+FIXTURE_INPUT = '.ci-self-upgrade-assets'
 UNITS = ('netbox.service', 'netbox-rq.service', 'nginx.service',
          'redis-server.service', 'postgresql@16-main.service')
 PRESERVED = (Path('/etc/netbox-ops/config.json'),
@@ -137,12 +140,12 @@ def append(path, text):
         stream.write('\n\n' + text + '\n')
 
 
-def build_fixture(work, version_tag, version_object, *, requirements, asset_prefix):
-    """Build a package with test-only transport, using real parser/checksum code."""
-    source = work / f'source-{version_tag}' / 'netbox-ops'
-    source.mkdir(parents=True)
+def build_fixture(work, source_root, version_tag, version_object, *, steps, asset_prefix):
+    """Run the official builder on a disposable local commit, never a tag."""
+    source = work / f'source-{version_tag}'
+    source.mkdir()
     for name in FILES:
-        path = ACTIVE / name
+        path = source_root / name
         if path.is_dir():
             shutil.copytree(path, source / name, ignore=shutil.ignore_patterns('__pycache__'))
         else:
@@ -153,10 +156,27 @@ def build_fixture(work, version_tag, version_object, *, requirements, asset_pref
                              version_file.read_text(), flags=re.MULTILINE)
     assert count == 1, 'Package version fixture not found'
     version_file.write_text(updated)
+    readme = source / 'README.md'
+    updated, count = re.subn(r'(\*\*Current version: )[^ ]+( —)',
+                             rf'\g<1>{version_object}\g<2>', readme.read_text())
+    assert count == 1, 'README version fixture not found'
+    readme.write_text(updated)
+    changelog = source / 'CHANGELOG.md'
+    original = changelog.read_text()
+    first_heading = re.search(r'^## \[', original, re.MULTILINE)
+    assert first_heading
+    changelog.write_text(original[:first_heading.start()]
+                         + f'## [{version_object}] — Disposable CI candidate\n\n'
+                         + '- Test package; never publish.\n\n'
+                         + original[first_heading.start():])
+    policy_file = module / 'release_requirements.json'
+    policy = json.loads(policy_file.read_text())
+    policy['required_intermediates'] = [f'v{step}' for step in steps]
+    policy_file.write_text(json.dumps(policy, indent=2) + '\n')
     # The transport is confined to the test package, not the repository code.
     (module / '_vm_fixture.py').write_text(
         'import json\nfrom pathlib import Path\n'
-        f'ROOT = Path({str(work)!r})\n'
+        f'ROOT = Path({str(FIXTURE_ROOT)!r})\n'
         f'PREFIX = {asset_prefix!r}\n'
         'def rows():\n    return json.loads((ROOT / "catalogue.json").read_text())\n'
         'def mode():\n    return (ROOT / "mode").read_text().strip()\n'
@@ -216,53 +236,85 @@ def cleanup_swap(active, staged, backup, state):
         os._exit(87)
     return _original_cleanup(active, staged, backup, state)
 ''')
+    scripts = source / 'scripts'
+    scripts.mkdir()
+    for filename in ('build-release.sh', 'release-candidate.py'):
+        shutil.copy2(source_root / 'scripts' / filename, scripts / filename)
+    def git(*args):
+        run(['git', '-C', source, *args])
+    git('init', '--quiet', '--initial-branch=fixture')
+    git('add', '--all')
+    git('-c', 'user.name=CI fixture', '-c', 'user.email=ci@example.invalid',
+        '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', f'CI candidate {version_tag}')
+    commit = git('rev-parse', 'HEAD')
+    assert re.fullmatch(r'[0-9a-f]{40}', commit)
+    run(['bash', scripts / 'build-release.sh'])
+    archive = source / 'dist' / f'netbox-ops-{version_tag}.tar.gz'
+    run([sys.executable, scripts / 'release-candidate.py', 'validate', archive, version_tag])
     assets = work / 'assets' / version_tag
     assets.mkdir(parents=True)
-    archive = assets / f'netbox-ops-{version_tag}.tar.gz'
-    with tarfile.open(archive, 'w:gz') as bundle:
-        bundle.add(source, arcname='netbox-ops')
-    checksum = archive.with_name(archive.name + '.sha256')
-    checksum.write_text(f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n')
-    metadata = assets / f'netbox-ops-{version_tag}.compatibility.json'
-    metadata.write_bytes(requirements)
+    names = (archive.name, archive.name + '.sha256',
+             f'netbox-ops-{version_tag}.compatibility.json',
+             f'netbox-ops-{version_tag}.notes.md')
+    for name in names:
+        shutil.copy2(source / 'dist' / name, assets / name)
     row = {
         'tag_name': version_tag, 'draft': False, 'prerelease': False,
-        'body': 'Disposable CI fixture', 'published_at': '2026-11-24T00:00:00Z',
-        'assets': [{'name': item.name, 'size': item.stat().st_size,
-                    'browser_download_url': f'{asset_prefix}{version_tag}/{item.name}'}
-                   for item in (archive, checksum, metadata)],
+        'body': (assets / names[3]).read_text(), 'published_at': '2026-11-24T00:00:00Z',
+        'assets': [{'name': name, 'size': (assets / name).stat().st_size,
+                    'browser_download_url': f'{asset_prefix}{version_tag}/{name}'}
+                   for name in names[:3]],
     }
-    return archive, checksum, row
+    print(f'PASS: official candidate builder and validator {version_tag} ({commit})', flush=True)
+    shutil.rmtree(source)
+    return row
+
+
+def build_candidates(output):
+    """Host-only packaging; no installation, service changes, tags or publication."""
+    source_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(source_root))
+    from netbox_ops import __version__
+    from netbox_ops.self_upgrade_releases import DOWNLOAD_PREFIX, Version
+
+    if output != source_root / FIXTURE_INPUT or output.exists() or output.is_symlink():
+        raise RuntimeError('Expected a new CI-only candidate output directory')
+    output.mkdir(mode=0o700)
+    base = Version.parse(f'v{__version__}')
+    # Use a higher synthetic minor so the new changelog headings are unique.
+    old = Version(base.major, base.minor + 1, 0)
+    middle = Version(old.major, old.minor, 1)
+    target = Version(old.major, old.minor, 2)
+    rows = [build_fixture(output, source_root, f'v{v}', v, steps=steps,
+                          asset_prefix=DOWNLOAD_PREFIX)
+            for v, steps in ((old, ()), (middle, ()), (target, (middle,)))]
+    (output / 'catalogue.json').write_text(json.dumps(rows))
+    print('PASS: all three unpublished candidate artifacts generated', flush=True)
 
 
 def fixture_scenarios(work):
     sys.path.insert(0, str(ACTIVE))
-    from netbox_ops import __version__
     from netbox_ops.self_upgrade_archive import verify_release_archive
-    from netbox_ops.self_upgrade_compatibility import ReleaseRequirements
-    from netbox_ops.self_upgrade_manifest import encode_manifest
-    from netbox_ops.self_upgrade_releases import DOWNLOAD_PREFIX, Version
+    from netbox_ops.self_upgrade_manifest import parse_manifest
+    from netbox_ops.self_upgrade_releases import Version
 
-    old = Version.parse(f'v{__version__}')
-    middle = Version(old.major, old.minor, old.patch + 1)
-    target = Version(old.major, old.minor, old.patch + 2)
-
-    def requirements(v, steps=()):
-        return encode_manifest(ReleaseRequirements(v, (3, 12), None,
-                               frozenset({'debian', 'rhel'}), frozenset({'archive'}), steps))
-
-    initial, checksum, first = build_fixture(
-        work, f'v{old}', old, requirements=requirements(old), asset_prefix=DOWNLOAD_PREFIX)
-    intermediate, intermediate_checksum, second = build_fixture(
-        work, f'v{middle}', middle, requirements=requirements(middle), asset_prefix=DOWNLOAD_PREFIX)
-    new, new_checksum, third = build_fixture(
-        work, f'v{target}', target, requirements=requirements(target, (middle,)),
-        asset_prefix=DOWNLOAD_PREFIX)
-    for archive, digest in ((initial, checksum), (intermediate, intermediate_checksum),
-                            (new, new_checksum)):
-        verify_release_archive(archive, digest.read_bytes())
     catalogue = work / 'catalogue.json'
-    catalogue.write_text(json.dumps([first, second, third]))
+    first, second, third = json.loads(catalogue.read_text())
+    old, middle, target = (Version.parse(row['tag_name']) for row in (first, second, third))
+    archives = []
+    for row in (first, second, third):
+        tag = row['tag_name']
+        assets = work / 'assets' / tag
+        archive = assets / f'netbox-ops-{tag}.tar.gz'
+        verify_release_archive(archive, archive.with_name(archive.name + '.sha256').read_bytes())
+        requirements = parse_manifest(
+            (assets / f'netbox-ops-{tag}.compatibility.json').read_bytes(), Version.parse(tag))
+        assert requirements.required_intermediates == ((middle,) if tag == f'v{target}' else ())
+        archives.append(archive)
+    initial, intermediate, _ = archives
+    original_digests = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                        for path in (work / 'assets').rglob('*') if path.is_file()}
+    print('PASS: CI-built artifacts and compatibility manifests verified in guest', flush=True)
     (work / 'mode').write_text('rollback')
     install_archive(initial, work)
     assert version() == str(old)
@@ -342,6 +394,8 @@ def fixture_scenarios(work):
     assert services() == before_services and preserved() == before_files
     print('PASS: mandatory intermediate path completed; validated cleanup recovered; downgrade blocked', flush=True)
 
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest
+               for path, digest in original_digests.items()), 'Candidate artifacts changed'
     with AUDIT.open('rb') as stream:
         stream.seek(offset)
         audit = stream.read().decode()
@@ -384,18 +438,28 @@ def official_scenario(work, old_tag, target_tag):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--build-candidates', type=Path)
     parser.add_argument('--official-from')
     parser.add_argument('--official-target')
     args = parser.parse_args()
     if bool(args.official_from) != bool(args.official_target):
         parser.error('Both official release tags are required')
-    guard()
-    with tempfile.TemporaryDirectory(prefix='netbox-ops-vm-release-', dir='/tmp') as name:
-        work = Path(name)
+    if args.build_candidates is not None:
         if args.official_from:
-            official_scenario(work, args.official_from, args.official_target)
-        else:
-            fixture_scenarios(work)
+            parser.error('Candidate build and published pair are separate modes')
+        build_candidates(args.build_candidates.resolve())
+        return
+    guard()
+    if args.official_from:
+        with tempfile.TemporaryDirectory(prefix='netbox-ops-vm-release-', dir='/tmp') as name:
+            official_scenario(Path(name), args.official_from, args.official_target)
+    else:
+        FIXTURE_ROOT.mkdir(mode=0o700)
+        try:
+            shutil.copytree(ACTIVE / FIXTURE_INPUT, FIXTURE_ROOT, dirs_exist_ok=True)
+            fixture_scenarios(FIXTURE_ROOT)
+        finally:
+            shutil.rmtree(FIXTURE_ROOT)
 
 
 if __name__ == '__main__':
