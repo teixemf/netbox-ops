@@ -10,7 +10,7 @@ It brings common administration tasks into one terminal-based tool, designed for
 - Create, list, verify, and delete PostgreSQL database and NetBox media backups.
 - Restore database, media, or both, with explicit confirmations and safety checks.
 - Use an interactive terminal interface or CLI commands.
-- Switch between English and European Portuguese.
+- Automatically select English or European Portuguese from the system locale (English fallback); override with `--lang en` or `--lang pt`.
 - Detect common RHEL- and Debian-family service configurations.
 
 **In development:** NetBox and plugin upgrade/update operations are not yet implemented.
