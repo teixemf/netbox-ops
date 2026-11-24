@@ -39,21 +39,21 @@ class SelfUpgradeTuiTests(unittest.TestCase):
     def test_empty_catalogue(self):
         menu = CursesMenu(FakeScreen(), Translator('en'))
         with (patch('netbox_ops.self_upgrade_releases.discover_releases', return_value=[]),
-              patch.object(menu, '_choose') as choose,
+              patch.object(menu, '_choose', return_value=None) as choose,
               patch.object(menu, '_show_lines') as show):
             menu._self_upgrade()
-        choose.assert_not_called()
+        choose.assert_called_once()
         self.assertIn('No official stable releases', str(show.call_args))
 
     def test_discovery_error_is_localized(self):
         menu = CursesMenu(FakeScreen(), Translator('pt'))
         with (patch('netbox_ops.self_upgrade_releases.discover_releases',
                     side_effect=ReleaseDiscoveryError('private error')),
-              patch.object(menu, '_choose') as choose,
+              patch.object(menu, '_choose', return_value=None) as choose,
               patch.object(menu, '_show_lines') as show):
             menu._self_upgrade()
-        choose.assert_not_called()
-        self.assertIn('Não foi possível consultar', str(show.call_args))
+        choose.assert_called_once()
+        self.assertIn('Não foi possível consultar', str(show.call_args_list))
         self.assertNotIn('private error', str(show.call_args))
 
     def test_cancel_does_not_open_changelog(self):
