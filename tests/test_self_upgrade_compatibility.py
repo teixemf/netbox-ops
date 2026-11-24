@@ -32,8 +32,8 @@ class CompatibilityTests(unittest.TestCase):
         return evaluate_upgrade(installed or self.old, target or self.target,
                                 self.releases, self.requirements, self.environment)
 
-    def require(self, version, **changes):
-        self.requirements[version] = replace(self.requirements[version], **changes)
+    def require(self, key, **changes):
+        self.requirements[key] = replace(self.requirements[key], **changes)
 
     def test_direct_upgrade_does_not_include_optional_versions(self):
         result = self.evaluate()
