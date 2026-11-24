@@ -199,7 +199,8 @@ def check_processes(layout):
             args = (proc / 'cmdline').read_bytes().split(b'\0')
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
-        running = os.fsencode(layout.app / 'netbox_ops.py') in args
+        running = any(os.fsencode(layout.app / name) in args
+                      for name in ('netbox_ops.py', 'install.sh', 'upgrade.sh'))
         for name in ('cwd', 'exe'):
             try:
                 target = Path(os.readlink(proc / name))
@@ -209,7 +210,9 @@ def check_processes(layout):
                 running |= within(target, layout.app / 'venv')
             else:
                 running |= within(target, layout.app) and (
-                    b'netbox_ops.py' in args or b'netbox_ops' in args)
+                    any(name in args for name in (b'netbox_ops.py', b'netbox_ops',
+                                                  b'install.sh', b'upgrade.sh',
+                                                  b'./install.sh', b'./upgrade.sh')))
         if running:
             raise UninstallError(f'netbox-ops is still running (PID {proc.name}); exit it first')
 

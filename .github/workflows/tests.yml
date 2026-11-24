@@ -59,6 +59,12 @@ jobs:
           test -x "$extracted/netbox-ops/install.sh"
           test -x "$extracted/netbox-ops/upgrade.sh"
           test -x "$extracted/netbox-ops/uninstall.sh"
+      - name: Exercise packaged uninstaller in disposable container
+        run: |
+          docker run --rm --network none \
+            --volume "$PWD/dist:/release:ro" \
+            --volume "$PWD/tests/install/uninstall-smoke.sh:/uninstall-smoke.sh:ro" \
+            python:3.12-bookworm bash /uninstall-smoke.sh
 
   integration:
     name: PostgreSQL integration / ${{ matrix.distro }}
