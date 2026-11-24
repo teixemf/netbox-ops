@@ -236,28 +236,59 @@ def fixture_scenarios(work):
     from netbox_ops.self_upgrade_releases import DOWNLOAD_PREFIX, Version
 
     old = Version.parse(f'v{__version__}')
-    target = Version(old.major, old.minor, old.patch + 1)
+    middle = Version(old.major, old.minor, old.patch + 1)
+    target = Version(old.major, old.minor, old.patch + 2)
 
-    def requirements(v):
+    def requirements(v, steps=()):
         return encode_manifest(ReleaseRequirements(v, (3, 12), None,
-                               frozenset({'debian', 'rhel'}), frozenset({'archive'})))
+                               frozenset({'debian', 'rhel'}), frozenset({'archive'}), steps))
 
     initial, checksum, first = build_fixture(
         work, f'v{old}', old, requirements=requirements(old), asset_prefix=DOWNLOAD_PREFIX)
-    new, new_checksum, second = build_fixture(
-        work, f'v{target}', target, requirements=requirements(target), asset_prefix=DOWNLOAD_PREFIX)
-    verify_release_archive(initial, checksum.read_bytes())
-    verify_release_archive(new, new_checksum.read_bytes())
-    (work / 'catalogue.json').write_text(json.dumps([first, second]))
+    intermediate, intermediate_checksum, second = build_fixture(
+        work, f'v{middle}', middle, requirements=requirements(middle), asset_prefix=DOWNLOAD_PREFIX)
+    new, new_checksum, third = build_fixture(
+        work, f'v{target}', target, requirements=requirements(target, (middle,)),
+        asset_prefix=DOWNLOAD_PREFIX)
+    for archive, digest in ((initial, checksum), (intermediate, intermediate_checksum),
+                            (new, new_checksum)):
+        verify_release_archive(archive, digest.read_bytes())
+    catalogue = work / 'catalogue.json'
+    catalogue.write_text(json.dumps([first, second, third]))
     (work / 'mode').write_text('rollback')
     install_archive(initial, work)
     assert version() == str(old)
     before_services, before_files = services(), preserved()
     offset = AUDIT.stat().st_size if AUDIT.exists() else 0
     assert f'v{target}' in cli('list')
-    assert f'v{target}' in cli('plan', f'v{target}')
+    assert f'v{middle} -> v{target}' in cli('plan', f'v{target}')
     assert 'cancelled' in cli('install', f'v{target}', '--confirm', 'WRONG', expected=3)
     assert version() == str(old) and not RESULT.exists()
+
+    # A required release cannot be skipped even with the correct confirmation.
+    catalogue.write_text(json.dumps([first, third]))
+    cli('plan', f'v{target}', expected=3)
+    cli('install', f'v{target}', '--confirm', f'UPGRADE v{target}', expected=3)
+    catalogue.write_text(json.dumps([first, second, third]))
+    cli('install', f'v{old}', '--confirm', f'UPGRADE v{old}', expected=3)
+    assert version() == str(old) and not RESULT.exists()
+    assert not any(p.exists() or p.is_symlink() for p in (HANDOFF, STATE, BACKUP))
+    assert not list(ACTIVE.parent.glob('.netbox-ops-stage-*'))
+    assert services() == before_services and preserved() == before_files
+    print('PASS: missing mandatory intermediate and same-version upgrade blocked', flush=True)
+
+    # Tamper with the actual package while keeping its advertised length.
+    package_bytes = intermediate.read_bytes()
+    intermediate.write_bytes(bytes([package_bytes[0] ^ 1]) + package_bytes[1:])
+    try:
+        cli('install', f'v{target}', '--confirm', f'UPGRADE v{target}', expected=1)
+        assert version() == str(old) and not RESULT.exists()
+        assert not any(p.exists() or p.is_symlink() for p in (HANDOFF, STATE, BACKUP))
+        assert not list(ACTIVE.parent.glob('.netbox-ops-stage-*'))
+        assert services() == before_services and preserved() == before_files
+        print('PASS: checksum mismatch blocked before activation', flush=True)
+    finally:
+        intermediate.write_bytes(package_bytes)
 
     for mode in ('rollback', 'crash', 'success'):
         (work / 'mode').write_text(mode)
@@ -275,11 +306,24 @@ def fixture_scenarios(work):
             assert 'previous installation' in cli('status', expected=1)
         else:
             assert result['phase'] == 'completed', result
-            assert 'completed and validated' in cli('status')
-        assert_clean(target if mode == 'success' else old)
+            assert result['step'] == f'v{middle}' and result['target'] == f'v{target}'
+            assert 'intermediate step' in cli('status', expected=4)
+        assert_clean(middle if mode == 'success' else old)
         assert services() == before_services, 'A NetBox service changed or restarted'
         assert preserved() == before_files, 'Configuration or launcher changed'
         print(f'PASS: production CLI/helper fixture {mode}; services unchanged', flush=True)
+
+    # Re-evaluate the original target from the newly installed intermediate.
+    assert f'Required upgrade path: v{target}' in cli('plan', f'v{target}')
+    assert 'Upgrade submitted' in cli('install', f'v{target}', '--confirm', f'UPGRADE v{target}')
+    result = wait_for_helper()
+    assert result['phase'] == 'completed' and result['step'] == f'v{target}', result
+    assert result['installed'] == f'v{middle}' and result['target'] == f'v{target}', result
+    assert 'completed and validated' in cli('status')
+    cli('install', f'v{old}', '--confirm', f'UPGRADE v{old}', expected=3)
+    assert_clean(target)
+    assert services() == before_services and preserved() == before_files
+    print('PASS: mandatory intermediate path completed; downgrade blocked', flush=True)
 
     with AUDIT.open('rb') as stream:
         stream.seek(offset)
