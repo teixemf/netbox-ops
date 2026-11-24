@@ -16,7 +16,7 @@ _MAX_RESPONSE = 1024 * 1024
 class NetBoxHealth:
     version: str
     hostname: str | None
-    plugins: tuple[tuple[str, str], ...]
+    plugins: tuple[tuple[str, str | None], ...]
     workers: int
 
 
@@ -70,7 +70,7 @@ def read_netbox_health(url: str, *, authorization: str | None = None,
         if (not isinstance(version, str) or not version
                 or (hostname is not None and not isinstance(hostname, str))
                 or not isinstance(plugins, dict)
-                or any(not isinstance(k, str) or not isinstance(v, str)
+                or any(not isinstance(k, str) or (v is not None and not isinstance(v, str))
                        for k, v in plugins.items())
                 or type(workers) is not int or workers < 1):
             raise ValueError
@@ -87,7 +87,7 @@ def wait_for_netbox_health(url: str, expected_version: str, baseline: NetBoxHeal
         try:
             state = read_netbox_health(url, authorization=authorization)
             if (state.version == expected_version
-                    and state.hostname == baseline.hostname
+                    and (baseline.hostname is None or state.hostname == baseline.hostname)
                     and state.plugins == baseline.plugins):
                 return state
         except UpgradeExecutionError:
