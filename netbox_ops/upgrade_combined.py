@@ -127,14 +127,24 @@ def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
 
     Resolve together before downtime; the official script installs core and
     plugins separately, so restrict both calls to this same resolved set.
+    NetBox's psycopg[c] extra requires a locally compiled psycopg-c wheel.
+    No other source distributions are allowed.
     """
     directory.mkdir(mode=0o700)
     env = upgrade_environment(live.python)
     env.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR='1')
+    # Only the exact upstream core pin may authorize building psycopg-c.
+    # Plugin requirements alone cannot enable source builds.
+    build_psycopg = any(
+        'c' in match.group(1).lower().split(',')
+        for pin in pins.core_pins
+        if (match := re.fullmatch(r'psycopg\[([a-z0-9_,]+)\]==[0-9.]+', pin, re.I))
+    )
+    source_options = ['--no-binary=psycopg-c'] if build_psycopg else []
     command = [
-        str(live.python), '-I', '-m', 'pip', '--isolated', 'download',
-        '--only-binary=:all:', '--no-input', '--disable-pip-version-check',
-        '--no-cache-dir', '--index-url', PYPI_INDEX, '--dest', str(directory),
+        str(live.python), '-I', '-m', 'pip', '--isolated', 'wheel',
+        '--only-binary=:all:', *source_options, '--no-input', '--disable-pip-version-check',
+        '--no-cache-dir', '--index-url', PYPI_INDEX, '--wheel-dir', str(directory),
         '--timeout', '20', '--retries', '2',
         'pip', 'wheel', *pins.core_pins, *pins.local_pins,
     ]
@@ -145,7 +155,9 @@ def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
     except (OSError, subprocess.TimeoutExpired):
         raise UpgradeExecutionError('Combined wheel download unavailable or timed out') from None
     if result.returncode or not any(directory.glob('*.whl')):
-        raise UpgradeExecutionError('Cannot prepare all combined upgrade wheels before maintenance')
+        detail = ('; check Python headers, C compiler and PostgreSQL client development files'
+                  if build_psycopg else '')
+        raise UpgradeExecutionError('Cannot prepare all combined upgrade wheels before maintenance' + detail)
 
 
 def prepare_combined_stages(

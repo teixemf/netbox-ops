@@ -106,10 +106,13 @@ Intermediate releases retain the original plugin pins. The final release
 receives the selected plugin pins after checkout, before the official
 `upgrade.sh` runs. Unselected requirements are preserved, and exact package
 constraints are passed to the script to prevent dependency resolution from
-silently changing approved versions. The combined backend uses the same
-wheel-only dependency policy and existing Python runtime as the plugin-only
-backend. Before maintenance it downloads one complete wheel set per stage,
-including pip and wheel, into a private temporary directory. Both upstream
+silently changing approved versions. The combined backend uses the existing
+Python runtime and requires wheels for installation. Before maintenance it
+prepares one complete wheel set per stage, including pip and wheel, in a
+private temporary directory. The only source-build exception is `psycopg-c`
+when required by the official NetBox core pin `psycopg[c]`. This requires an
+existing C compiler, Python headers and PostgreSQL client development files;
+netbox-ops does not install system build dependencies. Both upstream
 installation calls use only that local wheel set, so an unavailable package
 fails before service interruption and dependency versions cannot change
 between preflight and installation. Temporary wheels are removed on exit.

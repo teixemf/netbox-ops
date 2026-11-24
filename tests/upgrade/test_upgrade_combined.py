@@ -106,7 +106,31 @@ class CombinedStageTests(unittest.TestCase):
         for pin in ('pip', 'wheel', *pins.core_pins, *pins.local_pins):
             self.assertIn(pin, command)
         self.assertIn('--only-binary=:all:', command)
+        self.assertIn('--no-binary=psycopg-c', command)
+        self.assertIn('--wheel-dir', command)
+        self.assertEqual(command[5], 'wheel')
         self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+    def test_only_upstream_psycopg_c_pin_allows_source_build(self):
+        pins = replace(self.prepare()[1].pins, core_pins=('Django==4.2.15',),
+                       local_pins=('example-plugin==1.5.0', 'psycopg[c]==3.2.1'))
+        directory = self.root / 'binary-only'
+
+        def fetch(command, **kwargs):
+            (directory / 'fixture.whl').touch()
+            return SimpleNamespace(returncode=0)
+
+        runner = Mock(side_effect=fetch)
+        download_stage_wheels(pins, self.install, directory, runner=runner)
+        command = runner.call_args.args[0]
+        self.assertIn('--only-binary=:all:', command)
+        self.assertFalse(any(arg.startswith('--no-binary') for arg in command))
+
+    def test_psycopg_build_failure_has_safe_prerequisite_hint(self):
+        pins = self.prepare()[1].pins
+        runner = Mock(return_value=SimpleNamespace(returncode=1))
+        with self.assertRaisesRegex(UpgradeExecutionError, 'check Python headers, C compiler'):
+            download_stage_wheels(pins, self.install, self.root / 'failed-build', runner=runner)
 
     def test_download_failure_does_not_prepare_stage(self):
         self.download.side_effect = UpgradeExecutionError('wheel download failed')
