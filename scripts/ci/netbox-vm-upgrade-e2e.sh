@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Only the CI host may launch this fixture in a disposable overlay.
-set -euo pipefail
+set -Eeuo pipefail
+# Report the failed fixture line without echoing commands or credentials.
+trap 'echo "FAIL: upgrade E2E fixture line $LINENO" >&2' ERR
 scenario=${1:?Missing scenario}
 [[ $(id -u) == 0 && -f /run/netbox-ops-ci-e2e ]]
 [[ $(cat /run/netbox-ops-ci-e2e) == netbox-ci-e2e ]]
@@ -36,8 +38,10 @@ cp "$root/netbox/netbox/configuration.py" "$scratch/configuration.py"
 mv "$root" "$scratch/archive-install"
 git clone --quiet --depth 1 --branch "v$old" https://github.com/netbox-community/netbox.git "$root"
 install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netbox/configuration.py"
-# Keep both supported database configuration forms for early NetBox 4 releases.
-printf '\nDATABASE = DATABASES["default"]\n' >> "$root/netbox/netbox/configuration.py"
+# Both tested releases accept DATABASES and reject a simultaneous DATABASE.
+# The baseline supplies DATABASES. Permit unauthenticated status checks only
+# in this disposable guest (loopback nginx, no production configuration).
+printf '\nLOGIN_REQUIRED = False\n' >> "$root/netbox/netbox/configuration.py"
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
@@ -103,10 +107,13 @@ fingerprint=$(sed -n 's/^Plan fingerprint: //p' "$scratch/plan")
 [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]]
 # Prove stale approval is rejected without downtime or recovery writes.
 if "${cli[@]}" "${args[@]}" --execute --approve-plan "$(printf '%064d' 0)" \
-  --accept-unknowns --health-url "$status_url"; then
+  --accept-unknowns --health-url "$status_url" > "$scratch/rejected-plan" 2>&1; then
   echo 'FAIL: wrong fingerprint accepted' >&2
   exit 1
 fi
+# Do not mistake an unrelated discovery failure for approval enforcement.
+grep -Fq 'Approved fingerprint does not match an executable plan' "$scratch/rejected-plan"
+echo 'PASS: stale fingerprint rejected before downtime'
 [[ $(git -C "$root" rev-parse HEAD) == "$commit" && ! -e "$marker" ]]
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 wait_health "$old"
@@ -151,7 +158,9 @@ else
     --accept-unknowns --health-url "$status_url"
   [[ ! -e "$marker" ]]
   wait_health "$target"
-  systemctl is-active --quiet netbox netbox-rq
+  for unit in netbox netbox-rq; do
+    systemctl is-active --quiet "$unit"
+  done
 fi
 if [[ "$scenario" == plugins ]]; then
   [[ $(git -C "$root" rev-parse HEAD) == "$commit" ]]
