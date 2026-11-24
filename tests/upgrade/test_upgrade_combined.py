@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from netbox_ops.plugin_compatibility import DependencyPreflight, PluginCompatibility, PluginReview
 from netbox_ops.plugin_inventory import InstalledPackage, PluginInventory
 from netbox_ops.upgrade_combined import (
-    prepare_combined_stages, recheck_combined_stage, run_combined_stage,
+    download_stage_wheels, prepare_combined_stages, recheck_combined_stage, run_combined_stage,
     probe_server_versions,
 )
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
@@ -26,13 +26,15 @@ CORE = 'Django==4.2.15\npsycopg[c,pool]==3.2.1'
 
 class CombinedStageTests(unittest.TestCase):
     def setUp(self):
+        # Synthetic reviewed boundary for a future major, not a production rule.
+        self.enterContext(patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7}))
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.install = GitNetBoxInstallation(
-            self.root, '3.6.2', 'a' * 40, 'v3.6.2', 'HEAD',
+            self.root, '4.6.2', 'a' * 40, 'v4.6.2', 'HEAD',
             'https://github.com/netbox-community/netbox.git',
-            self.root / 'venv/bin/python', '3.10.12', ('local_requirements.txt',), (),
+            self.root / 'venv/bin/python', '3.12.12', ('local_requirements.txt',), (),
         )
         self.packages = (
             InstalledPackage('example-plugin', '1.0.0', ('example_plugin',)),
@@ -44,18 +46,24 @@ class CombinedStageTests(unittest.TestCase):
         )
         (self.root / 'local_requirements.txt').write_bytes(LOCAL)
         self.plan = build_upgrade_plan(
-            self.install, self.inventory, target_netbox='4.0.1',
+            self.install, self.inventory, target_netbox='5.0.1',
             selected_plugins={'example-plugin': '1.5.0'},
-            available_tags=('v3.7.8', 'v4.0.1'), postgres_version='15.2',
+            available_tags=('v4.7.3', 'v5.0.1'), postgres_version='15.2',
             redis_version='7.2', reviewer=self.reviewer,
         )
         self.approval = ExecutionApproval(self.plan.fingerprint, self.install.commit,
                                           str(self.root), True)
-        self.stages = (PinnedStage('3.7.8', 'b' * 40), PinnedStage('4.0.1', 'c' * 40))
+        self.stages = (PinnedStage('4.7.3', 'b' * 40), PinnedStage('5.0.1', 'c' * 40))
         self.fetch = Mock()
         self.git = Mock(return_value=CORE)
         self.resolver = Mock(return_value=DependencyPreflight('passed', 'resolved', True))
         self.probe = Mock(return_value=('15.2', '7.2'))
+        self.wheel_root = self.root / 'wheels'
+        self.wheel_root.mkdir()
+        def download(pins, live, path):
+            path.mkdir()
+            (path / 'fixture.whl').touch()
+        self.download = Mock(side_effect=download)
 
     def reviewer(self, package, stages, python_versions, *, version, preflights):
         return PluginReview(package, version, None, tuple(
@@ -67,6 +75,7 @@ class CombinedStageTests(unittest.TestCase):
         return prepare_combined_stages(
             Mock(), self.plan, self.approval, self.stages,
             fetch=self.fetch, git=self.git, resolver=self.resolver, probe=self.probe,
+            wheel_root=self.wheel_root, download=self.download,
         )
 
     def test_required_intermediate_and_final_pins(self):
@@ -81,7 +90,53 @@ class CombinedStageTests(unittest.TestCase):
         self.assertIn('psycopg[c,pool]==3.2.1', self.resolver.call_args.args[1])
         self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), LOCAL)
         self.assertEqual(self.fetch.call_count, 2)
+        self.assertEqual(self.download.call_count, 2)
+        self.assertNotEqual(stages[0].wheelhouse, stages[1].wheelhouse)
         self.assertEqual(self.git.call_args.args[1], ['show', 'c' * 40 + ':requirements.txt'])
+
+    def test_download_uses_joint_pins_and_bootstrap_packages(self):
+        pins = self.prepare()[1].pins
+        directory = self.root / 'downloaded'
+        def fetch(command, **kwargs):
+            (directory / 'fixture.whl').touch()
+            return SimpleNamespace(returncode=0)
+        runner = Mock(side_effect=fetch)
+        download_stage_wheels(pins, self.install, directory, runner=runner)
+        command = runner.call_args.args[0]
+        for pin in ('pip', 'wheel', *pins.core_pins, *pins.local_pins):
+            self.assertIn(pin, command)
+        self.assertIn('--only-binary=:all:', command)
+        self.assertIn('--no-binary=psycopg-c', command)
+        self.assertIn('--wheel-dir', command)
+        self.assertEqual(command[5], 'wheel')
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+    def test_only_upstream_psycopg_c_pin_allows_source_build(self):
+        pins = replace(self.prepare()[1].pins, core_pins=('Django==4.2.15',),
+                       local_pins=('example-plugin==1.5.0', 'psycopg[c]==3.2.1'))
+        directory = self.root / 'binary-only'
+
+        def fetch(command, **kwargs):
+            (directory / 'fixture.whl').touch()
+            return SimpleNamespace(returncode=0)
+
+        runner = Mock(side_effect=fetch)
+        download_stage_wheels(pins, self.install, directory, runner=runner)
+        command = runner.call_args.args[0]
+        self.assertIn('--only-binary=:all:', command)
+        self.assertFalse(any(arg.startswith('--no-binary') for arg in command))
+
+    def test_psycopg_build_failure_has_safe_prerequisite_hint(self):
+        pins = self.prepare()[1].pins
+        runner = Mock(return_value=SimpleNamespace(returncode=1))
+        with self.assertRaisesRegex(UpgradeExecutionError, 'check Python headers, C compiler'):
+            download_stage_wheels(pins, self.install, self.root / 'failed-build', runner=runner)
+
+    def test_download_failure_does_not_prepare_stage(self):
+        self.download.side_effect = UpgradeExecutionError('wheel download failed')
+        with self.assertRaisesRegex(UpgradeExecutionError, 'wheel download failed'):
+            self.prepare()
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), LOCAL)
 
     def test_approval_rejects_skipping_mandatory_release(self):
         inspector = Mock(return_value=self.install)
@@ -141,7 +196,7 @@ class CombinedStageTests(unittest.TestCase):
 
     def test_stage_applies_final_pins_before_script_with_constraints(self):
         prepared = self.prepare()[1]
-        final = replace(self.install, commit='c' * 40, version='4.0.1')
+        final = replace(self.install, commit='c' * 40, version='5.0.1')
         (self.root / 'requirements.txt').write_text(CORE + '\n')
         inventory = replace(
             self.inventory,
@@ -169,9 +224,12 @@ class CombinedStageTests(unittest.TestCase):
                 self.assertIn('other-plugin==2.0.0', constraints)
                 self.assertIn('django==4.2.15', constraints)
                 self.assertEqual(env['PIP_ONLY_BINARY'], ':all:')
+                self.assertEqual(env['PIP_NO_INDEX'], '1')
+                self.assertEqual(env['PIP_FIND_LINKS'], str(prepared.wheelhouse))
+                self.assertNotIn('PIP_INDEX_URL', env)
                 return final
             result, loaded = run_combined_stage(
-                self.install, self.plan, prepared, Path('/usr/bin/python3.10'),
+                self.install, self.plan, prepared, Path('/usr/bin/python3.12'),
                 systemd=systemd, stage_runner=stage_runner, inventory_reader=reader,
                 runner=runner,
             )
@@ -191,7 +249,7 @@ class CombinedStageTests(unittest.TestCase):
         ))
         stage_runner = Mock()
         with self.assertRaises(UpgradeExecutionError):
-            run_combined_stage(self.install, self.plan, prepared, Path('/usr/bin/python3.10'),
+            run_combined_stage(self.install, self.plan, prepared, Path('/usr/bin/python3.12'),
                                systemd=systemd, stage_runner=stage_runner, inventory_reader=reader)
         stage_runner.assert_not_called()
 

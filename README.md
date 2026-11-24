@@ -19,6 +19,7 @@ It brings common administration tasks into one terminal-based tool, designed for
 ## Requirements
 
 - RHEL-family or Debian-family Linux with a local NetBox installation
+- NetBox **4.0 or newer** (NetBox 3.x and earlier are unsupported; future versions require compatibility review)
 - Python **3.12 or newer** (Python 3.x), with working `venv` support
 - systemd and PostgreSQL client tools
 - A terminal with Python `curses` support

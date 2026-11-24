@@ -100,6 +100,13 @@ class GitInstallationTests(unittest.TestCase):
         with self.assertRaisesRegex(UpgradeDiscoveryError, 'tag'):
             inspect_git_installation(self.root)
 
+    def test_pre_v4_installation_is_unsupported(self):
+        (self.root / 'netbox/release.yaml').write_text('version: 3.7.8\n')
+        self.git('add', 'netbox/release.yaml')
+        self.git('commit', '-qm', 'Unsupported fixture')
+        with self.assertRaisesRegex(UpgradeDiscoveryError, '4.0 or newer'):
+            inspect_git_installation(self.root)
+
     def test_no_release_tag_requires_manual_review(self):
         self.git('tag', '-d', 'v4.5.3')
         state = inspect_git_installation(self.root)
@@ -130,6 +137,10 @@ class PrerequisiteTests(unittest.TestCase):
     def test_unverified_server_versions_not_assumed(self):
         results = check_prerequisites('4.6.0', '3.12.2')
         self.assertEqual([r.status for r in results], ['ok', 'unknown', 'unknown'])
+
+    def test_pre_v4_prerequisite_is_blocked(self):
+        result, = check_prerequisites('3.7.8', '3.11.0')
+        self.assertEqual(result.status, 'blocked')
 
     def test_unreviewed_release_is_unknown(self):
         result, = check_prerequisites('4.8.0', '3.14.2')

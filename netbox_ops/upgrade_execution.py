@@ -52,6 +52,10 @@ def validate_execution_approval(
         raise UpgradeExecutionError('Upgrade plan contains blocked stages')
     if not approval.fingerprint or approval.fingerprint != plan.fingerprint:
         raise UpgradeExecutionError('Approved plan fingerprint does not match')
+    for version in (plan.current_netbox, plan.target_netbox, plan.source.installation.version,
+                    *(stage.netbox_version for stage in plan.stages)):
+        if not isinstance(version, str) or not version.split('.')[0].isdigit() or int(version.split('.')[0]) < 4:
+            raise UpgradeExecutionError('NetBox 4.0 or newer is required')
     original = plan.source.installation
     if approval.root != str(original.root) or approval.git_commit != original.commit:
         raise UpgradeExecutionError('Approval does not match the planned installation')

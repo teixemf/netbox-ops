@@ -6,6 +6,10 @@ work (#87 and #88).
 
 ## Supported setup
 
+NetBox 4.0 and newer are in scope. NetBox 3.x and earlier, including upgrades
+from 3.x to 4.x, are unsupported. New major-version transitions require a
+reviewed upstream upgrade rule; their availability is not assumed.
+
 - A recognized, root-controlled Git checkout of the official NetBox repository
   at `/opt/netbox`, with the existing supported Python runtime.
 - Configured NetBox web and RQ services, local PostgreSQL, and a media directory
@@ -102,9 +106,16 @@ Intermediate releases retain the original plugin pins. The final release
 receives the selected plugin pins after checkout, before the official
 `upgrade.sh` runs. Unselected requirements are preserved, and exact package
 constraints are passed to the script to prevent dependency resolution from
-silently changing approved versions. The combined backend uses the same
-wheel-only dependency policy and existing Python runtime as the plugin-only
-backend.
+silently changing approved versions. The combined backend uses the existing
+Python runtime and requires wheels for installation. Before maintenance it
+prepares one complete wheel set per stage, including pip and wheel, in a
+private temporary directory. The only source-build exception is `psycopg-c`
+when required by the official NetBox core pin `psycopg[c]`. This requires an
+existing C compiler, Python headers and PostgreSQL client development files;
+netbox-ops does not install system build dependencies. Both upstream
+installation calls use only that local wheel set, so an unavailable package
+fails before service interruption and dependency versions cannot change
+between preflight and installation. Temporary wheels are removed on exit.
 
 Before each stage it verifies the live PostgreSQL and Redis prerequisites,
 refreshes compatibility for the stage's exact plugin versions and reruns
@@ -157,3 +168,31 @@ Progress counts validated stages, not estimated time or downloaded bytes.
 A successful execution displays the recovery directory. On failure, consult
 the safe diagnostic, audit log and recovery record before taking further action.
 Real end-to-end upgrade tests remain in #88.
+
+
+## Disposable VM validation
+
+The `VM E2E - NetBox upgrades` workflow reuses the pinned, checksum-verified
+Ubuntu baseline. Each matrix job creates an independent QCOW2 overlay and a
+fresh database with a real upstream Git release; it never downgrades the
+baseline database or publishes a new image.
+
+The scenarios cover NetBox 4.7.2 to 4.7.3, NetBox Inventory 2.7.0 to 2.7.1
+without a NetBox change, a combined upgrade, a cross-minor upgrade from
+4.4.10 to 4.7.3, and an injected final health validation failure after real
+migrations. Required intermediate stages remain covered by unit tests using
+hypothetical reviewed major boundaries until a supported real transition
+is available.
+
+Each case rejects a wrong plan fingerprint before downtime, verifies the
+protected combined archive and recovery metadata, and checks real database
+and media fixtures, Git revision, configuration integrity and unchanged
+PostgreSQL, Redis and Nginx service start timestamps. Success requires the
+expected NetBox status and RQ workers; the failure scenario instead requires
+stopped writers, a pending marker and a recovery diagnostic. Failure injection
+is confined to the test process; no production failure switch exists.
+
+Run the workflow on a pull request to dev or manually through GitHub Actions.
+Never run the guest fixture on an ordinary host. The script requires the
+explicit CI marker and QEMU/KVM virtualization, and the host harness checks
+the unchanged baseline hash.

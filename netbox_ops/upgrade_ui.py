@@ -36,7 +36,7 @@ def official_tags(*, runner: Callable = subprocess.run) -> tuple[str, ...]:
         if response.returncode:
             raise ValueError
         tags = {match[1] for line in response.stdout.splitlines()
-                if (match := _TAG.fullmatch(line))}
+                if (match := _TAG.fullmatch(line)) and int(match[1][1:].split('.')[0]) >= 4}
         if not tags:
             raise ValueError
     except (OSError, ValueError, subprocess.TimeoutExpired):

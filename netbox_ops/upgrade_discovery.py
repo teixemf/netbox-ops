@@ -26,14 +26,6 @@ _SHA = re.compile(r'^[0-9a-f]{40}$')
 # NetBox minor: minimum Python, maximum Python, minimum PostgreSQL, minimum Redis.
 # Keep unknown releases out of this snapshot until official requirements are reviewed.
 _OFFICIAL_REQUIREMENTS = {
-    (3, 0): ((3, 7), (3, 9), (9, 6), (4, 0)),
-    (3, 1): ((3, 7), (3, 9), (10, 0), (4, 0)),
-    (3, 2): ((3, 8), (3, 10), (10, 0), (4, 0)),
-    (3, 3): ((3, 8), (3, 10), (10, 0), (4, 0)),
-    (3, 4): ((3, 8), (3, 10), (11, 0), (4, 0)),
-    (3, 5): ((3, 8), (3, 10), (11, 0), (4, 0)),
-    (3, 6): ((3, 8), (3, 11), (12, 0), (4, 0)),
-    (3, 7): ((3, 8), (3, 11), (12, 0), (4, 0)),
     (4, 0): ((3, 10), (3, 12), (12, 0), (4, 0)),
     (4, 1): ((3, 10), (3, 12), (12, 0), (4, 0)),
     (4, 2): ((3, 10), (3, 12), (13, 0), (4, 0)),
@@ -206,7 +198,9 @@ def inspect_git_installation(root: Path = DEFAULT_NETBOX_ROOT,
     local_paths = _inspect_local_paths(root)
     version = read_netbox_version(root / 'netbox/release.yaml')
     if not _RELEASE.fullmatch(version):
-        raise UpgradeDiscoveryError('Cannot identify NetBox release.yaml version')
+        raise UpgradeDiscoveryError('Cannot identify NetBox release version')
+    if int(version.removeprefix('v').split('.')[0]) < 4:
+        raise UpgradeDiscoveryError('NetBox 4.0 or newer is required')
     tags = _git(root, 'tag', '--points-at', 'HEAD', '--list', 'v*', runner=runner).splitlines()
     matching_tags = [tag for tag in tags if _RELEASE.fullmatch(tag)]
     expected_tag = 'v' + version
@@ -236,6 +230,9 @@ def check_prerequisites(target_version: str, python_version: str | None,
     if match is None:
         raise ValueError('Target must be a specific stable NetBox release (X.Y.Z)')
     key = (int(match.group(1)), int(match.group(2)))
+    if key[0] < 4:
+        return (Prerequisite('NetBox release', '>= 4.0', target_version,
+                             'blocked', 'NetBox versions before 4.0 are unsupported'),)
     requirements = _OFFICIAL_REQUIREMENTS.get(key)
     if requirements is None:
         return (Prerequisite('NetBox release', 'Official requirements review', target_version,
