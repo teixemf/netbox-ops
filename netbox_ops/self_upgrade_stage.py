@@ -18,7 +18,7 @@ def _safe_parent(path: Path) -> None:
             or path.is_symlink() or not path.is_dir()):
         raise ReleaseArchiveError(f'Unsafe staging directory: {path}')
     info = path.stat()
-    if info.st_mode & 0o022:
+    if info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022:
         raise ReleaseArchiveError(f'Writable staging directory: {path}')
     if path == Path('/opt') and (info.st_uid != 0 or os.geteuid() != 0):
         raise ReleaseArchiveError('Staging under /opt requires root ownership and privileges')
@@ -68,7 +68,12 @@ def stage_release(archive: Path, checksum: bytes, *,
     info = temp_root.stat()
     if info.st_mode & 0o022 and (not info.st_mode & stat.S_ISVTX or info.st_uid != 0):
         raise ReleaseArchiveError('Unsafe temporary directory permissions')
+    if info.st_uid not in (0, os.geteuid()):
+        raise ReleaseArchiveError('Unsafe temporary directory owner')
     margin = 1024 * 1024
+    if (temp_root.stat().st_dev == install_parent.stat().st_dev
+            and shutil.disk_usage(temp_root).free < MAX_ARCHIVE_BYTES + 2 * MAX_EXTRACTED_BYTES + margin):
+        raise ReleaseArchiveError('Not enough shared disk space for extraction and staging')
     if shutil.disk_usage(install_parent).free < MAX_EXTRACTED_BYTES + margin:
         raise ReleaseArchiveError('Not enough free space for staging')
     if shutil.disk_usage(temp_root).free < MAX_ARCHIVE_BYTES + MAX_EXTRACTED_BYTES + margin:

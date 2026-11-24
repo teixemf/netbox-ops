@@ -96,5 +96,18 @@ class StageTests(unittest.TestCase):
                           temp_root=self.tmp, install_parent=link)
 
 
+    def test_shared_filesystem_requires_space_for_both_trees(self):
+        from types import SimpleNamespace
+        from netbox_ops.self_upgrade_archive import MAX_ARCHIVE_BYTES, MAX_EXTRACTED_BYTES
+
+        free = MAX_ARCHIVE_BYTES + MAX_EXTRACTED_BYTES + 2 * 1024 * 1024
+        with patch('netbox_ops.self_upgrade_stage.shutil.disk_usage',
+                   return_value=SimpleNamespace(free=free)):
+            with self.assertRaisesRegex(ReleaseArchiveError, 'shared disk space'):
+                stage_release(self.archive, self.checksum,
+                              temp_root=self.tmp, install_parent=self.opt)
+        self.assertFalse(list(self.opt.iterdir()))
+
+
 if __name__ == '__main__':
     unittest.main()

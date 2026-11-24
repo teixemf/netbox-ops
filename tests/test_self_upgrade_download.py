@@ -87,5 +87,29 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [])
 
 
+    def test_reject_writable_download_parent_before_network(self):
+        self.root.chmod(0o777)
+        with self.assertRaises(ReleaseArchiveError):
+            download_release(self.release, temp_root=self.root,
+                             opener=lambda *_args, **_kwargs: self.fail('network used'))
+
+    def test_reject_symlinked_download_parent_before_network(self):
+        target = self.root / 'target'
+        target.mkdir()
+        link = self.root / 'link'
+        link.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(ReleaseArchiveError):
+            download_release(self.release, temp_root=link,
+                             opener=lambda *_args, **_kwargs: self.fail('network used'))
+
+    def test_reject_tag_version_mismatch(self):
+        from dataclasses import replace
+
+        bad = replace(self.release, version=Version(0, 7, 0))
+        with self.assertRaises(ReleaseArchiveError):
+            download_release(bad, temp_root=self.root,
+                             opener=lambda *_args, **_kwargs: self.fail('network used'))
+
+
 if __name__ == '__main__':
     unittest.main()
