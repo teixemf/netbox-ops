@@ -17,7 +17,7 @@ from typing import Sequence
 from . import __version__
 from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
-from .journal import JournalPanel
+from .journal import JournalPanel, JournalViewport
 from .menu import MENU_ACTIONS
 from .services import (ServiceError, ServiceState, SystemdServices, ServiceVersionCache,
                        challenge, order_services, perform_service_batch)
@@ -99,6 +99,10 @@ def action_enabled(action: str, state: ServiceState) -> bool:
     if action == 'disable':
         return state.enabled in ('enabled', 'enabled-runtime')
     return False
+
+
+class _QuitTui(BaseException):
+    """Unwind only from safe navigation; let screen finally blocks clean up."""
 
 
 class CursesMenu:
@@ -238,11 +242,29 @@ class CursesMenu:
             self._put(row, x0, ' ' * max(0, x1 - x0), style)
         self._panels.append((x0, y0, x1, y1))
 
+    def _quit_hint(self, hint: str) -> str:
+        return f'{self.t("tui_quit_key")} | {hint}'
+
+    @staticmethod
+    def _check_quit(key: int) -> None:
+        if key in (ord('q'), ord('Q')):
+            raise _QuitTui
+
+    @staticmethod
+    def _flush_input() -> None:
+        # A queued key from an operation or result must not quit a later screen.
+        try:
+            curses.flushinp()
+        except curses.error:
+            pass
+
     def _wait_result_ack(self) -> None:
         """Keep the final progress panel visible until the operator dismisses it."""
         self.stdscr.timeout(-1)
+        self._flush_input()
         while True:
             if self.stdscr.getch() in (10, 13, curses.KEY_ENTER, 27, 32):
+                self._flush_input()
                 return
 
     def _choose(self, title: str, entries: Sequence[tuple[str, str]],
@@ -265,7 +287,7 @@ class CursesMenu:
         movement = (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END,
                     curses.KEY_NPAGE, curses.KEY_PPAGE, ord('j'), ord('k'))
         while True:
-            frame = self._frame(title, hint)
+            frame = self._frame(title, self._quit_hint(hint))
             if frame:
                 h, _ = frame
                 rows_visible = h - 6
@@ -297,7 +319,7 @@ class CursesMenu:
             if key in (ord('q'), ord('Q')):
                 if main_menu:
                     return 'quit'
-                continue
+                self._check_quit(key)
             if allow_language_key and key in (ord('l'), ord('L')):
                 return 'language'
             if not frame:
@@ -314,9 +336,13 @@ class CursesMenu:
                     index = move_selection(index, key, len(entries))
 
     def _show_lines(self, title: str, lines: Sequence[tuple[str, str]],
-                    hint: str | None = None) -> None:
-        """Scrollable results/errors; Esc returns to parent."""
-        hint = hint or self.t('tui_back_hint')
+                    hint: str | None = None, *, allow_quit: bool = False) -> None:
+        """Results require acknowledgement; explicitly read-only views may quit."""
+        hint = hint or self.t('tui_ack_hint')
+        if allow_quit:
+            hint = self._quit_hint(hint)
+        else:
+            self._flush_input()
         offset = 0
         while True:
             frame = self._frame(title, hint)
@@ -337,7 +363,11 @@ class CursesMenu:
                     self._put(h - 3, 3, f'{offset + 1}-{min(offset + rows_visible, len(wrapped))}/{len(wrapped)}', 'muted')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
+            if allow_quit:
+                self._check_quit(key)
             if key in (27, 10, 13, curses.KEY_ENTER, 3):
+                if not allow_quit:
+                    self._flush_input()
                 return
             if not frame:
                 continue
@@ -409,7 +439,7 @@ class CursesMenu:
         movement = (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END,
                     curses.KEY_NPAGE, curses.KEY_PPAGE, ord('j'), ord('k'))
         while True:
-            frame = self._frame(self.t('tui_status_title'), self.t('tui_status_hint'))
+            frame = self._frame(self.t('tui_status_title'), self._quit_hint(self.t('tui_status_hint')))
             if frame:
                 h, w = frame
                 good = sum(s.healthy for s in states)
@@ -447,6 +477,7 @@ class CursesMenu:
                         self._put(y, 60, state.main_pid if state.main_pid not in ('0', '') else '—', style)
                 self.stdscr.refresh()
             key = self.stdscr.getch()
+            self._check_quit(key)
             if key == 3:
                 return
             if key == 27:
@@ -499,7 +530,7 @@ class CursesMenu:
                         pass
                     last_refresh = time.monotonic()
                 frame = self._frame(f'{self.t("tui_detail_title")} / {state.name}',
-                                    self.t('nbo_detail_hint_032'))
+                                    self._quit_hint(self.t('nbo_detail_hint_032')))
                 if frame:
                     h, w = frame
                     x = 4
@@ -523,6 +554,7 @@ class CursesMenu:
                             self._put(18,x,self.t('logs_empty'),'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
+                self._check_quit(key)
                 if key in (27, 3):
                     return
                 if key in (ord('l'), ord('L')):
@@ -530,7 +562,7 @@ class CursesMenu:
                             [(line, 'muted') for line in journal] or
                             [(self.t('logs_empty'), 'muted')])
                     self.stdscr.timeout(-1)
-                    self._show_lines(self.t('tui_logs_title', count=log_count), rows)
+                    self._show_lines(self.t('tui_logs_title', count=log_count), rows, allow_quit=not journal_error)
                     self.stdscr.timeout(200)
                     last_refresh = 0
                 elif key in (ord('n'), ord('N')):
@@ -592,7 +624,7 @@ class CursesMenu:
                        failed: bool = False) -> None:
         """Completed services / total, not a fabricated estimate of systemctl duration."""
         frame = self._frame(self.t('tui_progress_title'),
-                            self.t('nbo_progress_result_hint') if finished else self.t('tui_progress_hint'))
+                            self.t('nbo_progress_result_hint') if finished else self.t('tui_quit_blocked'))
         if not frame:
             return
         h, w = frame
@@ -989,15 +1021,15 @@ class CursesMenu:
                 elif action == 'preview':
                     plan = self._upgrade_job(title, lambda _: make_plan(context, operation, target, selected))
                     if plan is not None:
-                        self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)])
+                        self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)], allow_quit=True)
                 elif action == 'details':
-                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t, details=True)])
+                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t, details=True)], allow_quit=True)
                 elif action == 'execute':
                     if not plan.can_execute:
                         self._show_lines(title, [(self.t('upgrade_blocked'), 'failure')])
                         continue
                     # Display the exact plan again immediately before approval.
-                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)])
+                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)], allow_quit=True)
                     url = self._upgrade_input(title, self.t('upgrade_url_prompt'))
                     if not url:
                         continue
@@ -1036,7 +1068,7 @@ class CursesMenu:
                 while not future.done():
                     while not events.empty():
                         phase, done, total = events.get_nowait()
-                    frame = self._frame(title, self.t('upgrade_busy'))
+                    frame = self._frame(title, self.t('tui_quit_blocked'))
                     if frame:
                         self._put(4, 3, self.t('upgrade_progress', phase=self.t('upgrade_phase_' + phase),
                                               done=done, total=total))
@@ -1051,6 +1083,7 @@ class CursesMenu:
             error = self.t('upgrade_discovery_error')
         finally:
             self.stdscr.timeout(-1)
+            self._flush_input()
         self._show_lines(title, [(error, 'failure')])
         return None
 
@@ -1086,11 +1119,11 @@ class CursesMenu:
                 return None
             if selected == len(releases):
                 _, status = status_lines(self.t)
-                self._show_lines(title, [(line, '') for line in status])
+                self._show_lines(title, [(line, '') for line in status], allow_quit=True)
                 continue
             release = releases[selected]
             details = changelog_lines(release, self.t, installed, catalogue=catalogue)
-            self._show_lines(self.t('menu_13'), [(line, '') for line in details])
+            self._show_lines(self.t('menu_13'), [(line, '') for line in details], allow_quit=True)
             if catalogue.decision_for(release.version).status != 'compatible':
                 continue
             action = self._choose(title, [(self.t('self_upgrade_install_menu'), 'warning')],
@@ -1102,7 +1135,7 @@ class CursesMenu:
             except (ReleaseArchiveError, ReleaseDiscoveryError, OSError, ValueError):
                 self._show_lines(title, [(self.t('self_upgrade_review_failed'), 'failure')])
                 continue
-            self._show_lines(title, [(line, '') for line in review_lines(review, self.t)])
+            self._show_lines(title, [(line, '') for line in review_lines(review, self.t)], allow_quit=True)
             if review.decision.status != 'compatible':
                 continue
             if not self._confirm_token(title, self.t('self_upgrade_install_warning'), review.token,
@@ -1113,7 +1146,7 @@ class CursesMenu:
 
             def progress(message: str) -> None:
                 messages.append(message)
-                frame = self._frame(title, '')
+                frame = self._frame(title, self.t('tui_quit_blocked'))
                 if frame:
                     h, w = frame
                     for i, line in enumerate(messages[-max(1, h - 6):], 3):
@@ -1121,14 +1154,15 @@ class CursesMenu:
                     self.stdscr.refresh()
 
             result = execute_review(review, review.token, self.t, progress)
+            self._flush_input()
             if result == HANDOFF_EXIT:
                 return result
             self._show_lines(title, [(line, '') for line in messages])
 
 
     def _render_journal(self, panel: JournalPanel, y: int, rows: int,
-                        x: int, width: int, *, scroll: int = 0) -> None:
-        """Render a bounded log viewport without calling journalctl in curses."""
+                         x: int, width: int, *, viewport: JournalViewport) -> None:
+        """Render the bounded viewport, anchored while reading older live logs."""
         if rows <= 0 or width < 8:
             return
         if panel.error:
@@ -1140,79 +1174,10 @@ class CursesMenu:
         if not panel.lines:
             self._put(y, x, self.t('logs_empty'), 'muted')
             return
-        all_lines = list(panel.lines)
-        end = max(0, len(all_lines) - scroll)
-        start = max(0, end - rows)
-        for j, text in enumerate(all_lines[start:end]):
-            self._put(y + j, x, text[:width], 'muted')
-        if scroll:
-            self._put(y + rows - 1, x + max(0, width - 18),
-                      f'↑ {scroll} / {len(all_lines)}', 'section')
-
-    def _expanded_logs(self, systemd: SystemdServices, initial: ServiceState,
-                       panel: JournalPanel) -> None:
-        """Enter on the focused service expands its journal panel, not a popup."""
-        state = initial
-        scroll = 0
-        last_refreshed = 0.0
-        self.stdscr.timeout(150)
-        try:
-            while True:
-                now = time.monotonic()
-                panel.poll()
-                if now - last_refreshed >= 3:
-                    try:
-                        state = systemd.status([state.name])[0]
-                        self._update_cpu([state])
-                    except ServiceError:
-                        pass
-                    last_refreshed = now
-                frame = self._frame(f'{self.t("tui_detail_title")} / {state.name}',
-                                    self.t('nbo_expanded_hint'))
-                if frame:
-                    h, w = frame
-                    self._paint(3, 2, w-4, 7)
-                    self._put(3, 3, state.unit, 'title')
-                    self._put(4, 4, f'{self.t("tui_col_state")}: {state.active} ({state.substate})', state_style(state))
-                    self._put(5, 4, f'{self.t("tui_col_startup")}: {state.enabled}   PID: {state.main_pid}', 'muted')
-                    version = self.versions.get(state.name)
-                    self._put(6, 4, f'{self.t("nbo_service_version")}: {version or "—"}', 'muted')
-                    self._put(7, 4, f'CPU: {self.cpu_display.get(state.name,"—")}   '
-                                       f'RAM: {self._human_size(state.memory_current)}   '
-                                       f'{self.t("nbo_service_uptime")}: {self._uptime(state.uptime_seconds)}', 'muted')
-                    self._put(10, 3, self.t('nbo_live_logs_title') if panel.live
-                              else self.t('nbo_logs_title'), 'section')
-                    self._put(10, min(40, w-22), f'{self.t("nbo_live_action")}: '
-                              f'{"ON" if panel.live else "OFF"}',
-                              'success' if panel.live else 'muted')
-                    self._paint(11, 2, w-4, max(1, h-14))
-                    self._render_journal(panel, 12, h-16, 4, w-10, scroll=scroll)
-                    self.stdscr.refresh()
-                key = self.stdscr.getch()
-                if key in (27, 3):
-                    return
-                if key in (ord('l'), ord('L')):
-                    panel.set_live(not panel.live)
-                    scroll = 0
-                elif key in (ord('n'), ord('N')):
-                    self.stdscr.timeout(-1)
-                    count = self._read_number(panel.count)
-                    self.stdscr.timeout(150)
-                    if count is not None:
-                        panel.count = count
-                        panel.refresh()
-                        scroll = 0
-                elif key in (curses.KEY_F5, ord('r'), ord('R')):
-                    panel.refresh()
-                    last_refreshed = 0
-                elif key in (curses.KEY_PPAGE, curses.KEY_UP):
-                    scroll = min(max(0, len(panel.lines)-1), scroll + (10 if key == curses.KEY_PPAGE else 1))
-                elif key in (curses.KEY_NPAGE, curses.KEY_DOWN):
-                    scroll = max(0, scroll - (10 if key == curses.KEY_NPAGE else 1))
-                elif key == curses.KEY_END:
-                    scroll = 0
-        finally:
-            self.stdscr.timeout(200)
+        viewport.horizontal(panel, width, 0)
+        start, end = viewport.bounds(panel, rows)
+        for j, text in enumerate(list(panel.lines)[start:end]):
+            self._put(y + j, x, text[viewport.column:viewport.column + width], 'muted')
 
     def _manage(self) -> None:
         """Manage marked services with operations above the journal preview."""
@@ -1236,6 +1201,10 @@ class CursesMenu:
         movement = (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k'),
                     curses.KEY_LEFT, curses.KEY_RIGHT)
         panel = JournalPanel(systemd)
+        viewport = JournalViewport()
+        positions: list[tuple[int, int]] = []
+        log_rows = 1
+        log_width = 1
         self.stdscr.timeout(150)
         try:
             while True:
@@ -1252,8 +1221,10 @@ class CursesMenu:
                 preview = states[index] if states and focus is not None else None
                 if preview and panel.name != preview.name:
                     panel.select(preview.name)
-                hint_key = 'nbo_manage_actions_hint' if focus == 'actions' else 'nbo_manage_hint_035'
-                frame = self._frame(self.t('tui_manage_title'), self.t(hint_key))
+                    viewport.reset()
+                hint_key = {'actions': 'nbo_manage_actions_hint', 'logs': 'nbo_manage_logs_hint'}.get(
+                    focus, 'nbo_manage_hint_035')
+                frame = self._frame(self.t('tui_manage_title'), self._quit_hint(self.t(hint_key)))
                 if frame:
                     h, w = frame
                     split = max(31, min(44, w // 3))
@@ -1264,62 +1235,69 @@ class CursesMenu:
                     # short terminals the journal preview disappears entirely.
                     actions_y = max(10, min(13 if h >= 27 else 11,
                                              h - 3 - action_rows))
-                    self._paint(3, 2, split - 3, max(1, actions_y - 4))
-                    self._paint(3, split + 1, w - split - 4, max(1, actions_y - 4))
-                    service_heading = f'{self.t("nbo_services_label")}  {self.t("nbo_chosen")}: {len(chosen)}'
-                    if len(service_heading) > split - 5:
-                        service_heading = f'{self.t("nbo_services_label")}  ({len(chosen)})'
-                    self._put(3, 3, service_heading, 'section')
-                    self._put(3, split + 2, self.t('nbo_detail_label'), 'section')
-                    for i, state in enumerate(states):
-                        y = 5 + i
-                        if y >= actions_y:
-                            break
-                        selected = focus == 'services' and index == i
-                        if selected:
-                            self._put(y, 3, ' ' * (split - 5), 'selected')
-                        self._put(y, 4, f"[{'x' if state.name in chosen else ' '}] {state.name:<13}",
-                                  'selected' if selected else '')
-                        self._put(y, 24, '●' if state.healthy else '○',
-                                  'selected' if selected else state_style(state))
-                    if preview is not None:
-                        x = split + 2
-                        version = self.versions.get(preview.name)
-                        props = (
-                            (5, preview.unit, 'title'),
-                            (6, f'{self.t("tui_col_state")}: {preview.active} ({preview.substate})',
-                             state_style(preview)),
-                            (7, f'{self.t("tui_col_startup")}: {preview.enabled}    PID: {preview.main_pid}', 'muted'),
-                            (9, f'CPU: {self.cpu_display.get(preview.name, "—")}    '
-                             f'RAM: {self._human_size(preview.memory_current)}', 'section'),
-                            (10, f'{self.t("nbo_service_version")}: {version or "—"}', 'muted'),
-                            (11, f'{self.t("nbo_service_uptime")}: {self._uptime(preview.uptime_seconds)}', 'muted'),
-                        )
-                        for y, value, style in props:
-                            if y < actions_y - 1:
-                                self._put(y, x, value, style)
-                    elif 5 < actions_y - 1:
-                        self._put(5, split + 2, self.t('nbo_select_to_preview'), 'muted')
-
-                    self._put(actions_y - 1, 3, '─' * (w - 7), 'muted')
-                    self._put(actions_y, 3, self.t('nbo_actions_label'), 'section')
-                    targets = [s for s in states if s.name in chosen]
-                    for i, action in enumerate(operations):
-                        ax, row = positions[i]
-                        enabled = any(action_enabled(action, state) for state in targets)
-                        focused = focus == 'actions' and operation == i
-                        style = ('selected' if focused and enabled
-                                 else ('title' if enabled else 'muted'))
-                        self._put(actions_y + 1 + row, 4 + ax,
-                                  f'[{labels[i]}]' if enabled else f' {labels[i]} ', style)
-                        if focused and not enabled:
-                            self._put(actions_y + 1 + row, 3 + ax, '›', 'section')
                     log_title_y = actions_y + action_rows + 2
+                    compact_logs = focus == 'logs' and h - log_title_y < 7
+                    log_width = w - 10
+                    if compact_logs:
+                        log_title_y = 5
+                        self._put(3, 3, f'{self.t("nbo_services_label")}: {preview.name if preview else "—"}', 'section')
+                    else:
+                        self._paint(3, 2, split - 3, max(1, actions_y - 4))
+                        self._paint(3, split + 1, w - split - 4, max(1, actions_y - 4))
+                        service_heading = f'{self.t("nbo_services_label")}  {self.t("nbo_chosen")}: {len(chosen)}'
+                        if len(service_heading) > split - 5:
+                            service_heading = f'{self.t("nbo_services_label")}  ({len(chosen)})'
+                        self._put(3, 3, service_heading, 'section')
+                        self._put(3, split + 2, self.t('nbo_detail_label'), 'section')
+                        for i, state in enumerate(states):
+                            y = 5 + i
+                            if y >= actions_y:
+                                break
+                            selected = focus == 'services' and index == i
+                            if selected:
+                                self._put(y, 3, ' ' * (split - 5), 'selected')
+                            self._put(y, 4, f"[{'x' if state.name in chosen else ' '}] {state.name:<13}",
+                                      'selected' if selected else '')
+                            self._put(y, 24, '●' if state.healthy else '○',
+                                      'selected' if selected else state_style(state))
+                        if preview is not None:
+                            x = split + 2
+                            version = self.versions.get(preview.name)
+                            props = (
+                                (5, preview.unit, 'title'),
+                                (6, f'{self.t("tui_col_state")}: {preview.active} ({preview.substate})',
+                                 state_style(preview)),
+                                (7, f'{self.t("tui_col_startup")}: {preview.enabled}    PID: {preview.main_pid}', 'muted'),
+                                (9, f'CPU: {self.cpu_display.get(preview.name, "—")}    '
+                                 f'RAM: {self._human_size(preview.memory_current)}', 'section'),
+                                (10, f'{self.t("nbo_service_version")}: {version or "—"}', 'muted'),
+                                (11, f'{self.t("nbo_service_uptime")}: {self._uptime(preview.uptime_seconds)}', 'muted'),
+                            )
+                            for y, value, style in props:
+                                if y < actions_y - 1:
+                                    self._put(y, x, value, style)
+                        elif 5 < actions_y - 1:
+                            self._put(5, split + 2, self.t('nbo_select_to_preview'), 'muted')
+
+                        self._put(actions_y - 1, 3, '─' * (w - 7), 'muted')
+                        self._put(actions_y, 3, self.t('nbo_actions_label'), 'section')
+                        targets = [s for s in states if s.name in chosen]
+                        for i, action in enumerate(operations):
+                            ax, row = positions[i]
+                            enabled = any(action_enabled(action, state) for state in targets)
+                            focused = focus == 'actions' and operation == i
+                            style = ('selected' if focused and enabled
+                                     else ('title' if enabled else 'muted'))
+                            self._put(actions_y + 1 + row, 4 + ax,
+                                      f'[{labels[i]}]' if enabled else f' {labels[i]} ', style)
+                            if focused and not enabled:
+                                self._put(actions_y + 1 + row, 3 + ax, '›', 'section')
                     if log_title_y <= h - 4:
                         self._put(log_title_y - 1, 3, '─' * (w - 7), 'muted')
                         self._put(log_title_y, 3,
                                   self.t('nbo_live_logs_title') if panel.live
-                                  else self.t('nbo_logs_title'), 'section')
+                                  else self.t('nbo_logs_title'),
+                                  'selected' if focus == 'logs' else 'section')
                         if preview is not None:
                             self._put(log_title_y, min(42, max(28, w // 2)),
                                       f'[L: {self.t("nbo_live_action")} '
@@ -1327,19 +1305,26 @@ class CursesMenu:
                                       'success' if panel.live else 'muted')
                         logs_y = log_title_y + 1
                         logs_height = max(0, h - 3 - logs_y)
+                        log_rows = max(1, logs_height - 1)
+                        if focus == 'logs':
+                            mode = self.t('nbo_journal_paused') if viewport.end is not None else self.t('nbo_journal_tail')
+                            self._put(h - 3, 3, f'{mode} | N: {panel.count} | → {viewport.column}', 'section')
                         if logs_height:
                             self._paint(logs_y, 2, w - 4, logs_height)
                             if preview is None:
                                 self._put(logs_y + 1, 4, self.t('nbo_select_to_preview'), 'muted')
                             else:
-                                self._render_journal(panel, logs_y + 1,
-                                                     max(0, logs_height - 1), 4, w - 10)
+                                self._render_journal(panel, logs_y + 1, logs_height - 1,
+                                                     4, log_width, viewport=viewport)
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
+                self._check_quit(key)
                 if key == 3:
                     return
                 if key == 27:
-                    if chosen:
+                    if focus in ('actions', 'logs'):
+                        focus = 'services'
+                    elif chosen:
                         chosen.clear()
                     elif focus is not None:
                         focus = None
@@ -1349,17 +1334,41 @@ class CursesMenu:
                     refreshed = 0
                     if panel.name:
                         panel.refresh()
+                        viewport.reset()
                 elif key in (ord('l'), ord('L')) and preview:
                     panel.set_live(not panel.live)
+                    viewport.reset()
+                elif key in (ord('n'), ord('N')) and preview:
+                    self.stdscr.timeout(-1)
+                    count = self._read_number(panel.count)
+                    self.stdscr.timeout(150)
+                    if count is not None:
+                        panel.count = count
+                        panel.refresh()
+                        viewport.reset()
                 elif key == 9:
-                    focus = 'services' if focus == 'actions' else 'actions'
+                    focus = {'services': 'actions', 'actions': 'logs', 'logs': 'services'}.get(focus, 'actions')
+                elif key == curses.KEY_BTAB:
+                    focus = {'services': 'logs', 'logs': 'actions', 'actions': 'services'}.get(focus, 'services')
+                elif focus == 'logs' and key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE,
+                                                 curses.KEY_NPAGE, ord('j'), ord('k')):
+                    amount = -1 if key in (curses.KEY_UP, curses.KEY_PPAGE, ord('k')) else 1
+                    if key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+                        amount *= log_rows
+                    viewport.move(panel, log_rows, amount)
+                elif focus == 'logs' and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                    viewport.horizontal(panel, log_width, -8 if key == curses.KEY_LEFT else 8)
+                elif focus == 'logs' and key == curses.KEY_END:
+                    viewport.end = None
+                elif focus == 'logs' and key == curses.KEY_HOME:
+                    viewport.move(panel, log_rows, -len(panel.lines))
                 elif key in movement:
                     if focus is None:
                         focus = 'services'
-                        index = len(states) - 1 if key in (curses.KEY_UP, ord('k')) else 0
+                        index = max(0, len(states) - 1) if key in (curses.KEY_UP, ord('k')) else 0
                     elif focus == 'services':
                         index = move_selection(index, key, len(states))
-                    else:
+                    elif focus == 'actions':
                         operation = move_action_focus(operation, key, positions)
                 elif focus == 'services' and key == 32 and states:
                     name = states[index].name
@@ -1369,9 +1378,7 @@ class CursesMenu:
                         chosen.add(name)
                 elif key in (10, 13, curses.KEY_ENTER):
                     if focus == 'services' and states:
-                        self._expanded_logs(systemd, states[index], panel)
-                        self.stdscr.timeout(150)
-                        refreshed = 0
+                        focus = 'logs'
                     elif focus == 'actions':
                         action = operations[operation]
                         targets = [s for s in states if s.name in chosen]
@@ -1398,6 +1405,7 @@ class CursesMenu:
                                 pass
                             if panel.name:
                                 panel.refresh()
+                                viewport.reset()
                             refreshed = time.monotonic()
                         self.stdscr.timeout(150)
         finally:
@@ -1523,7 +1531,7 @@ class CursesMenu:
                               *, finished: bool = False, error: str = '',
                               result=None) -> None:
         frame = self._frame(title, self.t('nbo_progress_result_hint') if finished
-                            else self.t('nbo_do_not_interrupt'))
+                            else self.t('tui_quit_blocked'))
         if not frame:
             return
         h, w = frame
@@ -1609,7 +1617,7 @@ class CursesMenu:
                         self.t('nbo_restore_all_desc'))
         selected: int | None = None
         while True:
-            frame = self._frame(self.t('nbo_restore_choose'), self.t('nbo_restore_scope_hint'))
+            frame = self._frame(self.t('nbo_restore_choose'), self._quit_hint(self.t('nbo_restore_scope_hint')))
             if frame:
                 h, w = frame
                 width = min(w-8, max(55, min(92, w-8)))
@@ -1632,6 +1640,7 @@ class CursesMenu:
                     self._put(19, 5, self.t('nbo_restore_scope_warning')[:max(10,width-7)], 'warning')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
+            self._check_quit(key)
             if key in (27,3):
                 return None
             if key in (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k')):
@@ -1763,7 +1772,7 @@ class CursesMenu:
                 # Legacy archives may be verified read-only, but never restored.
                 can_verify = bool(action_targets)
                 hint_key = 'nbo_backup_actions_hint' if focus == 'actions' else 'nbo_backup_hint_034'
-                frame = self._frame(self.t('nbo_backup_title'), self.t(hint_key))
+                frame = self._frame(self.t('nbo_backup_title'), self._quit_hint(self.t(hint_key)))
                 if frame:
                     h, w = frame
                     pane = w >= 104
@@ -1903,6 +1912,7 @@ class CursesMenu:
                         self._put(list_title_y + 2, 4, self.t('nbo_backup_empty'), 'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
+                self._check_quit(key)
                 if key == 3:
                     return
                 if key == 27:
@@ -2092,13 +2102,16 @@ class CursesMenu:
 
     def run(self, initial_view: str = 'main') -> int:
         self._init_screen()
-        if initial_view == 'manage':
-            self._manage()
+        try:
+            if initial_view == 'manage':
+                self._manage()
+                return 0
+            if initial_view == 'backups':
+                self._backups()
+                return 0
+            return self._main()
+        except _QuitTui:
             return 0
-        if initial_view == 'backups':
-            self._backups()
-            return 0
-        return self._main()
 
 
 def run_tui(t: Translator, config_path: Path = CONFIG_PATH, initial_view: str = 'main') -> int:
