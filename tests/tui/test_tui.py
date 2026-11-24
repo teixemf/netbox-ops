@@ -49,6 +49,47 @@ class MenuNavigationTests(unittest.TestCase):
                 action.assert_called_once_with(*args)
                 self.assertTrue(any(text.startswith('Q  ') for _, _, text, _ in screen.frames[0]))
 
+    def test_global_quit_from_services_and_backups(self):
+        for view, keys in (('manage', [curses.KEY_DOWN, 32, ord('Q')]),
+                           ('backups', [ord('Q')])):
+            with self.subTest(view=view):
+                screen = FakeScreen(keys)
+                menu = CursesMenu(screen, Translator('en'))
+                systemd = MagicMock()
+                systemd.status.return_value = [ServiceState('netbox', 'netbox.service',
+                                                             'loaded', 'active', 'running', 'enabled')]
+                with patch.object(menu, '_init_screen'), patch('netbox_ops.tui.load_config'), \
+                     patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+                     patch('netbox_ops.backups.BackupManager') as backups, \
+                     patch('netbox_ops.tui.JournalPanel.close') as close:
+                    backups.return_value.quick_list.return_value = []
+                    self.assertEqual(menu.run(view), 0)
+                if view == 'manage':
+                    close.assert_called_once()
+                self.assertEqual(screen.wait_ms, -1)
+
+    def test_quit_from_nested_menu_unwinds_to_run(self):
+        screen = FakeScreen([ord('Q')])
+        menu = CursesMenu(screen, Translator('en'))
+        with patch.object(menu, '_init_screen'), patch.object(menu, '_main',
+                side_effect=lambda: menu._choose('Menu', [('choice', '')], 'hint')):
+            self.assertEqual(menu.run(), 0)
+
+    def test_q_does_not_acknowledge_results_or_cancel_token_input(self):
+        screen = FakeScreen([ord('Q'), ord('q'), 10])
+        menu = CursesMenu(screen, Translator('en'))
+        with patch('netbox_ops.tui.curses.flushinp') as flush:
+            menu._wait_result_ack()
+        self.assertEqual(flush.call_count, 2)
+        self.assertEqual(list(screen.keys), [])
+        screen = FakeScreen([ord('Q'), 10])
+        menu = CursesMenu(screen, Translator('en'))
+        self.assertTrue(menu._confirm_token('Confirm', 'Enter Q', 'Q'))
+        screen = FakeScreen([ord('Q'), 27])
+        menu = CursesMenu(screen, Translator('en'))
+        menu._show_lines('Error', [('failure', 'failure')])
+        self.assertEqual(len(screen.frames), 2)
+
     def test_arrows_wrap_home_end_and_pages(self):
         self.assertEqual(move_selection(0, curses.KEY_UP, 15), 14)
         self.assertEqual(move_selection(14, curses.KEY_DOWN, 15), 0)
@@ -94,7 +135,7 @@ class RestartSafetyTests(unittest.TestCase):
 
     def test_cancelled_manage_action_never_executes_systemctl(self):
         # Mark first service; attempt disabled action; clear marks and return.
-        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27])
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [ServiceState(n, f'{n}.service', 'loaded',
@@ -250,7 +291,7 @@ class NewServiceTuiTests(unittest.TestCase):
     def test_manage_multi_select_and_action(self):
         # Two service checkboxes and A to choose a single action.
         screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 32,
-                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27, 27])
+                             9, curses.KEY_RIGHT, curses.KEY_RIGHT, 10, 27, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [self._state(n) for n in
@@ -265,7 +306,7 @@ class NewServiceTuiTests(unittest.TestCase):
         executed.assert_called_once_with(systemd, 'restart', ['netbox', 'netbox-rq'])
 
     def test_manage_never_changes_services_without_confirmation(self):
-        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27])
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [self._state(n) for n in

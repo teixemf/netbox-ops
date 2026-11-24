@@ -26,6 +26,7 @@ class JournalPanel:
         self.name: str | None = None
         self.live = False
         self.lines: deque[str] = deque(maxlen=500)
+        self.sequence = 0
         self.error = ''
         self.loading = False
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=1,
@@ -43,6 +44,7 @@ class JournalPanel:
         self._stop_follower()
         self.name = name
         self.lines.clear()
+        self.sequence = 0
         self.error = ''
         if self.live:
             self._start_follower()
@@ -56,6 +58,7 @@ class JournalPanel:
         if self.live:
             self._stop_follower()
             self.lines.clear()
+            self.sequence = 0
             self._start_follower()
             return
         self.loading = True
@@ -72,6 +75,7 @@ class JournalPanel:
         self._stop_follower()
         if self.live:
             self.lines.clear()
+            self.sequence = 0
             self.error = ''
             self._start_follower()
         else:
@@ -110,6 +114,7 @@ class JournalPanel:
             else:
                 if name == self.name and not self.live:
                     self.lines = deque((self._sanitize(line) for line in lines), maxlen=500)
+                    self.sequence = len(self.lines)
         if self._follow is None:
             return
         proc = self._follow
@@ -139,6 +144,7 @@ class JournalPanel:
             while b'\n' in self._buffer:
                 record, self._buffer = self._buffer.split(b'\n', 1)
                 self.lines.append(self._sanitize(record.decode('utf-8', 'replace')))
+                self.sequence += 1
 
     @staticmethod
     def _sanitize(value: str) -> str:
@@ -168,3 +174,37 @@ class JournalPanel:
 
     def __exit__(self, *unused):
         self.close()
+
+
+class JournalViewport:
+    """Follow the tail or anchor the visible end to a fixed journal sequence."""
+
+    def __init__(self):
+        self.end: int | None = None
+        self.column = 0
+
+    def reset(self) -> None:
+        self.end = None
+        self.column = 0
+
+    def bounds(self, panel: JournalPanel, rows: int) -> tuple[int, int]:
+        rows = max(1, rows)
+        oldest = panel.sequence - len(panel.lines)
+        earliest_end = min(panel.sequence, oldest + rows)
+        end = panel.sequence if self.end is None else max(earliest_end, min(self.end, panel.sequence))
+        if self.end is not None:
+            self.end = end
+        return max(0, end - oldest - rows), end - oldest
+
+    def move(self, panel: JournalPanel, rows: int, amount: int) -> None:
+        _, end = self.bounds(panel, rows)
+        oldest = panel.sequence - len(panel.lines)
+        target = oldest + end + amount
+        if target >= panel.sequence:
+            self.end = None
+        else:
+            self.end = max(min(panel.sequence, oldest + max(1, rows)), target)
+
+    def horizontal(self, panel: JournalPanel, width: int, amount: int) -> None:
+        maximum = max(0, max((len(line) for line in panel.lines), default=0) - max(1, width))
+        self.column = min(maximum, max(0, self.column + amount))
