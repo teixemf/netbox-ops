@@ -63,14 +63,22 @@ def _parse(raw: bytes) -> tuple[list[str], dict[str, tuple[int, re.Match]]]:
 
 
 def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
-                           core: bytes) -> PluginUpgrade:
-    """Preserve every unselected local requirement byte-for-byte."""
+                           core: bytes, *, stage_index: int | None = None) -> PluginUpgrade:
+    """Preserve unselected requirements; prepare final pins only at the last stage."""
     inventory = plan.source.inventory
     digest = None if local is None else hashlib.sha256(local).hexdigest()
     if digest != inventory.requirements_hash or inventory.enabled is None:
         raise UpgradeExecutionError('Plugin requirements or configuration changed after planning')
-    if (not plan.can_execute or len(plan.stages) != 1 or plan.stages[0].kind != 'plugins'
-            or plan.current_netbox != plan.target_netbox):
+    combined = stage_index is not None
+    if not plan.can_execute:
+        raise UpgradeExecutionError('Upgrade plan is blocked')
+    if combined:
+        if (not 0 <= stage_index < len(plan.stages)
+                or plan.current_netbox == plan.target_netbox
+                or any(s.kind != 'netbox' for s in plan.stages)):
+            raise UpgradeExecutionError('Invalid combined upgrade stage')
+    elif (len(plan.stages) != 1 or plan.stages[0].kind != 'plugins'
+          or plan.current_netbox != plan.target_netbox):
         raise UpgradeExecutionError('Only one plugin-only stage is supported')
     installed = {}
     for package in inventory.packages:
@@ -93,12 +101,14 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         selected[name] = version
     if all(installed[name] == version for name, version in selected.items()):
         raise UpgradeExecutionError('No plugin version change was approved')
-    stage = plan.stages[0]
+    stage = plan.stages[stage_index if combined else 0]
+    if combined and stage_index != len(plan.stages) - 1:
+        selected = {}
     expected_stage = dict(stage.plugin_versions)
     if any(expected_stage.get(name) != version for name, version in selected.items()):
         raise UpgradeExecutionError('Selected pins differ from the approved stage')
     for check in stage.plugin_checks:
-        if (check.status == 'blocked' or check.netbox_version != plan.current_netbox
+        if (check.status == 'blocked' or check.netbox_version != stage.netbox_version
                 or check.python_version != plan.source.installation.python_version
                 or expected_stage.get(normalize_name(check.package)) != check.version):
             raise UpgradeExecutionError('Plugin compatibility evidence does not match the approved stage')
@@ -109,7 +119,7 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
     core_pins = []
     expected = {}
     for name, (_, match) in core_entries.items():
-        if not match[4] or installed.get(name) != match[4]:
+        if not match[4] or (not combined and installed.get(name) != match[4]):
             raise UpgradeExecutionError('Installed NetBox core dependencies must match exact release pins')
         core_pins.append(f'{match[2]}{match[3] or ""}=={match[4]}')
         expected[name] = match[4]
