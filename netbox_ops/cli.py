@@ -275,6 +275,9 @@ def perform_backup_action(group: str, action: str, cfg: Configuration,
 
 def dispatch(args: argparse.Namespace, t: Translator) -> int:
     action = getattr(args, 'action', '')
+    if args.command == 'upgrade':
+        from .upgrade_ui import run_cli
+        return run_cli(args, load_config(args.config), t)
     if args.command == 'self-upgrade' and action in ('list', 'show'):
         from .self_upgrade_ui import run_catalogue
         return run_catalogue(action, t, target=getattr(args, 'version', None))
@@ -427,6 +430,16 @@ def interactive_menu(t: Translator, config_path: Path = CONFIG_PATH) -> int:
                         perform_backup_action('backup', kind, cfg, t)
                 elif option == '4':
                     perform_backup_action('backup', 'list', cfg, t)
+            elif group == 'upgrade':
+                from .upgrade_ui import run_cli
+                from shlex import split
+                print(t('upgrade_text_help'))
+                raw = input(t('prompt'))
+                try:
+                    options = build_parser().parse_args(['upgrade', action, *split(raw)])
+                except (SystemExit, ValueError):
+                    continue
+                run_cli(options, cfg, t)
             else:
                 not_implemented(t, f'{group} {action}'.strip())
         except (ServiceError, ConfigError, OSError) as exc:
