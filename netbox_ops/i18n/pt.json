@@ -244,7 +244,7 @@
   "tui_quit_key": "Q Sair",
   "tui_ack_hint": "Enter/Esc — Confirmar leitura e voltar",
   "tui_quit_blocked": "Operação em curso — Q bloqueado até terminar",
-  "nbo_manage_logs_hint": "Esc Serviços | ↑↓ Ler | ←→ Mover | PgUp/Dn | End Fim | N Linhas | L Live",
+  "nbo_manage_logs_hint": "Esc Serviços | Tab Foco | ↑↓/Pg Ler | ←→ Mover | End Fim | N Linhas | F5",
   "nbo_journal_paused": "A ler logs anteriores",
   "nbo_journal_tail": "Últimos logs",
   "nbo_manage_hint_035": "Esc Voltar/Limpar | ↑↓ Serviço | Espaço Marcar | Tab Acções | Enter Logs",

@@ -135,7 +135,7 @@ class RestartSafetyTests(unittest.TestCase):
 
     def test_cancelled_manage_action_never_executes_systemctl(self):
         # Mark first service; attempt disabled action; clear marks and return.
-        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27])
+        screen = FakeScreen([curses.KEY_DOWN, 32, 9, 10, 27, 27, 27, 27, 27])
         menu = CursesMenu(screen, Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = [ServiceState(n, f'{n}.service', 'loaded',

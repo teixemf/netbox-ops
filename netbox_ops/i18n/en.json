@@ -244,7 +244,7 @@
   "tui_quit_key": "Q Quit",
   "tui_ack_hint": "Enter/Esc — Acknowledge and return",
   "tui_quit_blocked": "Operation in progress — Q disabled until completion",
-  "nbo_manage_logs_hint": "Esc Services | ↑↓ Scroll | ←→ Pan | PgUp/Dn | End Tail | N Lines | L Live",
+  "nbo_manage_logs_hint": "Esc Services | Tab Focus | ↑↓/Pg Scroll | ←→ Pan | End Tail | N Lines | F5",
   "nbo_journal_paused": "Reading older logs",
   "nbo_journal_tail": "At newest logs",
   "nbo_manage_hint_035": "Esc Back/Clear | ↑↓ Service | Space Mark | Tab Actions | Enter Logs",
