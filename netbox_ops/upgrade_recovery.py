@@ -19,6 +19,7 @@ from .backups import BackupManager
 from .config import Configuration
 from .services import SystemdServices
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_git import PinnedStage
 from .upgrade_plan import UpgradePlan
 
 
@@ -91,6 +92,7 @@ def _private_file(path: Path) -> None:
 
 def _capture_quiesced_recovery(
     cfg: Configuration, plan: UpgradePlan, *, systemd: SystemdServices,
+    pinned_stages: tuple[PinnedStage, ...],
 ) -> UpgradeRecovery:
     """Create and verify a separate recovery point under the caller's lock.
 
@@ -105,6 +107,9 @@ def _capture_quiesced_recovery(
         raise UpgradeExecutionError('Unsafe NetBox configuration root')
     if not re.fullmatch(r'[0-9a-f]{40}', plan.source.installation.commit):
         raise UpgradeExecutionError('Invalid previous Git revision')
+    if (tuple(stage.version for stage in pinned_stages) != tuple(stage.netbox_version for stage in plan.stages)
+            or any(not re.fullmatch(r'[0-9a-f]{40}', stage.commit) for stage in pinned_stages)):
+        raise UpgradeExecutionError('Recovery stage revisions do not match the approved plan')
     states = systemd.status(['netbox', 'netbox-rq'])
     if ({s.name for s in states} != {'netbox', 'netbox-rq'}
             or any(s.loaded != 'loaded' or s.active != 'inactive' for s in states)):
@@ -159,6 +164,12 @@ def _capture_quiesced_recovery(
             'target_netbox': plan.target_netbox,
             'plan_fingerprint': plan.fingerprint,
             'stages': [s.netbox_version for s in plan.stages],
+            'stage_commits': [{'version': stage.version, 'commit': stage.commit}
+                              for stage in pinned_stages],
+            'python_version': plan.source.installation.python_version,
+            'original_reference': plan.source.installation.reference,
+            'database': cfg.database,
+            'media_directory': str(cfg.media_directory),
             'plugin_versions': [[p.package, p.installed_version] for p in plan.plugins],
             'configuration': files,
             'archive': archive.name,
@@ -167,6 +178,11 @@ def _capture_quiesced_recovery(
         pending = directory / '.recovery.pending'
         _write_private(pending, json.dumps(record, indent=2, sort_keys=True).encode('utf-8'))
         os.replace(pending, manifest)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         return UpgradeRecovery(directory, archive, manifest)
     except Exception:
         # Never echo exception text: subprocess output or config may contain secrets.
