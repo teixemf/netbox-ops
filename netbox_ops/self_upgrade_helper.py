@@ -17,31 +17,43 @@ from .self_upgrade_transaction import (
 from .services import ExclusiveLock, LOCK_PATH, LOG_PATH, write_audit
 
 
-def wait_for_initiator_exit(pid: int, timeout_seconds: int = 60) -> None:
-    """Wait for the initiating CLI to exit, using a Linux pidfd (no PID polls)."""
-    if type(pid) is not int or pid <= 1 or pid == os.getpid():
-        raise SwapError('Invalid initiating process ID')
+def open_initiator_pidfd() -> int:
+    """Capture our exact process identity before starting an external helper.
+
+    Pass this descriptor through subprocess.Popen(pass_fds=...) and close the
+    parent's copy once the child starts. Never reopen a numeric PID later.
+    """
+    try:
+        return os.pidfd_open(os.getpid())
+    except OSError as exc:
+        raise SwapError('Cannot capture initiating process identity') from exc
+
+
+def wait_for_initiator_exit(descriptor: int, timeout_seconds: int = 60) -> None:
+    """Wait on the inherited pidfd, even if the original process already exited.
+
+    The caller retains ownership of the descriptor and must close it.
+    """
+    if type(descriptor) is not int or descriptor < 0:
+        raise SwapError('Invalid initiating process descriptor')
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
         raise SwapError('Invalid initiating process timeout')
     try:
-        descriptor = os.pidfd_open(pid)
-    except ProcessLookupError:
-        return  # The originating process already exited.
-    except OSError as exc:
-        raise SwapError('Cannot verify initiating process exit') from exc
-    try:
+        link = os.readlink(f'/proc/self/fd/{descriptor}')
+        if link != 'anon_inode:[pidfd]':
+            raise SwapError('Initiating descriptor is not a pidfd')
         poller = select.poll()
         poller.register(descriptor, select.POLLIN)
         events = poller.poll(timeout_seconds * 1000)
-        if not events or not any(flags & select.POLLIN for _, flags in events):
-            raise SwapError('Initiating process did not exit')
-    finally:
-        os.close(descriptor)
+    except OSError as exc:
+        raise SwapError('Cannot verify initiating process exit') from exc
+    if not events or not any(flags & select.POLLIN for _, flags in events):
+        raise SwapError('Initiating process did not exit')
 
 
 def run_approved_swap(
     staged: Path, *,
-    initiator_pid: int,
+    initiator_fd: int,
     preflight: Callable[[Path, Path], None],
     validate: Callable[[Path], None],
     active: Path = Path('/opt/netbox-ops'),
@@ -53,14 +65,14 @@ def run_approved_swap(
     Preflight must prove that the current installation and selected release
     are known, compatible and not a downgrade. Validate must check the new
     installation in place. Neither callback may manage NetBox services.
-    Initiator PID must identify the CLI process from which this helper forked.
+    Initiator FD must be the pidfd captured before launching this helper.
     """
     if os.geteuid() != 0:
         raise SwapError('Self-upgrade requires root privileges')
     if not callable(preflight) or not callable(validate):
         raise SwapError('Preflight and validation are required')
     # The helper must not swap its own installation while the initiating CLI runs.
-    wait_for_initiator_exit(initiator_pid)
+    wait_for_initiator_exit(initiator_fd)
     backup = active.with_name('.netbox-ops-backup')
     state = active.with_name('.netbox-ops-transaction.json')
 

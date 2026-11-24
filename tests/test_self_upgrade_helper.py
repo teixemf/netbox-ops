@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from netbox_ops.self_upgrade_helper import (
-    recover_interrupted_upgrade, run_approved_swap, wait_for_initiator_exit,
+    open_initiator_pidfd, recover_interrupted_upgrade, run_approved_swap, wait_for_initiator_exit,
 )
 from netbox_ops.self_upgrade_transaction import SwapError, begin_swap, finish_swap
 
@@ -38,7 +40,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit', side_effect=lambda msg, **kw: self.log.append(msg))):
             run_approved_swap(
                 self.staged,
-                initiator_pid=12345,
+                initiator_fd=12345,
                 preflight=preflight if preflight is not None else lambda current, candidate: None,
                 validate=validate if validate is not None else lambda path: None,
                 active=self.active,
@@ -87,7 +89,7 @@ class HelperTests(unittest.TestCase):
         from netbox_ops import self_upgrade_helper as helper
         with patch.object(helper.os, 'geteuid', return_value=1000):
             with self.assertRaises(SwapError):
-                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
+                run_approved_swap(self.staged, initiator_fd=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         self.assertEqual((self.active / 'version').read_text(), 'old')
 
@@ -108,24 +110,46 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((self.active / 'version').read_text(), 'new')
 
     def test_pidfd_wait_rejects_invalid_values(self):
-        for pid in (0, -1, os.getpid(), True):
-            with self.subTest(pid=pid), self.assertRaises(SwapError):
-                wait_for_initiator_exit(pid)
+        for descriptor in (-1, True, 99999999):
+            with self.subTest(descriptor=descriptor), self.assertRaises(SwapError):
+                wait_for_initiator_exit(descriptor)
         with self.assertRaises(SwapError):
             wait_for_initiator_exit(12345, timeout_seconds=-1)
+        reader, writer = os.pipe()
+        try:
+            with self.assertRaisesRegex(SwapError, 'not a pidfd'):
+                wait_for_initiator_exit(reader)
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+    def test_pidfd_capture_uses_current_process(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with patch.object(helper.os, 'pidfd_open', return_value=42) as capture:
+            self.assertEqual(open_initiator_pidfd(), 42)
+            capture.assert_called_once_with(os.getpid())
+
+    def test_pidfd_capture_fails_closed(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with patch.object(helper.os, 'pidfd_open', side_effect=OSError('unavailable')):
+            with self.assertRaises(SwapError):
+                open_initiator_pidfd()
 
     def test_pidfd_wait_accepts_already_exited_process(self):
         from netbox_ops import self_upgrade_helper as helper
-        with patch.object(helper.os, 'pidfd_open', side_effect=ProcessLookupError):
-            wait_for_initiator_exit(99999999)
+        with (patch.object(helper.os, 'readlink', return_value='anon_inode:[pidfd]'),
+              patch.object(helper.select, 'poll') as poller):
+            poller.return_value.poll.return_value = [(42, helper.select.POLLIN)]
+            wait_for_initiator_exit(42)
+            poller.return_value.register.assert_called_once_with(42, helper.select.POLLIN)
 
     def test_pidfd_wait_rejects_timeout(self):
         from netbox_ops import self_upgrade_helper as helper
-        reader, writer = os.pipe()
-        self.addCleanup(os.close, writer)
-        with patch.object(helper.os, 'pidfd_open', return_value=reader):
-            with self.assertRaises(SwapError):
-                wait_for_initiator_exit(12345, timeout_seconds=1)
+        with (patch.object(helper.os, 'readlink', return_value='anon_inode:[pidfd]'),
+              patch.object(helper.select, 'poll') as poller):
+            poller.return_value.poll.return_value = []
+            with self.assertRaisesRegex(SwapError, 'did not exit'):
+                wait_for_initiator_exit(42, timeout_seconds=1)
 
     def test_audit_failure_prevents_any_swap(self):
         from netbox_ops import self_upgrade_helper as helper
@@ -133,7 +157,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'ExclusiveLock'),
               patch.object(helper, 'write_audit', side_effect=OSError('log unavailable'))):
             with self.assertRaises(OSError):
-                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
+                run_approved_swap(self.staged, initiator_fd=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         self.assertEqual((self.active / 'version').read_text(), 'old')
         self.assertFalse((self.active.parent / '.netbox-ops-transaction.json').exists())
@@ -150,7 +174,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'ExclusiveLock'),
               patch.object(helper, 'write_audit', side_effect=audit)):
             with self.assertRaises(OSError):
-                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
+                run_approved_swap(self.staged, initiator_fd=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         self.assertEqual((self.active / 'version').read_text(), 'old')
         self.assertIn('SELF-UPGRADE rollback completed', self.log)
@@ -166,7 +190,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit'),
               patch.object(helper, 'rollback_swap', side_effect=OSError('disk error'))):
             with self.assertRaises(SwapError):
-                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
+                run_approved_swap(self.staged, initiator_fd=12345, preflight=lambda current, candidate: None,
                                   validate=invalid, active=self.active)
         self.assertTrue((self.active.parent / '.netbox-ops-backup').exists())
         self.assertTrue((self.active.parent / '.netbox-ops-transaction.json').exists())
@@ -180,7 +204,7 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit'),
               patch.object(helper, 'cleanup_swap', side_effect=OSError('disk error'))):
             with self.assertRaises(OSError):
-                run_approved_swap(self.staged, initiator_pid=12345, preflight=lambda current, candidate: None,
+                run_approved_swap(self.staged, initiator_fd=12345, preflight=lambda current, candidate: None,
                                   validate=lambda path: None, active=self.active)
         backup = self.active.parent / '.netbox-ops-backup'
         state = self.active.parent / '.netbox-ops-transaction.json'
@@ -223,6 +247,38 @@ class HelperTests(unittest.TestCase):
         with patch.object(helper.os, 'geteuid', return_value=1000):
             with self.assertRaises(SwapError):
                 recover_interrupted_upgrade(active=self.active)
+
+
+@unittest.skipUnless(hasattr(os, 'pidfd_open') and sys.platform == 'linux', 'Linux pidfd required')
+class ProcessIdentityTests(unittest.TestCase):
+    def test_external_process_inherits_pidfd_without_reopening_pid(self):
+        with subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                              stdin=subprocess.PIPE) as initiator:
+            try:
+                descriptor = os.pidfd_open(initiator.pid)
+            except OSError as exc:
+                initiator.terminate()
+                self.skipTest(f'pidfd unavailable: {exc}')
+            try:
+                command = [
+                    sys.executable, '-c',
+                    'import sys; from netbox_ops.self_upgrade_helper import wait_for_initiator_exit; '
+                    'wait_for_initiator_exit(int(sys.argv[1]), timeout_seconds=5)',
+                    str(descriptor),
+                ]
+                with subprocess.Popen(command, pass_fds=(descriptor,)) as helper:
+                    try:
+                        with self.assertRaises(subprocess.TimeoutExpired):
+                            helper.wait(timeout=0.2)
+                        initiator.communicate(timeout=5)
+                        self.assertEqual(helper.wait(timeout=5), 0)
+                    finally:
+                        if helper.poll() is None:
+                            helper.kill()
+            finally:
+                os.close(descriptor)
+                if initiator.poll() is None:
+                    initiator.kill()
 
 
 if __name__ == '__main__':
