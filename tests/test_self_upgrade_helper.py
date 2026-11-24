@@ -100,5 +100,69 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((self.active / 'version').read_text(), 'new')
 
 
+    def test_audit_failure_prevents_any_swap(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock'),
+              patch.object(helper, 'write_audit', side_effect=OSError('log unavailable'))):
+            with self.assertRaises(OSError):
+                run_approved_swap(self.staged, preflight=lambda path: None,
+                                  validate=lambda path: None, active=self.active)
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertFalse((self.active.parent / '.netbox-ops-transaction.json').exists())
+
+    def test_audit_failure_after_swap_rolls_back(self):
+        from netbox_ops import self_upgrade_helper as helper
+
+        def audit(message, **kwargs):
+            if 'validation pending' in message:
+                raise OSError('log unavailable')
+            self.log.append(message)
+
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock'),
+              patch.object(helper, 'write_audit', side_effect=audit)):
+            with self.assertRaises(OSError):
+                run_approved_swap(self.staged, preflight=lambda path: None,
+                                  validate=lambda path: None, active=self.active)
+        self.assertEqual((self.active / 'version').read_text(), 'old')
+        self.assertIn('SELF-UPGRADE rollback completed', self.log)
+
+    def test_failed_rollback_retains_transaction_for_recovery(self):
+        from netbox_ops import self_upgrade_helper as helper
+
+        def invalid(path):
+            raise ValueError('rejected')
+
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock'),
+              patch.object(helper, 'write_audit'),
+              patch.object(helper, 'rollback_swap', side_effect=OSError('disk error'))):
+            with self.assertRaises(SwapError):
+                run_approved_swap(self.staged, preflight=lambda path: None,
+                                  validate=invalid, active=self.active)
+        self.assertTrue((self.active.parent / '.netbox-ops-backup').exists())
+        self.assertTrue((self.active.parent / '.netbox-ops-transaction.json').exists())
+
+    def test_cleanup_failure_keeps_validated_installation(self):
+        from netbox_ops import self_upgrade_helper as helper
+        from netbox_ops.self_upgrade_transaction import cleanup_swap
+
+        with (patch.object(helper.os, 'geteuid', return_value=0),
+              patch.object(helper, 'ExclusiveLock'),
+              patch.object(helper, 'write_audit'),
+              patch.object(helper, 'cleanup_swap', side_effect=OSError('disk error'))):
+            with self.assertRaises(OSError):
+                run_approved_swap(self.staged, preflight=lambda path: None,
+                                  validate=lambda path: None, active=self.active)
+        backup = self.active.parent / '.netbox-ops-backup'
+        state = self.active.parent / '.netbox-ops-transaction.json'
+        self.assertEqual((self.active / 'version').read_text(), 'new')
+        self.assertTrue(backup.exists())
+        self.assertTrue(state.exists())
+        cleanup_swap(self.active, self.staged, backup, state)
+        self.assertFalse(state.exists())
+
+
 if __name__ == '__main__':
     unittest.main()
