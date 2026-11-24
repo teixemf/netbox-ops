@@ -168,18 +168,19 @@ class BackupView034Tests(unittest.TestCase):
         self.run_menu(menu)
         focused = screen.frames[2]
         self.assertTrue(any(text == '›' for _, _, text, _ in focused))
-        self.assertIn('Marked targets: none',
-                      ' '.join(text for _, _, text, _ in focused))
+        self.assertIn('Selected: 0', ' '.join(text for _, _, text, _ in focused))
+        self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
 
     def test_marked_target_summary_is_independent_of_preview(self):
         menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_DOWN,
                                   27, 27, 27], lang='en')
         self.run_menu(menu)
         focused = screen.frames[3]
-        summaries = [text for _, _, text, _ in focused if 'Marked targets:' in text]
-        self.assertEqual(len(summaries), 1)
-        self.assertIn(self.files[2].name, summaries[0])
-        self.assertNotIn(self.files[1].name, summaries[0])
+        rows = [text for _, _, text, _ in focused if text.startswith('[x] ')]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(self.files[2].name, rows[0])
+        self.assertNotIn(self.files[1].name, rows[0])
+        self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
 
     def test_delete_confirmation_lists_targets_and_can_scroll(self):
         names = [f'backup-{index}.dump' for index in range(5)]
@@ -211,7 +212,8 @@ class BackupView034Tests(unittest.TestCase):
             self.run_menu(menu)
         self.assertEqual(count, 2)
         refreshed = ' '.join(text for _, _, text, _ in screen.frames[3])
-        self.assertIn('Marked targets: none', refreshed)
+        self.assertIn('Selected: 0', refreshed)
+        self.assertNotIn('Marked targets:', refreshed)
 
     def test_escape_clears_marks_then_leaves_action_focus_then_exits(self):
         menu, _ = self.menu([curses.KEY_DOWN, 32, 9, 27, 27, 27], lang='en')

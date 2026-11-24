@@ -130,8 +130,8 @@ class JournalUiTests(unittest.TestCase):
             menu._manage()
         focused = screen.frames[1]
         self.assertTrue(any(text == '›' for _, _, text, _ in focused))
-        self.assertIn('Marked targets: none',
-                      ' '.join(text for _, _, text, _ in focused))
+        self.assertIn('Selected: 0', ' '.join(text for _, _, text, _ in focused))
+        self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
 
     def test_service_marked_target_remains_clear_when_preview_moves(self):
         screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 27, 27, 27],
@@ -144,8 +144,11 @@ class JournalUiTests(unittest.TestCase):
              patch('netbox_ops.tui.load_config'):
             menu._manage()
         focused = screen.frames[3]
-        summaries = [text for _, _, text, _ in focused if 'Marked targets:' in text]
-        self.assertEqual(summaries, ['Marked targets: netbox'])
+        rows = [text for _, _, text, _ in focused if text.startswith('[x] ')]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('netbox', rows[0])
+        self.assertNotIn('netbox-rq', rows[0])
+        self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
         self.assertIn('netbox-rq.service',
                       ' '.join(text for _, _, text, _ in focused))
 
