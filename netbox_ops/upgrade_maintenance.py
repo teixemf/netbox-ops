@@ -3,9 +3,8 @@ import os
 import stat
 from pathlib import Path
 
+from .services import UPGRADE_PENDING_PATH as MARKER
 from .upgrade_execution import UpgradeExecutionError
-
-MARKER = Path('/var/lib/netbox-ops/upgrade.pending')
 
 
 def _open_directory(path: Path) -> int:

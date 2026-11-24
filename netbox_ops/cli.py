@@ -12,7 +12,8 @@ from .config import CONFIG_PATH, DEFAULT_RESTART, SERVICE_NAMES, ConfigError, Co
 from .i18n import LANGUAGES, Translator, detect_language
 from .menu import MENU_ACTIONS
 from .services import (CRITICAL_SERVICES, ExclusiveLock, ServiceError, SystemdServices,
-                       challenge, order_services, perform_service_batch as perform_service_batch, write_audit)
+                       challenge, order_services, perform_service_batch as perform_service_batch,
+                       require_service_action_allowed, write_audit)
 
 
 
@@ -176,6 +177,7 @@ def perform_service_action(systemd: SystemdServices, action: str,
             who = f'uid={os.getuid()} sudo_user={os.environ.get("SUDO_USER", "unknown")}'
             write_audit(f'{action.upper()} requested services={",".join(selected)} {who}')
             try:
+                require_service_action_allowed(action, selected)
                 states = getattr(systemd, action)(selected)
             except ServiceError as exc:
                 write_audit(f'{action.upper()} failure services={",".join(selected)} error={exc}')

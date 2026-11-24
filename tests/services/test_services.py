@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import os
+import tempfile
+from pathlib import Path
 import subprocess
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -9,7 +12,7 @@ from unittest.mock import MagicMock, patch
 from netbox_ops.cli import build_parser, dispatch, perform_restart, perform_service_action, perform_service_batch, order_services, challenge
 from netbox_ops.config import DEFAULT_UNITS, Configuration
 from netbox_ops.i18n import Translator
-from netbox_ops.services import ServiceError, SystemdServices
+from netbox_ops.services import ServiceError, SystemdServices, upgrade_recovery_pending
 
 
 GOOD_SYSTEMD_RESPONSE = '\n'.join([
@@ -254,3 +257,61 @@ class LifecycleAndBatchTests(unittest.TestCase):
             with self.assertRaises(ServiceError):
                 perform_service_batch(manager, 'disable', ['netbox'])
         manager.disable.assert_not_called()
+
+
+@unittest.skipUnless(os.geteuid() == 0, 'Root ownership checks')
+class PendingRecoveryServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.marker = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'upgrade.pending'
+        self.enterContext(patch('netbox_ops.services.UPGRADE_PENDING_PATH', self.marker))
+        self.manager = MagicMock()
+        self.enterContext(patch('netbox_ops.cli.ExclusiveLock'))
+        self.enterContext(patch('netbox_ops.services.ExclusiveLock'))
+        self.enterContext(patch('netbox_ops.cli.write_audit'))
+        self.enterContext(patch('netbox_ops.services.write_audit'))
+
+    def test_cli_cannot_start_or_restart_pending_writers(self):
+        self.marker.write_text('recovery evidence')
+        for action in ('start', 'restart'):
+            with self.subTest(action=action), redirect_stderr(io.StringIO()) as output:
+                result = perform_service_action(self.manager, action, ['netbox-rq'],
+                                                Translator('en'), yes=True)
+                self.assertEqual(result, 1)
+                self.assertIn('recovery is pending', output.getvalue())
+                getattr(self.manager, action).assert_not_called()
+        self.assertEqual(self.marker.read_text(), 'recovery evidence')
+
+    def test_batch_blocks_all_selected_services_before_first_mutation(self):
+        self.marker.write_text('pending')
+        with self.assertRaisesRegex(ServiceError, 'recovery is pending'):
+            perform_service_batch(self.manager, 'restart', ['redis', 'netbox'])
+        self.manager.restart.assert_not_called()
+
+    def test_pending_marker_allows_safe_stops_and_read_only_status(self):
+        self.marker.write_text('pending')
+        self.manager.stop.return_value = [MagicMock(active='inactive')]
+        results, failure = perform_service_batch(self.manager, 'stop', ['netbox'])
+        self.assertIsNone(failure)
+        self.assertEqual(results, [('netbox', 'inactive')])
+        self.assertTrue(upgrade_recovery_pending())
+        runner = MagicMock(return_value=subprocess.CompletedProcess([], 0, GOOD_SYSTEMD_RESPONSE, ''))
+        self.assertTrue(SystemdServices(Configuration(DEFAULT_UNITS), runner).status(['netbox'])[0].healthy)
+        self.assertEqual(runner.call_args.args[0][1], 'show')
+
+    def test_absent_marker_allows_normal_start(self):
+        self.manager.start.return_value = [MagicMock(active='active')]
+        self.assertFalse(upgrade_recovery_pending())
+        results, failure = perform_service_batch(self.manager, 'start', ['netbox'])
+        self.assertIsNone(failure)
+        self.assertEqual(results, [('netbox', 'active')])
+
+    def test_dangling_symlink_and_unsafe_directory_fail_closed(self):
+        self.marker.symlink_to(self.marker.parent / 'missing')
+        self.assertTrue(upgrade_recovery_pending())
+        with self.assertRaises(ServiceError):
+            perform_service_batch(self.manager, 'start', ['netbox'])
+        self.marker.unlink()
+        self.marker.parent.chmod(0o777)
+        with self.assertRaises(ServiceError):
+            perform_service_batch(self.manager, 'start', ['netbox'])
+        self.manager.start.assert_not_called()

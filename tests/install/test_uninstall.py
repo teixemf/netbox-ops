@@ -83,6 +83,14 @@ class UninstallTests(unittest.TestCase):
         self.assertTrue(self.layout.config.exists())
         self.assertTrue(self.layout.app.exists())
 
+    def test_pending_netbox_upgrade_blocks_uninstall(self):
+        marker = self.layout.data / 'upgrade.pending'
+        marker.write_text('recovery evidence')
+        with self.assertRaisesRegex(UninstallError, 'NetBox upgrade recovery is pending'):
+            self.execute('UNINSTALL', '', '')
+        self.assertTrue(self.layout.app.exists())
+        self.assertEqual(marker.read_text(), 'recovery evidence')
+
     def test_busy_lock_blocks_removal(self):
         with self.layout.lock.open('w') as stream:
             self.layout.lock.chmod(0o600)

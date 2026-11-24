@@ -126,6 +126,14 @@ class PluginInventoryTests(unittest.TestCase):
             self._apply(result, approved=False)
         self.assertEqual(self.requirements.read_bytes(), original)
 
+    def test_pending_recovery_blocks_pin_changes(self):
+        result = self.inventory()
+        original = self.requirements.read_bytes()
+        with patch('netbox_ops.plugin_inventory.upgrade_recovery_pending', return_value=True):
+            with self.assertRaisesRegex(PluginInventoryError, 'recovery is pending'):
+                self._apply(result)
+        self.assertEqual(self.requirements.read_bytes(), original)
+
     def test_approved_pin_replaces_only_selected_line(self):
         result = self.inventory()
         self._apply(result)
