@@ -243,6 +243,7 @@ class CombinedOrchestrationTests(unittest.TestCase):
         for name in ('prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage'):
             self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
         self.plan.target_netbox = '4.6.1'
+        self.plan.warnings = ()
         self.plan.stages = (
             SimpleNamespace(plugin_versions=(('example-plugin', '1.0.0'),)),
             SimpleNamespace(plugin_versions=(('example-plugin', '2.0.0'),)),
