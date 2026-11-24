@@ -91,7 +91,7 @@ def checkout_pinned_stage(
                       runner=runner)
     if status:
         raise UpgradeExecutionError('Tracked NetBox files changed before checkout')
-    _run_git(root, ['checkout', '--detach', stage.commit], runner=runner)
+    _run_git(root, ['checkout', '--no-overwrite-ignore', '--detach', stage.commit], runner=runner)
     actual = _run_git(root, ['rev-parse', '--verify', 'HEAD'], runner=runner)
     if actual != stage.commit:
         raise UpgradeExecutionError('NetBox checkout did not reach the approved revision')
