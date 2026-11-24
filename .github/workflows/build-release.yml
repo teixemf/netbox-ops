@@ -4,9 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Planned stable release tag (e.g. v0.6.0); no tag is created'
+        description: 'Planned stable release tag (e.g. v0.6.0)'
         required: true
         type: string
+      publish:
+        description: 'Publish after validation (creates tag and GitHub Release)'
+        type: boolean
+        required: true
+        default: false
+
+# Serialize all release candidates and publication attempts across versions.
+concurrency:
+  group: netbox-ops-release-publication
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -69,3 +79,34 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  publish:
+    name: Publish validated release
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    needs: [preflight, tests, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download validated assets from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: netbox-ops-${{ inputs.tag }}
+          path: dist
+
+      - name: Verify and publish the release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish-release.py "$RELEASE_TAG" "dist/netbox-ops-$RELEASE_TAG.tar.gz"
