@@ -348,6 +348,19 @@ def _apply(bundle: Path, initiator_fd: int, lock_fd: int) -> int:
                 if phase == 'rolled_back':
                     _clear_handoff(ACTIVE, bundle, record)
             raise
+        # The swap is already committed. A missing optional OS dependency or
+        # locally customized policy must not roll back the installed release.
+        if ACTIVE == Path('/opt/netbox-ops'):
+            policy = ACTIVE / 'netbox_ops/logrotate_policy.py'
+            if policy.is_file():
+                try:
+                    result = subprocess.run(
+                        [str(ACTIVE / 'venv/bin/python'), '-I', '-B', str(policy)],
+                        cwd=ACTIVE, env=_ENV, timeout=45, check=False)
+                    if result.returncode:
+                        write_audit('SELF-UPGRADE logrotate setup incomplete', path=LOG_PATH)
+                except (OSError, subprocess.SubprocessError):
+                    write_audit('SELF-UPGRADE logrotate setup incomplete', path=LOG_PATH)
         write_result(record, 'completed')
         _clear_handoff(ACTIVE, bundle, record)
     return 0
