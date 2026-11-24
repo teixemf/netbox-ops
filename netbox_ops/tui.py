@@ -858,7 +858,9 @@ class CursesMenu:
                         self._manage()
                     elif data == ('self-upgrade', ''):
                         self.stdscr.timeout(-1)
-                        self._self_upgrade()
+                        result = self._self_upgrade()
+                        if result is not None:
+                            return result
                     elif data[0] == 'upgrade':
                         self.stdscr.timeout(-1)
                         self._upgrade(data[1])
@@ -1034,35 +1036,77 @@ class CursesMenu:
         self._show_lines(title, [(error, 'failure')])
         return None
 
-    def _self_upgrade(self) -> None:
-        """Browse official releases without enabling installation."""
+    def _self_upgrade(self) -> int | None:
+        """Browse releases, review the next step and leave on handoff."""
         from .self_upgrade_releases import ReleaseDiscoveryError, Version, discover_releases
-        from .self_upgrade_ui import catalogue_lines, changelog_lines, compatibility_catalogue
+        from .self_upgrade_ui import (
+            HANDOFF_EXIT, catalogue_lines, changelog_lines, compatibility_catalogue,
+            execute_review, review_lines, review_upgrade, status_lines,
+        )
+        from .self_upgrade_archive import ReleaseArchiveError
 
         title = self.t('menu_13')
         try:
             installed = Version.parse(f'v{__version__}')
+            releases = sorted(discover_releases(), key=lambda item: item.version, reverse=True)
         except ValueError:
             self._show_lines(title, [(self.t('self_upgrade_invalid_version'), 'failure')])
-            return
-        try:
-            releases = sorted(discover_releases(), key=lambda item: item.version, reverse=True)
+            return None
         except (ReleaseDiscoveryError, OSError):
             self._show_lines(title, [(self.t('self_upgrade_discovery_failed'), 'failure')])
-            return
+            releases = []
         catalogue = compatibility_catalogue(releases, installed)
         lines = catalogue_lines(releases, self.t, installed, catalogue=catalogue)
         if not releases:
             self._show_lines(title, [(line, 'muted') for line in lines])
-            return
         title = f"{title} — {lines[0]}"
-        entries = [(line, '') for line in lines[1:-1]]
+        entries = [(line, '') for line in lines[1:-1]] if releases else []
+        entries.append((self.t('self_upgrade_status_menu'), ''))
         while True:
             selected = self._choose(title, entries, self.t('tui_back_hint'))
             if not isinstance(selected, int):
-                return
-            details = changelog_lines(releases[selected], self.t, installed, catalogue=catalogue)
+                return None
+            if selected == len(releases):
+                _, status = status_lines(self.t)
+                self._show_lines(title, [(line, '') for line in status])
+                continue
+            release = releases[selected]
+            details = changelog_lines(release, self.t, installed, catalogue=catalogue)
             self._show_lines(self.t('menu_13'), [(line, '') for line in details])
+            if catalogue.decision_for(release.version).status != 'compatible':
+                continue
+            action = self._choose(title, [(self.t('self_upgrade_install_menu'), 'warning')],
+                                  self.t('tui_back_hint'))
+            if action != 0:
+                continue
+            try:
+                review = review_upgrade(release.version)
+            except (ReleaseArchiveError, ReleaseDiscoveryError, OSError, ValueError):
+                self._show_lines(title, [(self.t('self_upgrade_review_failed'), 'failure')])
+                continue
+            self._show_lines(title, [(line, '') for line in review_lines(review, self.t)])
+            if review.decision.status != 'compatible':
+                continue
+            if not self._confirm_token(title, self.t('self_upgrade_install_warning'), review.token,
+                                       target_names=[f'v{step}' for step in review.decision.steps]):
+                continue
+
+            messages = []
+
+            def progress(message: str) -> None:
+                messages.append(message)
+                frame = self._frame(title, '')
+                if frame:
+                    h, w = frame
+                    for i, line in enumerate(messages[-max(1, h - 6):], 3):
+                        self._put(i, 3, safe_text(line)[:max(1, w - 6)], 'muted')
+                    self.stdscr.refresh()
+
+            result = execute_review(review, review.token, self.t, progress)
+            if result == HANDOFF_EXIT:
+                return result
+            self._show_lines(title, [(line, '') for line in messages])
+
 
     def _render_journal(self, panel: JournalPanel, y: int, rows: int,
                         x: int, width: int, *, scroll: int = 0) -> None:
@@ -2046,4 +2090,17 @@ def run_tui(t: Translator, config_path: Path = CONFIG_PATH, initial_view: str = 
         locale.setlocale(locale.LC_ALL, '')
     except locale.Error:
         pass
-    return curses.wrapper(lambda stdscr: CursesMenu(stdscr, t, config_path).run(initial_view))
+    from .self_upgrade_ui import HANDOFF_EXIT
+
+    menu = None
+
+    def run(stdscr):
+        nonlocal menu
+        menu = CursesMenu(stdscr, t, config_path)
+        return menu.run(initial_view)
+
+    result = curses.wrapper(run)
+    if result == HANDOFF_EXIT:
+        print((menu.t if menu is not None else t)('self_upgrade_submitted'), flush=True)
+        return 0
+    return result
