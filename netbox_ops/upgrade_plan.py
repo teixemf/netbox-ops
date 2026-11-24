@@ -24,7 +24,7 @@ from .upgrade_discovery import (
 _VERSION = re.compile(r'^v?([0-9]+)\.([0-9]+)\.([0-9]+)$')
 # Reviewed NetBox upgrade rule: crossing a major requires the final minor
 # of the previous major. Do not predict a future major's final minor.
-_LAST_MINOR_BEFORE_MAJOR = {2: 11, 3: 7}
+_LAST_MINOR_BEFORE_MAJOR: dict[int, int] = {}
 _UPGRADING_DOCS = 'https://netbox.readthedocs.io/en/stable/installation/upgrading/'
 _RELEASE_NOTES = 'https://netbox.readthedocs.io/en/stable/release-notes/version-{}.{}'
 
@@ -120,7 +120,7 @@ def _verified_tags(available_tags: Sequence[str]) -> tuple[str, ...]:
         if not isinstance(item, str):
             raise UpgradePlanError('Invalid Git release tag')
         # Only standard NetBox stable tags count as verified candidates.
-        if item.startswith('v') and _VERSION.fullmatch(item):
+        if item.startswith('v') and _VERSION.fullmatch(item) and _number(item)[0] >= 4:
             releases.add(_release(item))
     return tuple(sorted(releases, key=_number))
 
@@ -133,6 +133,8 @@ def required_netbox_path(current: str, target: str,
     patch in the last minor of each crossed major; never invent a tag.
     """
     present, destination = _number(current), _number(target)
+    if present[0] < 4 or destination[0] < 4:
+        raise UpgradePlanError('NetBox 4.0 or newer is required')
     if destination < present:
         raise UpgradePlanError('NetBox downgrades are not supported')
     if destination == present:
@@ -175,7 +177,7 @@ def _release_notes_between(current: str, target: str) -> tuple[str, ...]:
     links = []
     # Keep a finite, reviewed range: the documentation for every crossed
     # minor must be read, even when no interim checkout is needed.
-    known_majors = {3: 7, 4: 7}
+    known_majors = {**_LAST_MINOR_BEFORE_MAJOR, 4: 7}
     for major in range(start[0], finish[0] + 1):
         first = start[1] + 1 if major == start[0] else 0
         last = finish[1] if major == finish[0] else known_majors.get(major)
