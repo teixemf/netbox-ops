@@ -64,9 +64,14 @@ def prepare_release(
             raise
 
 
+def _require_root() -> None:
+    if os.geteuid() != 0:
+        raise ReleaseArchiveError('Self-upgrade preparation requires root privileges')
+
+
 def prepare_next_release(
     target: Version, *,
-    expected_installed: Version,
+    expected_installed: InstalledRelease,
     expected_steps: tuple[Version, ...],
 ) -> PreparedRelease:
     """Recheck a reviewed plan and prepare exactly its next required release.
@@ -77,18 +82,17 @@ def prepare_next_release(
     A changed installation or plan requires a new review. Each subsequent
     intermediate upgrade must be re-evaluated from the newly installed version.
     """
-    if os.geteuid() != 0:
-        raise ReleaseArchiveError('Self-upgrade preparation requires root privileges')
-    if (not isinstance(target, Version) or not isinstance(expected_installed, Version)
-            or target <= expected_installed or not isinstance(expected_steps, tuple)
+    _require_root()
+    if (not isinstance(target, Version) or not isinstance(expected_installed, InstalledRelease)
+            or target <= expected_installed.version or not isinstance(expected_steps, tuple)
             or not expected_steps or expected_steps[-1] != target
             or any(not isinstance(step, Version) for step in expected_steps)
             or tuple(sorted(set(expected_steps))) != expected_steps
-            or expected_steps[0] <= expected_installed):
+            or expected_steps[0] <= expected_installed.version):
         raise ReleaseArchiveError('Invalid reviewed upgrade plan')
     local = inspect_installation()
-    if local.version != expected_installed:
-        raise ReleaseArchiveError('Installed version changed; review the upgrade again')
+    if local != expected_installed:
+        raise ReleaseArchiveError('Installation changed; review the upgrade again')
     try:
         catalogue = discover_compatibility(installed=local.version, environment=local.environment)
     except (ReleaseDiscoveryError, OSError) as exc:
