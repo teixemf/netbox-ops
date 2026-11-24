@@ -25,6 +25,7 @@ from .self_upgrade_helper import (
 from .self_upgrade_installation import ACTIVE, inspect_installation, verify_candidate_layout
 from .self_upgrade_prepare import PreparedRelease
 from .self_upgrade_releases import Version
+from .self_upgrade_result import write_result
 from .self_upgrade_runtime import _trusted_python, validate_installation_runtime
 from .self_upgrade_transaction import SwapError, _sync_parent
 from .services import LOCK_PATH, LOG_PATH, ExclusiveLock, write_audit
@@ -232,21 +233,41 @@ def launch_prepared_release(prepared: PreparedRelease) -> int:
         launched = False
         try:
             bundle = _build_bundle(prepared, ACTIVE, interpreter)
+            write_result(_read_record(bundle), 'submitted')
             write_audit(f'SELF-UPGRADE handoff requested installed=v{prepared.installed.version} '
                         f'next=v{prepared.release.version} target=v{prepared.target}', path=LOG_PATH)
             child = subprocess.Popen(
                 [str(interpreter), '-I', '-B', str(bundle / 'runner.py'),
                  'apply', str(descriptor), str(lock.fd)],
                 cwd=bundle, env=_ENV, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 pass_fds=(descriptor, lock.fd), start_new_session=True,
             )
             launched = True
             return child.pid
+        except Exception:
+            if bundle is not None:
+                write_result(_read_record(bundle), 'failed')
+            raise
         finally:
             os.close(descriptor)
             if not launched and bundle is not None:
                 shutil.rmtree(bundle)
                 _sync_parent(ACTIVE.parent)
+
+
+def discard_prepared_release(prepared: PreparedRelease) -> None:
+    """Discard an unused candidate, never a stage owned by a live handoff."""
+    _root()
+    with ExclusiveLock(LOCK_PATH):
+        if _pending(ACTIVE) or _handoff(ACTIVE).exists() or _handoff(ACTIVE).is_symlink():
+            raise SwapError('A handoff may own the candidate; recovery is required')
+        stage = _stage_path(ACTIVE, prepared.path.name)
+        if stage != prepared.path or _identity(stage) != prepared.identity:
+            raise SwapError('Prepared installation identity changed')
+        verify_candidate_layout(stage, prepared.release.version)
+        shutil.rmtree(stage)
+        _sync_parent(ACTIVE.parent)
 
 
 def _preflight(active: Path, staged: Path, record: dict) -> None:
@@ -310,6 +331,7 @@ def _apply(bundle: Path, initiator_fd: int, lock_fd: int) -> int:
     # Retain the inherited descriptor even when the transaction raises.
     with operation_lock(LOCK_PATH, lock_fd):
         try:
+            write_result(record, 'applying')
             run_approved_swap(
                 staged, initiator_fd=initiator_fd, lock_fd=lock_fd,
                 active=ACTIVE, lock_path=LOCK_PATH, audit_path=LOG_PATH,
@@ -317,9 +339,16 @@ def _apply(bundle: Path, initiator_fd: int, lock_fd: int) -> int:
                 validate=lambda active: _validate(active, record),
             )
         except Exception:
-            if not _pending(ACTIVE):
-                _clear_handoff(ACTIVE, bundle, record)
+            if _pending(ACTIVE):
+                write_result(record, 'recovery_required')
+            else:
+                old_id = tuple(record['installed']['identity'])
+                phase = 'rolled_back' if _identity(ACTIVE) == old_id else 'recovery_required'
+                write_result(record, phase)
+                if phase == 'rolled_back':
+                    _clear_handoff(ACTIVE, bundle, record)
             raise
+        write_result(record, 'completed')
         _clear_handoff(ACTIVE, bundle, record)
     return 0
 
@@ -331,6 +360,14 @@ def _recover(bundle: Path) -> str:
             raise SwapError('Operation lock was not acquired')
         result = recover_interrupted_upgrade(active=ACTIVE, lock_path=LOCK_PATH,
                                              audit_path=LOG_PATH, lock_fd=lock.fd)
+        current = _identity(ACTIVE)
+        if current == tuple(record['identity']):
+            phase = 'completed'
+        elif current == tuple(record['installed']['identity']):
+            phase = 'rolled_back' if result == 'rollback' else 'cancelled'
+        else:
+            raise SwapError('Unknown active installation after recovery')
+        write_result(record, phase)
         _clear_handoff(ACTIVE, bundle, record)
         return result
 
