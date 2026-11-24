@@ -12,6 +12,7 @@ It brings common administration tasks into one terminal-based tool, designed for
 - Use an interactive terminal interface or CLI commands.
 - Automatically select English or European Portuguese from the system locale (English fallback); override with `--lang en` or `--lang pt`.
 - Detect common RHEL- and Debian-family service configurations.
+- Configure weekly audit log rotation (four archives) during installation and upgrades when the OS `logrotate` package is available. If it is missing, install it and rerun `upgrade.sh`; custom policies are preserved.
 
 **In development:** NetBox and plugin upgrade/update operations are not yet implemented.
 
