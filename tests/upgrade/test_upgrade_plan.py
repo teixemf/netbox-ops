@@ -191,7 +191,7 @@ class PlannerTests(unittest.TestCase):
         self.assertIs(first.source.preflights[0][2], passed)
         second = edit_upgrade_plan(first, selected_plugins={'sample-plugin': '2.0.0'}, reviewer=self.reviewer)
         self.assertEqual(second.source.preflights, ())
-        self.assertEqual(self.calls[-2][4], (None,))
+        self.assertEqual(self.calls[-1][4], (None,))
 
     def test_edit_target_rebuilds_stages(self):
         first = self.build(target_netbox='4.6.2')
