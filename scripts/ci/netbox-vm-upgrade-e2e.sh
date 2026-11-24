@@ -15,7 +15,7 @@ marker=/var/lib/netbox-ops/upgrade.pending
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 umask 022
 apt-get update -qq
-apt-get install -y --no-install-recommends git
+NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git
 old=4.7.2
 target=4.7.3
 python=/usr/bin/python3.12
@@ -55,9 +55,18 @@ for dir in media scripts reports; do
 done
 runuser -u postgres -- dropdb --if-exists netbox
 runuser -u postgres -- createdb --owner=netbox netbox
-# The fixture itself uses the official upstream installer.
-(cd "$root" && PYTHON="$python" bash upgrade.sh)
+# The 4.7.2 tag leaves pymdown-extensions unpinned; 13.x breaks
+# its documentation builder. Use the exact pin from upstream 4.7.3
+# only while creating the source fixture. The tested upgrade receives
+# no fixture constraint, and executes the unmodified official script.
+if [[ "$old" == 4.7.2 ]]; then
+  printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
+  (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
+else
+  (cd "$root" && PYTHON="$python" bash upgrade.sh)
+fi
 systemctl start netbox netbox-rq
+echo "Fixture installed: NetBox $old"
 wait_health() {
   local version=$1
   for i in $(seq 1 60); do
