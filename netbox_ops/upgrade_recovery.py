@@ -164,8 +164,9 @@ def _capture_quiesced_recovery(
             'target_netbox': plan.target_netbox,
             'plan_fingerprint': plan.fingerprint,
             'stages': [s.netbox_version for s in plan.stages],
-            'stage_commits': [{'version': stage.version, 'commit': stage.commit}
-                              for stage in pinned_stages],
+            'stage_commits': [{'version': stage.version, 'commit': stage.commit,
+                               'plugin_versions': list(planned.plugin_versions)}
+                              for stage, planned in zip(pinned_stages, plan.stages, strict=True)],
             'python_version': plan.source.installation.python_version,
             'original_reference': plan.source.installation.reference,
             'database': cfg.database,
