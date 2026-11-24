@@ -101,7 +101,7 @@ class GitInstallationTests(unittest.TestCase):
             inspect_git_installation(self.root)
 
     def test_pre_v4_installation_is_unsupported(self):
-        (self.root / 'netbox/release.yaml').write_text('version: 3.7.8\\n')
+        (self.root / 'netbox/release.yaml').write_text('version: 3.7.8\n')
         self.git('add', 'netbox/release.yaml')
         self.git('commit', '-qm', 'Unsupported fixture')
         with self.assertRaisesRegex(UpgradeDiscoveryError, '4.0 or newer'):
