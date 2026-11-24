@@ -101,7 +101,7 @@ def make_plan(context: UpgradeContext, operation: str, target: str | None,
         raise UpgradeExecutionError('Select a target NetBox version')
     if operation != 'netbox' and not selected:
         raise UpgradeExecutionError('Select at least one plugin')
-    if operation == 'netbox' and selected or operation == 'plugins' and target:
+    if (operation == 'netbox' and selected) or (operation == 'plugins' and target):
         raise UpgradeExecutionError('Selection does not match the upgrade operation')
     if set(selected) - set(dict(context.plugins)):
         raise UpgradeExecutionError('Select only installed configured or declared plugins')
@@ -182,7 +182,7 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
             for target in context.targets:
                 print(target)
             return 0
-        selected = parse_plugins(args.plugin or [], getattr(args, 'version', None)
+        selected = parse_plugins(getattr(args, 'plugin', None) or [], getattr(args, 'version', None)
                                  if args.action == 'plugins' else None)
         if getattr(args, 'all', False) or getattr(args, 'plugins', None) == 'all':
             selected = dict.fromkeys(name for name, _ in context.plugins)
