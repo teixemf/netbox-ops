@@ -56,6 +56,7 @@ class HandoffTests(unittest.TestCase):
         self.start_patch('netbox_ops.self_upgrade_handoff.ACTIVE', self.active)
         self.start_patch('netbox_ops.self_upgrade_handoff.LOCK_PATH', self.lock_path)
         self.start_patch('netbox_ops.self_upgrade_handoff.LOG_PATH', self.audit_path)
+        self.result = self.start_patch('netbox_ops.self_upgrade_handoff.write_result')
         self.inspect = self.start_patch('netbox_ops.self_upgrade_handoff.inspect_installation',
                                         return_value=self.local)
         self.layout = self.start_patch('netbox_ops.self_upgrade_handoff.verify_candidate_layout')
