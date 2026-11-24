@@ -11,24 +11,30 @@ from netbox_ops.cli import main
 from netbox_ops.i18n import Translator
 from netbox_ops.self_upgrade_archive import ReleaseArchiveError
 from netbox_ops.self_upgrade_catalogue import CompatibilityCatalogue
-from netbox_ops.self_upgrade_compatibility import LocalEnvironment
-from netbox_ops.self_upgrade_manifest import read_release_requirements
+from netbox_ops.self_upgrade_compatibility import LocalEnvironment, ReleaseRequirements
+from netbox_ops.self_upgrade_manifest import encode_manifest, read_release_requirements
 from netbox_ops.self_upgrade_releases import Version, parse_releases
 from netbox_ops.self_upgrade_ui import detect_environment
 from netbox_ops.tui import CursesMenu
 from tests.helpers.fake_screen import FakeScreen
-from tests.test_self_upgrade_manifest import payload, row
+from tests.test_self_upgrade_manifest import row
 
 
 class CompatibilityInterfaceTests(unittest.TestCase):
     def setUp(self):
         self.installed = Version(0, 5, 0)
         self.environment = LocalEnvironment((3, 12), 'debian', 'archive')
+        def generate(tag, minimum=(3, 12), steps=()):
+            return encode_manifest(ReleaseRequirements(
+                Version.parse(tag), minimum, None,
+                frozenset({'debian', 'rhel'}), frozenset({'archive'}),
+                tuple(Version.parse(step) for step in steps),
+            ))
         self.contents = {
-            'v0.4.0': payload('v0.4.0'),
-            'v0.6.0': payload('v0.6.0'),
-            'v0.7.0': payload('v0.7.0', required_intermediates=['v0.6.0']),
-            'v0.8.0': payload('v0.8.0', python_min='3.13'),
+            'v0.4.0': generate('v0.4.0'),
+            'v0.6.0': generate('v0.6.0'),
+            'v0.7.0': generate('v0.7.0', steps=('v0.6.0',)),
+            'v0.8.0': generate('v0.8.0', minimum=(3, 13)),
             'v0.9.0': b'{}',
         }
         self.releases = parse_releases([row(tag, data) for tag, data in self.contents.items()])
