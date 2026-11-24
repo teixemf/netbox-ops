@@ -13,7 +13,7 @@ class OrchestrationTests(unittest.TestCase):
         self.calls = Mock()
         names = (
             'validate_execution_approval', 'pin_release_stages', 'SystemdServices',
-            'write_audit', 'stop_upgrade_writers', '_capture_quiesced_recovery',
+            'write_audit', 'begin_maintenance', 'finish_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
             'require_quiesced_writers', 'run_stage', 'start_upgrade_writers',
         )
         for name in names:
@@ -37,8 +37,8 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIs(result, calls._capture_quiesced_recovery.return_value)
         names = [call[0] for call in calls.mock_calls]
         ordered = ('rebuild', 'validate_execution_approval', 'pin_release_stages',
-                   'stop_upgrade_writers', '_capture_quiesced_recovery',
-                   'run_stage', 'start_upgrade_writers', 'health')
+                   'begin_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
+                   'run_stage', 'start_upgrade_writers', 'health', 'finish_maintenance')
         indices = [names.index(name) for name in ordered]
         self.assertEqual(indices, sorted(indices))
         self.assertEqual(calls.run_stage.call_count, 2)
@@ -58,6 +58,7 @@ class OrchestrationTests(unittest.TestCase):
                         self.execute()
                     self.calls.start_upgrade_writers.assert_not_called()
                     self.calls.health.assert_not_called()
+                    self.calls.finish_maintenance.assert_not_called()
                     self.assertEqual(self.calls.run_stage.call_count,
                                      1 if failure == 'run_stage' else 0)
                 finally:
@@ -81,3 +82,10 @@ class OrchestrationTests(unittest.TestCase):
         with self.assertRaisesRegex(UpgradeExecutionError, 'maintenance unverified'):
             self.execute()
         self.calls.start_upgrade_writers.assert_called_once()
+
+    def test_pending_marker_blocks_upgrade(self):
+        self.calls.begin_maintenance.side_effect = UpgradeExecutionError('pending')
+        with self.assertRaises(UpgradeExecutionError):
+            self.execute()
+        self.calls.stop_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
