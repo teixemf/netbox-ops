@@ -34,7 +34,7 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.notes = self.archive.with_name(f'netbox-ops-{TAG}.notes.md')
 
     def package(self, *, version='0.6.0', readme_version='0.6.0',
-                changelog=None, mode=0o755, policy=None):
+                changelog=None, mode=0o755, policy=None, uninstall_mode=None):
         files = {
             'netbox_ops/__init__.py': f'__version__ = "{version}"\n',
             'README.md': f'**Current version: {readme_version} — Example**\n',
@@ -46,12 +46,15 @@ class ReleaseCandidateTests(unittest.TestCase):
             'upgrade.sh': '#!/bin/sh\n', 'LICENSE': 'Example\n',
             'config.example.json': '{}\n',
         }
+        if uninstall_mode is not None:
+            files['uninstall.sh'] = '#!/bin/sh\n'
         with tarfile.open(self.archive, 'w:gz') as bundle:
             for name, content in files.items():
                 raw = content.encode()
                 member = tarfile.TarInfo(f'netbox-ops/{name}')
                 member.size = len(raw)
-                member.mode = mode if name in ('install.sh', 'upgrade.sh') else 0o644
+                member.mode = (uninstall_mode if name == 'uninstall.sh' else
+                               mode if name in ('install.sh', 'upgrade.sh') else 0o644)
                 bundle.addfile(member, io.BytesIO(raw))
 
     def invoke(self, action, *, tag=TAG, expected=0):
@@ -72,6 +75,13 @@ class ReleaseCandidateTests(unittest.TestCase):
         before = [p.read_bytes() for p in (self.checksum, self.manifest, self.notes)]
         self.invoke('build')
         self.assertEqual(before, [p.read_bytes() for p in (self.checksum, self.manifest, self.notes)])
+
+    def test_new_uninstaller_must_be_executable_when_present(self):
+        self.package(uninstall_mode=0o755)
+        self.invoke('build')
+        self.invoke('validate')
+        self.package(uninstall_mode=0o644)
+        self.invoke('build', expected=1)
 
     def test_invalid_candidate_does_not_generate_assets(self):
         for kwargs in (

@@ -68,7 +68,10 @@ def candidate_contents(archive, tag):
         if not section:
             raise ValueError('Release notes are empty')
         notes = (headings[0].group(0) + '\n\n' + section + '\n').encode('utf-8')
-        for name in ('install.sh', 'upgrade.sh'):
+        scripts = ['install.sh', 'upgrade.sh']
+        if 'netbox-ops/uninstall.sh' in bundle.getnames():
+            scripts.append('uninstall.sh')
+        for name in scripts:
             mode = bundle.getmember(f'netbox-ops/{name}').mode
             if mode & 0o111 != 0o111:
                 raise ValueError(f'Installer script is not executable: {name}')
