@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from netbox_ops.self_upgrade_archive import (
     ReleaseArchiveError, verify_release_archive,
@@ -17,6 +18,8 @@ REQUIRED = (
     "netbox-ops/install.sh",
     "netbox-ops/upgrade.sh",
     "netbox-ops/netbox_ops/__init__.py",
+    "netbox-ops/LICENSE", "netbox-ops/README.md",
+    "netbox-ops/CHANGELOG.md", "netbox-ops/config.example.json",
 )
 
 
@@ -57,7 +60,9 @@ class ReleaseArchiveTests(unittest.TestCase):
 
     def test_reject_runtime_files_and_conflicting_paths(self):
         for name in ("netbox-ops/venv/bin/python", "netbox-ops/.git/config",
-                     "netbox-ops/netbox_ops.py/child", "netbox-ops/netbox_ops"):
+                     "netbox-ops/netbox_ops.py/child", "netbox-ops/netbox_ops",
+                     "netbox-ops/local.conf", "netbox-ops/netbox_ops/__pycache__/bad.pyc",
+                     "netbox-ops/netbox_ops/line\nfeed.py"):
             with self.subTest(name=name):
                 build_archive(self.archive, (name,))
                 with self.assertRaises(ReleaseArchiveError):
@@ -111,6 +116,25 @@ class ReleaseArchiveTests(unittest.TestCase):
 
     def test_reject_corrupt_archive(self):
         self.archive.write_bytes(b"not gzip")
+        with self.assertRaises(ReleaseArchiveError):
+            verify_release_archive(self.archive, checksum(self.archive))
+
+    def test_bound_decompressed_stream_before_tar_parsing(self):
+        build_archive(self.archive)
+        with patch("netbox_ops.self_upgrade_archive.MAX_TAR_BYTES", 4096):
+            with self.assertRaisesRegex(ReleaseArchiveError, "tar stream limit"):
+                verify_release_archive(self.archive, checksum(self.archive))
+
+    def test_reject_unexpected_regular_like_member_type(self):
+        with tarfile.open(self.archive, "w:gz") as bundle:
+            for name in REQUIRED:
+                member = tarfile.TarInfo(name)
+                member.size = 1
+                bundle.addfile(member, io.BytesIO(b"x"))
+            member = tarfile.TarInfo("netbox-ops/netbox_ops/unexpected.py")
+            member.type = tarfile.CONTTYPE
+            member.size = 1
+            bundle.addfile(member, io.BytesIO(b"x"))
         with self.assertRaises(ReleaseArchiveError):
             verify_release_archive(self.archive, checksum(self.archive))
 
