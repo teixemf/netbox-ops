@@ -177,7 +177,7 @@ def _execute_upgrade(
                        for name, version in planned.plugin_versions):
                     raise UpgradeExecutionError('An approved plugin version changed during the stage')
                 completed = index
-                    report('validated', completed)
+                report('validated', completed)
                 write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
             phase = 'start writers'
             report('start', completed)
