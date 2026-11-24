@@ -42,6 +42,27 @@ class ReleaseArchiveTests(unittest.TestCase):
         build_archive(self.archive)
         verify_release_archive(self.archive, checksum(self.archive))
 
+    def test_git_archive_directory_entries_are_accepted(self):
+        with tarfile.open(self.archive, "w:gz") as bundle:
+            for name in ("netbox-ops/", "netbox-ops/netbox_ops/"):
+                member = tarfile.TarInfo(name)
+                member.type = tarfile.DIRTYPE
+                member.mode = 0o775
+                bundle.addfile(member)
+            for name in REQUIRED:
+                member = tarfile.TarInfo(name)
+                member.size = 1
+                bundle.addfile(member, io.BytesIO(b"x"))
+        verify_release_archive(self.archive, checksum(self.archive))
+
+    def test_reject_runtime_files_and_conflicting_paths(self):
+        for name in ("netbox-ops/venv/bin/python", "netbox-ops/.git/config",
+                     "netbox-ops/netbox_ops.py/child", "netbox-ops/netbox_ops"):
+            with self.subTest(name=name):
+                build_archive(self.archive, (name,))
+                with self.assertRaises(ReleaseArchiveError):
+                    verify_release_archive(self.archive, checksum(self.archive))
+
     def test_checksum_mismatch_and_invalid_name(self):
         build_archive(self.archive)
         with self.assertRaises(ReleaseArchiveError):
