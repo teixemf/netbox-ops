@@ -17,7 +17,11 @@ _CHECKSUM = re.compile(r"^([0-9a-fA-F]{64})  (netbox-ops-v[0-9]+\.[0-9]+\.[0-9]+
 _REQUIRED = frozenset({
     "netbox-ops/netbox_ops.py", "netbox-ops/install.sh",
     "netbox-ops/upgrade.sh", "netbox-ops/netbox_ops/__init__.py",
+    "netbox-ops/LICENSE", "netbox-ops/README.md",
+    "netbox-ops/CHANGELOG.md", "netbox-ops/config.example.json",
 })
+_ROOT_FILES = frozenset(PurePosixPath(name).name for name in _REQUIRED
+                        if len(PurePosixPath(name).parts) == 2)
 
 
 class ReleaseArchiveError(Exception):
@@ -69,8 +73,17 @@ def validate_archive(archive: Path) -> None:
                     if not (name in ("netbox-ops", "netbox-ops/") and member.isdir()):
                         raise ReleaseArchiveError(f"Unsafe archive path: {name}")
                 name = str(path)
-                if len(path.parts) >= 2 and path.parts[1] in {"venv", ".git", "__pycache__"}:
-                    raise ReleaseArchiveError("Archive contains installation runtime or Git data")
+                if len(path.parts) >= 2:
+                    top = path.parts[1]
+                    if top == "netbox_ops":
+                        if len(path.parts) == 2 and not member.isdir():
+                            raise ReleaseArchiveError("Invalid package directory")
+                        if any(part in {".git", "venv", "__pycache__"} for part in path.parts[2:]):
+                            raise ReleaseArchiveError("Archive contains installation runtime or Git data")
+                    elif top not in _ROOT_FILES or len(path.parts) != 2 or not member.isfile():
+                        raise ReleaseArchiveError("Unknown release archive layout")
+                if any(not char.isprintable() for char in name):
+                    raise ReleaseArchiveError("Unsafe archive path characters")
                 if name in seen:
                     raise ReleaseArchiveError("Duplicate archive member")
                 seen.add(name)
