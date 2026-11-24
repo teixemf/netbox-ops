@@ -86,6 +86,7 @@ def _read_state(path: Path) -> dict:
         raise SwapError('Cannot read swap transaction state') from exc
     if (not isinstance(data, dict) or set(data) != {'format', 'phase', 'old', 'new'}
             or data['format'] != 2
+            or type(data['phase']) is not str
             or data['phase'] not in {'prepared', 'old_moved', 'new_active', 'validated'}
             or any(not isinstance(data[k], list) or len(data[k]) != 2
                    or any(type(n) is not int or n < 1 for n in data[k])
