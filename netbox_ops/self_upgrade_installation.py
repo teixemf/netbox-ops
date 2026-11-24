@@ -24,7 +24,7 @@ _REQUIRED_FILES = frozenset({
     'install.sh', 'upgrade.sh', 'netbox_ops.py',
 })
 _ALLOWED_TOP = _REQUIRED_FILES | {'netbox_ops', 'venv', '__pycache__'}
-_PYTHON_NAME = re.compile(r'python(?:3(?:\.[0-9]+)?)?')
+_PYTHON_NAME = re.compile(r'python(?:3(?:\.[0-9]+t?)?)?')
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ def _check_python_link(root: Path, path: Path, uid: int) -> None:
             raise ReleaseArchiveError('Unexpected virtual environment link')
         return
     if path.parent != root / 'venv/bin' or not _PYTHON_NAME.fullmatch(path.name):
-        raise ReleaseArchiveError('Unexpected installation symlink')
+        raise ReleaseArchiveError(f'Unexpected installation symlink: {path.relative_to(root)}')
     if not target.is_file() or not os.access(target, os.X_OK):
         raise ReleaseArchiveError('Invalid virtual environment Python link')
     if target.is_relative_to(root):
