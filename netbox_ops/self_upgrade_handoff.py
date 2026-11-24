@@ -18,7 +18,6 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
-from .self_upgrade_archive import ReleaseArchiveError
 from .self_upgrade_catalogue import discover_compatibility
 from .self_upgrade_helper import (
     open_initiator_pidfd, operation_lock, recover_interrupted_upgrade, run_approved_swap,
@@ -171,7 +170,15 @@ def _build_bundle(prepared: PreparedRelease, active: Path, interpreter: Path) ->
         raise SwapError('Prepared installation identity changed')
     if inspect_installation() != prepared.installed:
         raise SwapError('Installed release changed since preparation')
+    if (not prepared.steps or prepared.steps[0] != prepared.release.version
+            or prepared.steps[-1] != prepared.target
+            or tuple(sorted(set(prepared.steps))) != prepared.steps
+            or prepared.steps[0] <= prepared.installed.version):
+        raise SwapError('Invalid prepared upgrade path')
     verify_candidate_layout(stage, prepared.release.version)
+    mode = stat.S_IMODE(active.stat().st_mode)
+    if mode & ~0o777 or mode & 0o022:
+        raise SwapError('Unsupported active installation permissions')
     record = {
         'format': 1, 'stage': stage.name, 'identity': list(prepared.identity),
         'digest': _digest_tree(stage, sync=True),
@@ -179,7 +186,7 @@ def _build_bundle(prepared: PreparedRelease, active: Path, interpreter: Path) ->
         'target': f'v{prepared.target}',
         'steps': [f'v{step}' for step in prepared.steps],
         'release': _snapshot(prepared.release),
-        'mode': stat.S_IMODE(active.stat().st_mode),
+        'mode': mode,
     }
     data = json.dumps(record, sort_keys=True).encode()
     if len(data) > _MAX_RECORD:
@@ -301,6 +308,7 @@ def _apply(bundle: Path, initiator_fd: int, lock_fd: int) -> int:
         try:
             run_approved_swap(
                 staged, initiator_fd=initiator_fd, lock_fd=lock_fd,
+                active=ACTIVE, lock_path=LOCK_PATH, audit_path=LOG_PATH,
                 preflight=lambda active, candidate: _preflight(active, candidate, record),
                 validate=lambda active: _validate(active, record),
             )
@@ -317,7 +325,8 @@ def _recover(bundle: Path) -> str:
         record = _read_record(bundle)
         if lock.fd is None:
             raise SwapError('Operation lock was not acquired')
-        result = recover_interrupted_upgrade(lock_fd=lock.fd)
+        result = recover_interrupted_upgrade(active=ACTIVE, lock_path=LOCK_PATH,
+                                             audit_path=LOG_PATH, lock_fd=lock.fd)
         _clear_handoff(ACTIVE, bundle, record)
         return result
 
@@ -333,7 +342,9 @@ def main() -> int:
         if len(args) == 3 and args[0] == 'apply':
             initiator_fd, lock_fd = map(int, args[1:])
             try:
-                return _apply(bundle, initiator_fd, lock_fd)
+                result = _apply(bundle, initiator_fd, lock_fd)
+                print('Self-upgrade step completed. See operations.log for details.')
+                return result
             finally:
                 os.close(initiator_fd)
                 os.close(lock_fd)
