@@ -188,8 +188,9 @@ def _execute_upgrade(
                 write_audit(f'NetBox upgrade failed phase={phase} completed={completed} recovery={location}')
             except Exception:
                 pass
+            last = stages[completed - 1].version if completed else 'none'
             raise UpgradeExecutionError(
                 f'Upgrade failed during {phase}; recovery: {location}; '
-                f'completed stages: {completed}/{len(stages)}; '
+                f'completed stages: {completed}/{len(stages)}; last completed release: {last}; '
                 'inspect service state and recovery.json before manual recovery; no automatic rollback'
             ) from None
