@@ -232,6 +232,7 @@ def run_plugin_stage(
     if live != installation or inventory_reader(live) != plan.source.inventory:
         raise UpgradeExecutionError('NetBox installation or plugins changed before installation')
     _apply_requirements(root, prepared)
+    require_quiesced_writers(systemd)
     env = upgrade_environment(base_python)
     env.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR='1')
     python = str(installation.python)
@@ -247,7 +248,8 @@ def run_plugin_stage(
         raise UpgradeExecutionError('NetBox runtime changed during plugin installation')
     inventory = inventory_reader(final)
     actual = {normalize_name(p.name): p.version for p in inventory.packages}
-    if (inventory.enabled != plan.source.inventory.enabled
+    if (len(actual) != len(inventory.packages)
+            or inventory.enabled != plan.source.inventory.enabled
             or inventory.requirements_hash != hashlib.sha256(prepared.requirements).hexdigest()
             or any(actual.get(name) != version for name, version in prepared.expected)):
         raise UpgradeExecutionError('Installed plugin or core versions differ from approved pins')
