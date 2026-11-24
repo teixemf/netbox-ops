@@ -17,28 +17,46 @@ The tag, `netbox_ops/__init__.py` version, and release notes must agree.
 1. Make sure the intended changes are in `dev` and CI passes.
 2. Update `netbox_ops/__init__.py`, current-version documentation, and `CHANGELOG.md` in a PR to `dev`.
 3. Open a PR from `dev` to `main`. Review the changes and merge using **Merge Commit**.
-4. Tag the release commit on `main` and publish a GitHub Release with concise English notes:
+4. Run **Actions → Build Release → Run workflow** on `main` and enter the planned stable tag (for example, `v0.6.0`). The workflow runs the required CI tests on the selected commit, then builds and validates the archive, SHA-256, compatibility manifest and release notes. It uploads those four files as a run artifact. It does not create a tag or publish anything.
+5. Review the validated candidate and confirm the tested commit is the intended release commit. Until automated publishing is implemented (#74), tag that exact commit and publish manually:
 
    ```bash
    git fetch origin main --tags
-   git switch main
-   git pull --ff-only origin main
-   git tag -a vX.Y.Z -m "netbox-ops vX.Y.Z"
+   git tag -a vX.Y.Z <validated-commit-sha> -m "netbox-ops vX.Y.Z"
    git push origin vX.Y.Z
    ```
 
-5. Run **Actions → Build Release → Run workflow** on the default branch and enter the existing annotated release tag (for example, `v0.5.0`). The workflow checks out that tag, builds and validates `netbox-ops-vX.Y.Z.tar.gz`, and uploads it as a run artifact. Download the artifact and extract its ZIP wrapper to get the `.tar.gz` installation package.
+6. In GitHub **Releases**, create a release using the existing tag, use the generated `.notes.md` content for the release description, and upload the three validated assets:
+   - `netbox-ops-vX.Y.Z.tar.gz`
+   - `netbox-ops-vX.Y.Z.tar.gz.sha256`
+   - `netbox-ops-vX.Y.Z.compatibility.json`
 
-   For a local build instead (requires Git, tar and gzip):
+   Do not substitute GitHub's automatic source archives. Do not rebuild or modify the validated assets during publication.
+7. Verify the published assets. Published release-pair testing is tracked in #132.
 
-   ```bash
-   bash scripts/build-release.sh vX.Y.Z
-   tar -tzf dist/netbox-ops-vX.Y.Z.tar.gz
-   ```
+## Build a candidate locally
 
-   The package contains `netbox-ops/` with the application, installer and configuration example. It does not include development tests, CI files or local runtime data. The build script checks that the tag matches the committed package version.
-6. In GitHub **Releases**, create a release using the existing tag, add concise English notes from the changelog, and **upload `netbox-ops-vX.Y.Z.tar.gz` as a release asset**. GitHub's automatic source archives are not a replacement for the installation asset.
-7. Download the published asset and verify that extraction creates `netbox-ops/install.sh` with executable permissions, and that the packaged version matches the tag.
+Use Python 3.12 or newer, Git, tar and gzip:
+
+```bash
+bash scripts/build-release.sh
+python3 scripts/release-candidate.py validate dist/netbox-ops-vX.Y.Z.tar.gz vX.Y.Z
+```
+
+The build reads the version, changelog and compatibility requirements from the
+committed package. It rejects version mismatches, missing release notes, unsafe
+archive entries and non-executable installer scripts. The compatibility policy
+is committed in `netbox_ops/release_requirements.json`; review it whenever the
+supported environment or mandatory upgrade path changes. The manifest is
+encoded and validated with the self-upgrade consumer's schema.
+
+For a tagged revision containing the release requirements file, the same
+builder accepts the existing tag as its argument. Historical packages without
+the compatibility policy cannot be rebuilt with the new validator; their
+original published assets remain unchanged.
+
+The pre-release VM tests (#79) use these same build artifacts without creating
+tags or publishing releases.
 
 Before releasing changes to restore, upgrade, installation, or other destructive operations, validate the affected paths in a disposable environment. Where RHEL/Debian behavior differs, test the relevant platform. State known limitations openly; defer a stable release if a critical safety path has not been validated.
 
