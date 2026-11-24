@@ -26,13 +26,15 @@ CORE = 'Django==4.2.15\npsycopg[c,pool]==3.2.1'
 
 class CombinedStageTests(unittest.TestCase):
     def setUp(self):
+        # Synthetic reviewed boundary for a future major, not a production rule.
+        self.enterContext(patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7}))
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.install = GitNetBoxInstallation(
-            self.root, '3.6.2', 'a' * 40, 'v3.6.2', 'HEAD',
+            self.root, '4.6.2', 'a' * 40, 'v4.6.2', 'HEAD',
             'https://github.com/netbox-community/netbox.git',
-            self.root / 'venv/bin/python', '3.10.12', ('local_requirements.txt',), (),
+            self.root / 'venv/bin/python', '3.12.12', ('local_requirements.txt',), (),
         )
         self.packages = (
             InstalledPackage('example-plugin', '1.0.0', ('example_plugin',)),
@@ -44,14 +46,14 @@ class CombinedStageTests(unittest.TestCase):
         )
         (self.root / 'local_requirements.txt').write_bytes(LOCAL)
         self.plan = build_upgrade_plan(
-            self.install, self.inventory, target_netbox='4.0.1',
+            self.install, self.inventory, target_netbox='5.0.1',
             selected_plugins={'example-plugin': '1.5.0'},
-            available_tags=('v3.7.8', 'v4.0.1'), postgres_version='15.2',
+            available_tags=('v4.7.3', 'v5.0.1'), postgres_version='15.2',
             redis_version='7.2', reviewer=self.reviewer,
         )
         self.approval = ExecutionApproval(self.plan.fingerprint, self.install.commit,
                                           str(self.root), True)
-        self.stages = (PinnedStage('3.7.8', 'b' * 40), PinnedStage('4.0.1', 'c' * 40))
+        self.stages = (PinnedStage('4.7.3', 'b' * 40), PinnedStage('5.0.1', 'c' * 40))
         self.fetch = Mock()
         self.git = Mock(return_value=CORE)
         self.resolver = Mock(return_value=DependencyPreflight('passed', 'resolved', True))
@@ -141,7 +143,7 @@ class CombinedStageTests(unittest.TestCase):
 
     def test_stage_applies_final_pins_before_script_with_constraints(self):
         prepared = self.prepare()[1]
-        final = replace(self.install, commit='c' * 40, version='4.0.1')
+        final = replace(self.install, commit='c' * 40, version='5.0.1')
         (self.root / 'requirements.txt').write_text(CORE + '\n')
         inventory = replace(
             self.inventory,
@@ -171,7 +173,7 @@ class CombinedStageTests(unittest.TestCase):
                 self.assertEqual(env['PIP_ONLY_BINARY'], ':all:')
                 return final
             result, loaded = run_combined_stage(
-                self.install, self.plan, prepared, Path('/usr/bin/python3.10'),
+                self.install, self.plan, prepared, Path('/usr/bin/python3.12'),
                 systemd=systemd, stage_runner=stage_runner, inventory_reader=reader,
                 runner=runner,
             )
@@ -191,7 +193,7 @@ class CombinedStageTests(unittest.TestCase):
         ))
         stage_runner = Mock()
         with self.assertRaises(UpgradeExecutionError):
-            run_combined_stage(self.install, self.plan, prepared, Path('/usr/bin/python3.10'),
+            run_combined_stage(self.install, self.plan, prepared, Path('/usr/bin/python3.12'),
                                systemd=systemd, stage_runner=stage_runner, inventory_reader=reader)
         stage_runner.assert_not_called()
 
