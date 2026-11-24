@@ -62,7 +62,7 @@ def execute_netbox_upgrade(
         try:
             stop_upgrade_writers(systemd)
             phase = 'capture recovery'
-            recovery = _capture_quiesced_recovery(cfg, plan, systemd=systemd)
+            recovery = _capture_quiesced_recovery(cfg, plan, systemd=systemd, pinned_stages=stages)
             write_audit(f'NetBox upgrade recovery={recovery.directory.name}')
             for index, (stage, planned) in enumerate(zip(stages, plan.stages, strict=True), 1):
                 phase = f'stage {index} fetch'
