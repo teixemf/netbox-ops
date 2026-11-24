@@ -92,18 +92,26 @@ class PlannerTests(unittest.TestCase):
             self.build(target_netbox='4.6.9')
         self.assertEqual(self.calls, [])
 
+    def test_pre_v4_source_and_target_rejected(self):
+        for source, target in (('3.7.8', '4.5.2'), ('3.7.8', '3.7.8'), ('4.5.0', '3.7.8')):
+            with self.subTest(source=source, target=target), self.assertRaisesRegex(UpgradePlanError, '4.0 or newer'):
+                required_netbox_path(source, target, ['v3.7.8', 'v4.5.2'])
+
+    @patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7})
     def test_missing_intermediate_tag_is_not_guessed(self):
-        with self.assertRaisesRegex(UpgradePlanError, '3.7.x'):
-            required_netbox_path('3.5.2', '4.5.2', ['v4.5.2'])
+        with self.assertRaisesRegex(UpgradePlanError, '4.7.x'):
+            required_netbox_path('4.5.2', '5.0.0', ['v5.0.0'])
 
+    @patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7})
     def test_major_boundary_picks_latest_verified_patch(self):
-        versions = required_netbox_path('3.5.2', '4.5.2',
-                                         ['v3.7.0', 'v3.7.9', 'v3.7.8', 'v4.5.2'])
-        self.assertEqual(versions, ('3.7.9', '4.5.2'))
+        versions = required_netbox_path('4.5.2', '5.0.0',
+                                         ['v4.7.0', 'v4.7.3', 'v4.7.2', 'v5.0.0'])
+        self.assertEqual(versions, ('4.7.3', '5.0.0'))
 
+    @patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7})
     def test_already_final_minor_major_uses_direct_target(self):
-        self.assertEqual(required_netbox_path('3.7.2', '4.5.2', ('v4.5.2',)),
-                         ('4.5.2',))
+        self.assertEqual(required_netbox_path('4.7.2', '5.0.0', ('v5.0.0',)),
+                         ('5.0.0',))
 
     def test_unreviewed_future_major_fails_closed(self):
         with self.assertRaisesRegex(UpgradePlanError, 'No reviewed'):
@@ -113,17 +121,19 @@ class PlannerTests(unittest.TestCase):
         with self.assertRaisesRegex(UpgradePlanError, 'downgrades'):
             required_netbox_path('4.5.2', '4.5.0', self.tags)
 
+    @patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7})
+    @patch.dict('netbox_ops.upgrade_discovery._OFFICIAL_REQUIREMENTS', {(5, 0): ((3, 12), (3, 14), (15, 0), (6, 0))})
     def test_prerequisites_checked_at_each_intermediate_version(self):
         old = self.installation
         self.installation = GitNetBoxInstallation(
-            old.root, '3.6.2', old.commit, old.tag, old.reference, old.origin,
-            old.python, '3.10.9', old.local_paths, old.warnings,
+            old.root, '4.6.2', old.commit, old.tag, old.reference, old.origin,
+            old.python, '3.12.9', old.local_paths, old.warnings,
         )
-        plan = self.build(target_netbox='4.5.2',
-                          available_tags=('v3.7.6', 'v4.5.2'),
-                          python_by_stage={'4.5.2': '3.12.3'})
+        plan = self.build(target_netbox='5.0.0',
+                          available_tags=('v4.7.3', 'v5.0.0'),
+                          python_by_stage={'5.0.0': '3.12.3'})
         self.assertEqual([stage.netbox_version for stage in plan.stages],
-                         ['3.7.6', '4.5.2'])
+                         ['4.7.3', '5.0.0'])
         self.assertEqual([check.status for check in plan.stages[0].prerequisites[:1]], ['ok'])
         self.assertEqual([check.status for check in plan.stages[1].prerequisites[:1]], ['ok'])
         self.assertEqual(plan.stages[0].plugin_versions, (('sample-plugin', '1.0.0'),))
@@ -151,20 +161,21 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.status, 'blocked')
         self.assertIn('sample-plugin', plan.blockers[0])
 
+    @patch.dict('netbox_ops.upgrade_plan._LAST_MINOR_BEFORE_MAJOR', {4: 7})
     def test_selected_plugin_old_version_evaluated_at_intermediate_stages(self):
         old = self.installation
         self.installation = GitNetBoxInstallation(
-            old.root, '3.6.2', old.commit, old.tag, old.reference, old.origin,
-            old.python, '3.10.9', old.local_paths, old.warnings,
+            old.root, '4.6.2', old.commit, old.tag, old.reference, old.origin,
+            old.python, '3.12.9', old.local_paths, old.warnings,
         )
-        plan = self.build(target_netbox='4.5.2',
-                          available_tags=('v3.7.9', 'v4.5.2'),
-                          python_by_stage={'4.5.2': '3.12.1'},
+        plan = self.build(target_netbox='5.0.0',
+                          available_tags=('v4.7.3', 'v5.0.0'),
+                          python_by_stage={'5.0.0': '3.12.1'},
                           selected_plugins={'sample-plugin': '2.0.0'})
         self.assertEqual(plan.stages[0].plugin_versions, (('sample-plugin', '1.0.0'),))
         self.assertEqual(plan.stages[1].plugin_versions, (('sample-plugin', '2.0.0'),))
-        self.assertIn(('sample-plugin', ('3.7.9',), ('3.10.9',), '1.0.0', (None,)), self.calls)
-        self.assertIn(('sample-plugin', ('4.5.2',), ('3.12.1',), '2.0.0', (None,)), self.calls)
+        self.assertIn(('sample-plugin', ('4.7.3',), ('3.12.9',), '1.0.0', (None,)), self.calls)
+        self.assertIn(('sample-plugin', ('5.0.0',), ('3.12.1',), '2.0.0', (None,)), self.calls)
 
     def test_invalid_plugin_or_version_is_rejected(self):
         with self.assertRaises(UpgradePlanError):
