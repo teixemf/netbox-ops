@@ -30,10 +30,10 @@ ACTIONS = ('start', 'stop', 'restart', 'enable', 'disable')
 
 def make_main_items(t: Translator) -> list[tuple[str, str, tuple[str, ...]]]:
     """One source of truth for the menu labels and CLI commands."""
-    items = [(f'{int(number):02d}  {t(key)}', 'action', (group, action))
+    items = [(f'{number}  {t(key)}', 'action', (group, action))
              for number, group, action, key in MENU_ACTIONS]
     items.append((f'L   {t("tui_language")}', 'language', ()))
-    items.append((f'0   {t("tui_exit")}', 'exit', ()))
+    items.append((f'Q  {t("tui_exit")}', 'exit', ()))
     return items
 
 
@@ -214,7 +214,16 @@ class CursesMenu:
         self._put(1, 2, title, 'section')
         self._put(2, 2, '─' * (w - 5), 'muted')
         self._put(h - 2, 2, '─' * (w - 5), 'muted')
-        self._put(h - 1, 2, hint, 'muted')
+        if ' | ' in hint:
+            x = 2
+            for part in hint.split(' | '):
+                key, _, action = part.partition(' ')
+                self._put(h - 1, x, key, 'title')
+                if action:
+                    self._put(h - 1, x + len(key) + 1, action, 'muted')
+                x += len(part) + 2
+        else:
+            self._put(h - 1, 2, hint, 'muted')
         return h, w
 
     def _paint(self, y: int, x: int, width: int, height: int = 1,
@@ -771,22 +780,26 @@ class CursesMenu:
                 frame = self._frame(self.t('tui_main_title'), self.t('nbo_main_hint'))
                 if frame:
                     h, w = frame
-                    split = min(max(36, w * 2 // 5), 46)
-                    # Distinct dark surfaces instead of bare terminal black.
-                    self._paint(3, 2, max(3, split - 3), min(19, h - 8))
-                    self._paint(3, split + 1, max(3, w - split - 4), min(20, h - 8))
+                    split = max(22, w * 35 // 100)
+                    panel_height = min(h - 5, 23)
+                    self._paint(3, 2, split - 3, panel_height)
+                    self._paint(3, split + 1, w - split - 4, panel_height)
                     self._put(3, 3, self.t('nbo_menu_label'), 'section')
                     self._put(3, split + 2, self.t('nbo_dashboard_label'), 'section')
-                    for bar_y in range(4, min(20,h-4)):
+                    for bar_y in range(4, 3 + panel_height):
                         self._put(bar_y, split, '│', 'muted')
                     for idx, (text, _, _) in enumerate(items):
-                        row = 5 + idx + (1 if idx >= 2 else 0) + (2 if idx >= 6 else 0)
-                        if row >= h - 4:
-                            break
+                        row = 4 + idx
+                        if h >= 20:
+                            row += 1 + (1 if idx >= 2 else 0) + (2 if idx >= 6 else 0)
                         if cursor == idx:
                             self._put(row, 3, ' ' * (split - 5), 'selected')
                         self._put(row, 4, text[:split-7], 'selected' if cursor == idx else '')
-                    self._put(5, split+2, self.t('nbo_columns_v032') if w>=119 else self.t('nbo_columns_v031'), 'muted')
+                    dashboard_width = w - split - 4
+                    if dashboard_width >= 64:
+                        self._put(5, split+2, self.t('nbo_columns_v032'), 'muted')
+                    elif dashboard_width >= 48:
+                        self._put(5, split+2, self.t('nbo_columns_v031'), 'muted')
                     if service_error:
                         self._put(7, split+2, service_error[:w-split-5], 'failure')
                     else:
@@ -797,17 +810,19 @@ class CursesMenu:
                             self._put(y, split+2, name, 'success' if state.healthy else 'failure')
                             self._put(y, split+16, (self.t('tui_active') if state.healthy else self.t('tui_inactive'))[:9],
                                       'success' if state.healthy else 'failure')
-                            if w >= 119:
+                            if dashboard_width >= 64:
                                 version = self.versions.get(state.name)
                                 self._put(y, split+27, f'{(version if version is not None else "…")[:12]:<12}', 'muted')
                                 self._put(y, split+41, f'{metrics.get(state.name, "—"):>6}', 'muted')
                                 self._put(y, split+51, self._human_size(state.memory_current), 'muted')
-                            else:
+                            elif dashboard_width >= 48:
                                 self._put(y, split+28, f'{metrics.get(state.name, "—"):>6}', 'muted')
                                 self._put(y, split+38, self._human_size(state.memory_current), 'muted')
                     line = 12
                     self._put(line, split+2, self.t('nbo_storage_label'), 'section')
-                    if storage_error:
+                    if h < 19:
+                        pass  # Keep the footer clear on short terminals.
+                    elif storage_error:
                         self._put(line+2, split+2, storage_error, 'failure')
                     else:
                         occupied, free, count = storage
@@ -847,7 +862,10 @@ class CursesMenu:
                         cursor = len(items)-1 if key in (curses.KEY_UP, ord('k')) else 0
                     else:
                         cursor = move_selection(cursor, key, len(items))
-                elif key in (10, 13, curses.KEY_ENTER) and cursor is not None:
+                elif (ord('1') <= key <= ord('7') or
+                      (key in (10, 13, curses.KEY_ENTER) and cursor is not None)):
+                    if ord('1') <= key <= ord('7'):
+                        cursor = key - ord('1')
                     _, kind, data = items[cursor]
                     if kind == 'exit':
                         return 0
@@ -1234,7 +1252,8 @@ class CursesMenu:
                 preview = states[index] if states and focus is not None else None
                 if preview and panel.name != preview.name:
                     panel.select(preview.name)
-                frame = self._frame(self.t('tui_manage_title'), self.t('nbo_manage_hint_035'))
+                hint_key = 'nbo_manage_actions_hint' if focus == 'actions' else 'nbo_manage_hint_035'
+                frame = self._frame(self.t('tui_manage_title'), self.t(hint_key))
                 if frame:
                     h, w = frame
                     split = max(31, min(44, w // 3))
@@ -1247,7 +1266,10 @@ class CursesMenu:
                                              h - 3 - action_rows))
                     self._paint(3, 2, split - 3, max(1, actions_y - 4))
                     self._paint(3, split + 1, w - split - 4, max(1, actions_y - 4))
-                    self._put(3, 3, self.t('nbo_services_label'), 'section')
+                    service_heading = f'{self.t("nbo_services_label")}  {self.t("nbo_chosen")}: {len(chosen)}'
+                    if len(service_heading) > split - 5:
+                        service_heading = f'{self.t("nbo_services_label")}  ({len(chosen)})'
+                    self._put(3, 3, service_heading, 'section')
                     self._put(3, split + 2, self.t('nbo_detail_label'), 'section')
                     for i, state in enumerate(states):
                         y = 5 + i
@@ -1260,8 +1282,6 @@ class CursesMenu:
                                   'selected' if selected else '')
                         self._put(y, 24, '●' if state.healthy else '○',
                                   'selected' if selected else state_style(state))
-                    if actions_y > 12:
-                        self._put(11, 4, f'{self.t("nbo_chosen")}: {len(chosen)}', 'muted')
                     if preview is not None:
                         x = split + 2
                         version = self.versions.get(preview.name)
@@ -1294,12 +1314,9 @@ class CursesMenu:
                                   f'[{labels[i]}]' if enabled else f' {labels[i]} ', style)
                         if focused and not enabled:
                             self._put(actions_y + 1 + row, 3 + ax, '›', 'section')
-                    self._put(actions_y + action_rows + 1, 4,
-                              self._targets_summary([s.name for s in targets], w - 8),
-                              'section' if targets else 'muted')
-
-                    log_title_y = actions_y + action_rows + 3
+                    log_title_y = actions_y + action_rows + 2
                     if log_title_y <= h - 4:
+                        self._put(log_title_y - 1, 3, '─' * (w - 7), 'muted')
                         self._put(log_title_y, 3,
                                   self.t('nbo_live_logs_title') if panel.live
                                   else self.t('nbo_logs_title'), 'section')
@@ -1745,7 +1762,8 @@ class CursesMenu:
                                not incompatible)
                 # Legacy archives may be verified read-only, but never restored.
                 can_verify = bool(action_targets)
-                frame = self._frame(self.t('nbo_backup_title'), self.t('nbo_backup_hint_034'))
+                hint_key = 'nbo_backup_actions_hint' if focus == 'actions' else 'nbo_backup_hint_034'
+                frame = self._frame(self.t('nbo_backup_title'), self.t(hint_key))
                 if frame:
                     h, w = frame
                     pane = w >= 104
@@ -1843,9 +1861,7 @@ class CursesMenu:
                         self._put(action_y + 1 + row, 4 + ax, label, style)
                         if focus == 'actions' and action_index == i and not enabled:
                             self._put(action_y + 1 + row, 3 + ax, '›', 'section')
-                    self._put(action_y + action_rows + 1, 4,
-                              self._targets_summary([e.path.name for e in marked], w - 8),
-                              'section' if marked else 'muted')
+                    self._put(list_title_y - 1, 3, '─' * (w - 7), 'muted')
 
                     self._paint(list_title_y, 2, w - 4, h - 2 - list_title_y)
                     self._put(list_title_y, 3, f'{self.t("nbo_backup_table")}   '
