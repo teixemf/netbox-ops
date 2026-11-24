@@ -78,6 +78,22 @@ class ReleaseListTests(unittest.TestCase):
     def test_duplicate_versions_fail_closed(self):
         self.assertEqual(parse_releases([release('0.6.0')] * 3), [])
 
+    def test_duplicate_tag_with_invalid_assets_fails_closed(self):
+        valid = release('0.6.0')
+        invalid = release('0.6.0', assets=False)
+        for rows in ([valid, invalid], [invalid, valid], [invalid, valid, valid]):
+            with self.subTest(rows=rows):
+                self.assertEqual(parse_releases(rows), [])
+
+    def test_duplicate_asset_name_with_invalid_url_fails_closed(self):
+        for index in (0, 1):
+            row = release()
+            duplicate = dict(row['assets'][index])
+            duplicate['browser_download_url'] = 'https://attacker.example/file'
+            row['assets'].append(duplicate)
+            with self.subTest(index=index):
+                self.assertEqual(parse_releases([row]), [])
+
     def test_unsupported_responses_and_missing_changelog(self):
         with self.assertRaises(ReleaseDiscoveryError):
             parse_releases({'message': 'API error'})
