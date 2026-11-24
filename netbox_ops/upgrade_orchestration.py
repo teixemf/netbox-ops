@@ -8,6 +8,7 @@ from .config import Configuration
 from .services import ExclusiveLock, SystemdServices, write_audit
 from .upgrade_execution import (
     ExecutionApproval, UpgradeExecutionError, validate_execution_approval,
+    validate_netbox_only_pins,
 )
 from .upgrade_checkout import fetch_pinned_stage
 from .upgrade_git import pin_release_stages
@@ -15,7 +16,8 @@ from .upgrade_health import read_netbox_health, wait_for_netbox_health
 from .plugin_inventory import inventory_plugins, normalize_name
 from .upgrade_maintenance import begin_maintenance, finish_maintenance
 from .upgrade_plan import UpgradePlan
-from .upgrade_recovery import UpgradeRecovery, _capture_quiesced_recovery
+from .upgrade_recovery import UpgradeRecovery, _capture_quiesced_recovery, _private_directory
+from .upgrade_runtime import validate_upgrade_runtime
 from .upgrade_services import (
     require_quiesced_writers, start_upgrade_writers, stop_upgrade_writers,
 )
@@ -44,7 +46,10 @@ def execute_netbox_upgrade(
         # An explicitly different runtime requires a separately approved workflow.
         if any(version != live.python_version for _, version in plan.source.python_by_stage):
             raise UpgradeExecutionError('Changing the selected Python runtime is not supported')
-        resolve_base_python(live)
+        validate_netbox_only_pins(plan)
+        base_python = resolve_base_python(live)
+        validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
+        _private_directory(cfg.backup_directory)
         baseline = read_netbox_health(health_url, authorization=authorization)
         if baseline.version != plan.current_netbox:
             raise UpgradeExecutionError('HTTP status does not match the installed NetBox release')
@@ -60,11 +65,13 @@ def execute_netbox_upgrade(
             recovery = _capture_quiesced_recovery(cfg, plan, systemd=systemd)
             write_audit(f'NetBox upgrade recovery={recovery.directory.name}')
             for index, (stage, planned) in enumerate(zip(stages, plan.stages, strict=True), 1):
-                phase = f'stage {index}'
+                phase = f'stage {index} fetch'
                 require_quiesced_writers(systemd)
-                write_audit(f'NetBox upgrade starting {phase}')
+                write_audit(f'NetBox upgrade starting stage={index} version={stage.version} commit={stage.commit}')
                 fetch_pinned_stage(live.root, stage)
+                phase = f'stage {index} checkout and upgrade script'
                 live = run_stage(live, stage, systemd=systemd)
+                phase = f'stage {index} plugin validation'
                 actual = inventory_plugins(live)
                 if actual.requirements_hash != plan.source.inventory.requirements_hash:
                     raise UpgradeExecutionError('Plugin requirements changed during the stage')
@@ -74,21 +81,27 @@ def execute_netbox_upgrade(
                 if any(installed.get(normalize_name(name)) != version
                        for name, version in planned.plugin_versions):
                     raise UpgradeExecutionError('An approved plugin version changed during the stage')
-                write_audit(f'NetBox upgrade completed {phase}')
+                write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
             phase = 'start writers'
-            start_upgrade_writers(systemd)
-            phase = 'functional health check'
             try:
+                start_upgrade_writers(systemd)
+                phase = 'functional health check'
                 wait_for_netbox_health(
                     health_url, plan.target_netbox, baseline, authorization=authorization,
                 )
             except Exception:
-                # Stop both writers even if one has already become unhealthy.
-                phase = 'functional health check; maintenance unverified'
-                systemd.stop(['netbox-rq', 'netbox'])
+                # Try both writers independently: one failed unit must not
+                # prevent an attempt to stop the other.
+                phase += '; maintenance unverified'
+                for name in ('netbox-rq', 'netbox'):
+                    try:
+                        systemd.stop([name])
+                    except Exception:
+                        pass
                 require_quiesced_writers(systemd)
-                phase = 'functional health check; writers stopped'
+                phase = phase.replace('maintenance unverified', 'writers stopped')
                 raise
+            phase = 'finish maintenance'
             write_audit('NetBox upgrade completed')
             finish_maintenance()
             return recovery
