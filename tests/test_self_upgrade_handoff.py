@@ -124,6 +124,12 @@ class HandoffTests(unittest.TestCase):
             handoff._preflight(self.active, self.stage, record)
         self.runtime.assert_not_called()
 
+    def test_preflight_rejects_changes_made_by_runtime_check(self):
+        record = self.build()
+        self.runtime.side_effect = lambda *_: (self.stage / 'version').write_text('modified')
+        with self.assertRaisesRegex(SwapError, 'changed during validation'):
+            handoff._preflight(self.active, self.stage, record)
+
     def test_preflight_rejects_changed_plan_or_release(self):
         record = self.build()
         self.catalogue.decision_for.return_value = UpgradeDecision(
@@ -215,6 +221,44 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue((self.active / 'netbox_ops/__init__.py').is_file())
         self.assertFalse(self.stage.exists())
         self.assertFalse(self.backup.exists())
+        self.assertFalse(self.bundle.exists())
+
+    @unittest.skipUnless(os.geteuid() == 0, 'root-owned isolated lock required')
+    def test_apply_uses_real_swap_with_locked_preflight(self):
+        self.build()
+        self.inspect.side_effect = [self.local, replace(
+            self.local, version=self.new, identity=self.prepared.identity)]
+        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with (patch.object(helper, 'wait_for_initiator_exit'),
+                  patch.object(helper, 'write_audit') as audit):
+                self.assertEqual(handoff._apply(self.bundle, 42, descriptor), 0)
+            self.assertIn('SELF-UPGRADE finished', [call.args[0] for call in audit.call_args_list])
+        finally:
+            os.close(descriptor)
+        self.assertEqual((self.active / 'version').read_text(), 'new')
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(self.bundle.exists())
+        self.assertFalse(self.state.exists())
+
+    @unittest.skipUnless(os.geteuid() == 0, 'root-owned isolated lock required')
+    def test_apply_validation_failure_restores_old_tree_and_cleans_candidate(self):
+        self.build()
+        self.inspect.side_effect = [self.local, replace(
+            self.local, version=self.old, identity=self.prepared.identity)]
+        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with (patch.object(helper, 'wait_for_initiator_exit'),
+                  patch.object(helper, 'write_audit') as audit):
+                with self.assertRaisesRegex(SwapError, 'did not pass verification'):
+                    handoff._apply(self.bundle, 42, descriptor)
+            self.assertIn('SELF-UPGRADE rollback completed', [call.args[0] for call in audit.call_args_list])
+        finally:
+            os.close(descriptor)
+        self.assertTrue((self.active / 'netbox_ops/__init__.py').is_file())
+        self.assertFalse(self.stage.exists())
         self.assertFalse(self.bundle.exists())
 
     def test_recovery_after_validation_does_not_roll_back(self):
