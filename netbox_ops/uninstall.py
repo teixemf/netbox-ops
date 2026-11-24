@@ -3,8 +3,6 @@
 This standalone helper uses only the standard library (including on the
 distribution's Python), and never invokes systemctl or a package manager.
 """
-from __future__ import annotations
-
 import fcntl
 import json
 import os
@@ -163,12 +161,14 @@ def check_app(layout, protected, mounts):
             item = path.lstat()
             if item.st_uid != 0 or item.st_dev != info.st_dev:
                 raise UninstallError(f'Unexpected owner or filesystem: {path}')
-            if BACKUP_SUFFIX.search(name) or name.lower() in {'backups', 'backup'} and stat.S_ISDIR(item.st_mode):
+            relative = path.relative_to(root)
+            backup_directory = (name.lower() in {'backups', 'backup'} and stat.S_ISDIR(item.st_mode)
+                                and relative != Path('tests/backups'))
+            if BACKUP_SUFFIX.search(name) or backup_directory:
                 raise UninstallError(f'Possible backup data in installation: {path}')
             if stat.S_ISLNK(item.st_mode):
                 # A venv normally contains these links. rmtree unlinks them,
                 # never follows them, including a dangling system Python link.
-                relative = path.relative_to(root)
                 allowed = (relative == Path('venv/lib64') and os.readlink(path) == 'lib'
                            or relative.parent == Path('venv/bin')
                            and re.fullmatch(r'python(?:3(?:\.\d+t?)?)?|𝜋thon', name))
@@ -197,14 +197,20 @@ def check_processes(layout):
             continue
         try:
             args = (proc / 'cmdline').read_bytes().split(b'\0')
-            cwd = (proc / 'cwd').readlink()
-            exe = (proc / 'exe').readlink()
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
-        if (within(exe, layout.app / 'venv')
-                or os.fsencode(layout.app / 'netbox_ops.py') in args
-                or within(cwd, layout.app) and
-                (b'netbox_ops.py' in args or b'netbox_ops' in args)):
+        running = os.fsencode(layout.app / 'netbox_ops.py') in args
+        for name in ('cwd', 'exe'):
+            try:
+                target = Path(os.readlink(proc / name))
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if name == 'exe':
+                running |= within(target, layout.app / 'venv')
+            else:
+                running |= within(target, layout.app) and (
+                    b'netbox_ops.py' in args or b'netbox_ops' in args)
+        if running:
             raise UninstallError(f'netbox-ops is still running (PID {proc.name}); exit it first')
 
 
@@ -257,7 +263,8 @@ def plan(layout, remove_config=False, remove_logs=False, *, mounts=None):
     info = entry(layout.link)
     if info is not None:
         if (stat.S_ISLNK(info.st_mode) and info.st_uid == 0
-                and layout.link.readlink() == Path('/usr/local/sbin/netbox-ops')):
+                and os.readlink(layout.link) == '/usr/local/sbin/netbox-ops'
+                and layout.launcher not in retained):
             protect(layout.link, protected)
             reject_mount(layout.link, mounts)
             files.insert(0, layout.link)

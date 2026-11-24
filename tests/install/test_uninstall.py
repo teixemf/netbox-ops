@@ -24,6 +24,8 @@ class UninstallTests(unittest.TestCase):
                           l.policy.parent, l.config.parent, l.logs, l.data / 'backups', l.lock.parent):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         (l.app / 'netbox_ops.py').write_text('pass\n')
+        (l.app / 'tests/backups').mkdir(parents=True)
+        (l.app / 'tests/backups/test_backup.py').write_text('pass\n')
         l.launcher.write_bytes(LAUNCHER)
         l.link.symlink_to('/usr/local/sbin/netbox-ops')
         l.policy.write_bytes(POLICY)
@@ -99,6 +101,22 @@ class UninstallTests(unittest.TestCase):
         self.assertTrue(l.link.is_symlink())
         self.assertEqual(l.launcher.read_text(), 'another application')
         self.assertEqual(l.policy.read_text(), 'custom policy')
+
+    def test_active_session_blocks_removal(self):
+        from netbox_ops.uninstall import check_processes
+        check_processes.side_effect = UninstallError('netbox-ops is still running')
+        with self.assertRaisesRegex(UninstallError, 'still running'):
+            self.execute('UNINSTALL', '', '')
+        self.assertTrue(self.layout.app.exists())
+        self.assertTrue(self.layout.launcher.exists())
+
+    def test_optional_log_cleanup_refuses_configured_backup_location(self):
+        l = self.layout
+        l.config.write_text(json.dumps({'backup': {'directory': str(l.logs / 'custom')}}))
+        with self.assertRaisesRegex(UninstallError, 'protected data'):
+            self.execute('UNINSTALL', '', 'REMOVE LOGS')
+        self.assertTrue(l.app.exists())
+        self.assertTrue(self.log.exists())
 
     def test_unexpected_app_symlink_and_mount_block_all_removal(self):
         l = self.layout
