@@ -114,11 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
                 cmd.add_argument('--netbox-version', help='Target stable NetBox release; defaults to newest.')
 
     top.add_parser('platform', help='Show OS family, systemd units and PostgreSQL tools (read-only).')
-    self_upgrade = top.add_parser('self-upgrade', help='Inspect official netbox-ops releases.')
+    self_upgrade = top.add_parser('self-upgrade', help='Inspect and upgrade netbox-ops releases.')
     self_actions = self_upgrade.add_subparsers(dest='action')
     self_actions.add_parser('list', help='List official stable releases (read-only).')
     details = self_actions.add_parser('show', help='Show a release changelog (read-only).')
     details.add_argument('version', help='Stable release version, e.g. v0.6.0.')
+    for operation in ('plan', 'install'):
+        command = self_actions.add_parser(operation, help=f'{operation.capitalize()} a verified upgrade step.')
+        command.add_argument('version', help='Target stable release.')
+        if operation == 'install':
+            command.add_argument('--confirm', help='Exact confirmation token: UPGRADE vX.Y.Z')
+    self_actions.add_parser('status', help='Show the last upgrade result.')
     return parser
 
 
@@ -281,6 +287,10 @@ def dispatch(args: argparse.Namespace, t: Translator) -> int:
     if args.command == 'self-upgrade' and action in ('list', 'show'):
         from .self_upgrade_ui import run_catalogue
         return run_catalogue(action, t, target=getattr(args, 'version', None))
+    if args.command == 'self-upgrade' and action in ('plan', 'install', 'status'):
+        from .self_upgrade_ui import run_execution
+        return run_execution(action, t, target=getattr(args, 'version', None),
+                             confirmation=getattr(args, 'confirm', None))
     if args.command == 'platform':
         from .platform import detect_platform, pg_binary, PlatformError
         profile = detect_platform()
@@ -416,6 +426,12 @@ def interactive_menu(t: Translator, config_path: Path = CONFIG_PATH) -> int:
             print(t('invalid_choice'))
             continue
         group, action, _ = lookup[choice]
+        if group == 'self-upgrade':
+            from .self_upgrade_ui import text_menu
+            result = text_menu(t)
+            if result is not None:
+                return result
+            continue
         try:
             cfg = load_config(config_path)
             if (group, action) == ('services', 'manage'):
