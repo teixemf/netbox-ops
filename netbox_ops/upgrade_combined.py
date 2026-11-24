@@ -189,7 +189,12 @@ def run_combined_stage(
     root = live.root
     require_quiesced_writers(systemd)
     actual = inventory_reader(live)
-    if actual.requirements_hash != prepared.pins.original_hash or actual.enabled != plan.source.inventory.enabled:
+    expected_before = {p.package: p.installed_version for p in plan.plugins}
+    installed_before = {normalize_name(p.name): p.version for p in actual.packages}
+    if (len(installed_before) != len(actual.packages)
+            or any(installed_before.get(name) != version for name, version in expected_before.items())
+            or actual.requirements_hash != prepared.pins.original_hash
+            or actual.enabled != plan.source.inventory.enabled):
         raise UpgradeExecutionError('Combined stage local requirements or configured plugins changed')
 
     with tempfile.TemporaryDirectory(prefix='netbox-ops-combined-') as temp:
