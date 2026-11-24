@@ -1,12 +1,13 @@
 """Offline tests for the locked, audited self-upgrade coordinator."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from netbox_ops.self_upgrade_helper import run_approved_swap
+from netbox_ops.self_upgrade_helper import run_approved_swap, wait_for_initiator_exit
 from netbox_ops.self_upgrade_transaction import SwapError
 
 
@@ -103,6 +104,26 @@ class HelperTests(unittest.TestCase):
               patch.object(helper, 'write_audit')):
             self.run_helper()
         self.assertEqual((self.active / 'version').read_text(), 'new')
+
+    def test_pidfd_wait_rejects_invalid_values(self):
+        for pid in (0, -1, os.getpid(), True):
+            with self.subTest(pid=pid), self.assertRaises(SwapError):
+                wait_for_initiator_exit(pid)
+        with self.assertRaises(SwapError):
+            wait_for_initiator_exit(12345, timeout_seconds=-1)
+
+    def test_pidfd_wait_accepts_already_exited_process(self):
+        from netbox_ops import self_upgrade_helper as helper
+        with patch.object(helper.os, 'pidfd_open', side_effect=ProcessLookupError):
+            wait_for_initiator_exit(99999999)
+
+    def test_pidfd_wait_rejects_timeout(self):
+        from netbox_ops import self_upgrade_helper as helper
+        reader, writer = os.pipe()
+        self.addCleanup(os.close, writer)
+        with patch.object(helper.os, 'pidfd_open', return_value=reader):
+            with self.assertRaises(SwapError):
+                wait_for_initiator_exit(12345, timeout_seconds=1)
 
     def test_audit_failure_prevents_any_swap(self):
         from netbox_ops import self_upgrade_helper as helper
