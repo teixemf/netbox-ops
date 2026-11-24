@@ -30,7 +30,9 @@ def package():
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w:gz') as bundle:
         for name in ('netbox-ops/netbox_ops.py', 'netbox-ops/install.sh',
-                     'netbox-ops/upgrade.sh', 'netbox-ops/netbox_ops/__init__.py'):
+                     'netbox-ops/upgrade.sh', 'netbox-ops/netbox_ops/__init__.py',
+                     'netbox-ops/LICENSE', 'netbox-ops/README.md',
+                     'netbox-ops/CHANGELOG.md', 'netbox-ops/config.example.json'):
             info = tarfile.TarInfo(name)
             info.size = 1
             bundle.addfile(info, io.BytesIO(b'x'))
