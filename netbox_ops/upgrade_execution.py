@@ -10,7 +10,7 @@ from typing import Callable
 
 from .plugin_inventory import normalize_name
 from .upgrade_discovery import inspect_git_installation
-from .upgrade_plan import UpgradePlan
+from .upgrade_plan import UpgradePlan, required_netbox_path
 
 
 class UpgradeExecutionError(Exception):
@@ -74,6 +74,13 @@ def validate_execution_approval(
         if (not plan.selected_plugins or plan.current_netbox == plan.target_netbox
                 or any(stage.kind != 'netbox' for stage in plan.stages)):
             raise UpgradeExecutionError('Combined plans require NetBox stages and selected plugins')
+        try:
+            required = required_netbox_path(plan.current_netbox, plan.target_netbox,
+                                            plan.source.available_tags)
+        except Exception:
+            raise UpgradeExecutionError('Cannot verify required combined upgrade path') from None
+        if tuple(stage.netbox_version for stage in plan.stages) != required:
+            raise UpgradeExecutionError('Combined plan omits or changes a required release stage')
         if fresh_plan.source.inventory != plan.source.inventory:
             raise UpgradeExecutionError('Plugin inventory changed during preflight')
     else:
