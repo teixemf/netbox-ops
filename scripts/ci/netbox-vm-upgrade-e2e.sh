@@ -16,18 +16,12 @@ marker=/var/lib/netbox-ops/upgrade.pending
 [[ -d "$root" && ! -e "$root/.git" && ! -e "$marker" ]]
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 umask 022
-# A cloud-image timer may otherwise restart PostgreSQL during fixture migration.
-# Stop future timer activations and let any running APT transaction finish.
-systemctl stop apt-daily.timer apt-daily-upgrade.timer
-for unit in apt-daily.service apt-daily-upgrade.service; do
-  for attempt in $(seq 1 180); do
-    state=$(systemctl show -p ActiveState --value "$unit")
-    case "$state" in inactive|failed) break ;; esac
-    sleep 2
-  done
-  case "$(systemctl show -p ActiveState --value "$unit")" in inactive|failed) ;; *) exit 1 ;; esac
+# Check isolation configured at boot, before creating the source fixture.
+for unit in apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service; do
+  state=$(systemctl show -p UnitFileState --value "$unit")
+  case "$state" in masked|masked-runtime) ;; *) echo "FAIL: background APT unit is not masked: $unit" >&2; exit 1 ;; esac
+  case "$(systemctl show -p ActiveState --value "$unit")" in inactive|failed) ;; *) echo "FAIL: background APT unit active: $unit" >&2; exit 1 ;; esac
 done
-systemctl mask --runtime apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer
 apt-get update -qq
 NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git
 old=4.7.2

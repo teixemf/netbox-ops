@@ -71,6 +71,22 @@ EOF
 instance-id: netbox-ci-$GITHUB_RUN_ID-$attempt
 local-hostname: netbox-ci-$attempt
 EOF
+  if [[ -n "${NETBOX_VM_UPGRADE_SCENARIO:-}" && "$mode" == verify ]]; then
+    # Isolate automatic APT transactions before guest provisioning.
+    # These settings live only in the disposable overlay.
+    cat >> user-data <<'EOF'
+package_update: false
+package_upgrade: false
+bootcmd:
+  - [systemctl, mask, --runtime, apt-daily.timer, apt-daily-upgrade.timer, apt-daily.service, apt-daily-upgrade.service]
+  - [systemctl, stop, apt-daily.timer, apt-daily-upgrade.timer]
+write_files:
+  - path: /etc/apt/apt.conf.d/99-netbox-ci-no-periodic
+    permissions: '0644'
+    content: |
+      APT::Periodic::Enable "0";
+EOF
+  fi
   cloud-localds seed.img user-data meta-data
   qemu-system-x86_64 \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
