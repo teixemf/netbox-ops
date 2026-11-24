@@ -31,6 +31,7 @@ def validate_execution_approval(
     *,
     inspector: Callable = inspect_git_installation,
     fresh_plan: UpgradePlan | None = None,
+    operation: str = 'netbox',
 ) -> None:
     """Reinspect the live Git checkout without changing any files.
 
@@ -56,10 +57,21 @@ def validate_execution_approval(
         raise UpgradeExecutionError('Approval does not match the planned installation')
     if plan.requires_strong_confirmation and not approval.approved_unknowns:
         raise UpgradeExecutionError('Explicit confirmation of unknown requirements is required')
-    if any(stage.kind != 'netbox' for stage in plan.stages):
-        raise UpgradeExecutionError('This executor supports NetBox-only stages')
-    if plan.selected_plugins:
-        raise UpgradeExecutionError('Plugin changes require the combined executor')
+    if operation == 'netbox':
+        if any(stage.kind != 'netbox' for stage in plan.stages):
+            raise UpgradeExecutionError('This executor supports NetBox-only stages')
+        if plan.selected_plugins:
+            raise UpgradeExecutionError('Plugin changes require the combined executor')
+    elif operation == 'plugins':
+        if (len(plan.stages) != 1 or plan.stages[0].kind != 'plugins'
+                or not plan.selected_plugins or plan.current_netbox != plan.target_netbox
+                or plan.stages[0].netbox_version != plan.current_netbox
+                or plan.stages[0].previous_netbox != plan.current_netbox):
+            raise UpgradeExecutionError('A plugin-only plan must preserve the NetBox version')
+        if fresh_plan.source.inventory != plan.source.inventory:
+            raise UpgradeExecutionError('Plugin inventory changed during preflight')
+    else:
+        raise UpgradeExecutionError('Unsupported upgrade operation')
     live = inspector(original.root)
     if (live.root != original.root or live.commit != original.commit
             or live.version != original.version or live.python != original.python
@@ -69,12 +81,12 @@ def validate_execution_approval(
     if live.warnings != original.warnings:
         raise UpgradeExecutionError('Git installation warnings changed after planning')
     previous = plan.current_netbox
-    if plan.target_netbox == previous:
+    if operation == 'netbox' and plan.target_netbox == previous:
         raise UpgradeExecutionError('No NetBox version change was approved')
     for stage in plan.stages:
-        if stage.previous_netbox != previous or stage.netbox_version == previous:
+        if stage.previous_netbox != previous or (operation == 'netbox' and stage.netbox_version == previous):
             raise UpgradeExecutionError('NetBox stages are out of order')
-        if 'v' + stage.netbox_version not in plan.source.available_tags:
+        if operation == 'netbox' and 'v' + stage.netbox_version not in plan.source.available_tags:
             raise UpgradeExecutionError('Unverified NetBox Git release tag')
         previous = stage.netbox_version
         if any(check.status == 'blocked' for check in stage.prerequisites):
