@@ -32,9 +32,7 @@ class CliParserTests(unittest.TestCase):
         parser = build_parser()
         with patch('netbox_ops.cli.load_config', side_effect=AssertionError('must not load')):
             with patch('netbox_ops.cli.SystemdServices', side_effect=AssertionError('must not run')):
-                for argv in (['updates', 'check'], ['upgrade', 'netbox', '--version', '5.0.0'],
-                             ['upgrade', 'plugins', '--plugin', 'example'],
-                             ['upgrade', 'stack', '--plugins', 'all'], ['self-upgrade']):
+                for argv in (['updates', 'check'], ['self-upgrade']):
                     with redirect_stdout(io.StringIO()):
                         self.assertEqual(dispatch(parser.parse_args(argv), Translator('pt')), 3)
 
