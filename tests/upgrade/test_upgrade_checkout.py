@@ -57,7 +57,7 @@ class CheckoutStageTests(unittest.TestCase):
 
     def test_checkout_requires_exact_expected_head(self):
         self.checkout()
-        self.assertEqual(self.commands()[-2], ['checkout', '--detach', self.new])
+        self.assertEqual(self.commands()[-2], ['checkout', '--no-overwrite-ignore', '--detach', self.new])
         self.assertEqual(self.commands()[-1], ['rev-parse', '--verify', 'HEAD'])
         self.assertFalse(any('--force' in command for command in self.commands()))
 
@@ -100,7 +100,7 @@ class CheckoutStageTests(unittest.TestCase):
         )
         with self.assertRaises(UpgradeExecutionError):
             self.fetch()
-        self.assertNotIn(['checkout', '--detach', self.new], self.commands())
+        self.assertNotIn(['checkout', '--no-overwrite-ignore', '--detach', self.new], self.commands())
 
     def test_tracked_changes_block_checkout(self):
         def dirty(args, **kwargs):
@@ -139,7 +139,7 @@ class CheckoutStageTests(unittest.TestCase):
         self.runner.side_effect = stale
         with self.assertRaises(UpgradeExecutionError):
             self.checkout()
-        self.assertIn(['checkout', '--detach', self.new], self.commands())
+        self.assertIn(['checkout', '--no-overwrite-ignore', '--detach', self.new], self.commands())
 
     def test_runner_environment_disables_git_overrides(self):
         self.fetch()
