@@ -241,7 +241,7 @@ def cleanup_swap(active, staged, backup, state):
     for filename in ('build-release.sh', 'release-candidate.py'):
         shutil.copy2(source_root / 'scripts' / filename, scripts / filename)
     def git(*args):
-        run(['git', '-C', source, *args])
+        return run(['git', '-C', source, *args])
     git('init', '--quiet', '--initial-branch=fixture')
     git('add', '--all')
     git('-c', 'user.name=CI fixture', '-c', 'user.email=ci@example.invalid',
