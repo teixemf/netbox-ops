@@ -102,10 +102,13 @@ class PreparationTests(unittest.TestCase):
         if not shutil.which('git') or not (repo / '.git').exists():
             self.skipTest('Requires a Git checkout')
         tar = subprocess.run(
-            ['git', 'archive', '--format=tar', '--prefix=netbox-ops/', 'HEAD',
+            ['git', '-c', f'safe.directory={repo}', 'archive', '--format=tar',
+             '--prefix=netbox-ops/', 'HEAD',
              'LICENSE', 'README.md', 'CHANGELOG.md', 'config.example.json',
              'install.sh', 'upgrade.sh', 'netbox_ops.py', 'netbox_ops'],
-            cwd=repo, check=True, capture_output=True, timeout=30).stdout
+            cwd=repo, capture_output=True, timeout=30)
+        self.assertEqual(tar.returncode, 0, tar.stderr.decode(errors='replace'))
+        tar = tar.stdout
         self.archive.write_bytes(gzip.compress(tar, mtime=0))
         self.checksum.write_text(
             f'{hashlib.sha256(self.archive.read_bytes()).hexdigest()}  {self.archive.name}\n')
