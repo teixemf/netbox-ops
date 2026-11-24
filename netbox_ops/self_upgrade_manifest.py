@@ -1,4 +1,4 @@
-"""Read the proposed schema-v1 official compatibility asset for self-upgrade.
+"""Read and encode the schema-v1 compatibility contract for self-upgrade.
 
 The publisher contract is coordinated in #72. A missing or unsupported
 manifest never supplies requirements and cannot authorize installation.
@@ -82,6 +82,38 @@ def parse_manifest(data: bytes, expected: Version) -> ReleaseRequirements:
         raise
     except (ValueError, UnicodeError, TypeError, RecursionError) as exc:
         raise ManifestError('Malformed compatibility manifest') from exc
+
+
+def encode_manifest(requirements: ReleaseRequirements) -> bytes:
+    """Encode the same strict contract used by the consumer.
+
+    Release tooling can reuse this function instead of duplicating the schema.
+    No assets are written or published here.
+    """
+    if not isinstance(requirements, ReleaseRequirements) or not isinstance(requirements.version, Version):
+        raise ManifestError('Invalid release requirements')
+    if not _valid_requirements(requirements, requirements.version):
+        raise ManifestError('Inconsistent compatibility requirements')
+
+    def python_text(version):
+        return '.'.join(map(str, version))
+
+    document = {
+        'schema_version': 1,
+        'version': f'v{requirements.version}',
+        'python_min': python_text(requirements.python_min),
+        'python_max_exclusive': (
+            None if requirements.python_max_exclusive is None
+            else python_text(requirements.python_max_exclusive)
+        ),
+        'linux_families': sorted(requirements.linux_families),
+        'layouts': sorted(requirements.layouts),
+        'required_intermediates': [f'v{step}' for step in requirements.required_intermediates],
+    }
+    encoded = (json.dumps(document, indent=2, sort_keys=True) + '\n').encode('utf-8')
+    if parse_manifest(encoded, requirements.version) != requirements:
+        raise ManifestError('Compatibility metadata does not round-trip')
+    return encoded
 
 
 class _OfficialAssetRedirect(HTTPRedirectHandler):
