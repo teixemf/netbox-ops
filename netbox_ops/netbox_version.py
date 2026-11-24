@@ -4,6 +4,7 @@ For NetBox source/Git installations release.yaml is maintained by NetBox's
 release process; do not import the NetBox venv or its local configuration.
 """
 from __future__ import annotations
+import ast
 import re
 from pathlib import Path
 
@@ -20,6 +21,22 @@ def read_netbox_version(release_file: Path = DEFAULT_RELEASE) -> str:
                 match = _VERSION.fullmatch(line.strip())
                 if match:
                     return match.group(1).removeprefix('v')
+    except FileNotFoundError:
+        # Older releases store a literal VERSION in netbox/settings.py.
+        # Do not import or execute settings, or fall back on malformed YAML.
+        try:
+            settings = release_file.parent / 'netbox/settings.py'
+            if settings.is_symlink() or settings.stat().st_size > 1024 * 1024:
+                return ''
+            tree = ast.parse(settings.read_text(encoding='utf-8'))
+            values = [node.value.value for node in tree.body
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in node.targets)
+                      and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)]
+            if len(values) == 1 and re.fullmatch(r'\d+\.\d+\.\d+', values[0]):
+                return values[0]
+        except (OSError, UnicodeError, SyntaxError):
+            pass
     except (OSError, UnicodeError):
         pass
     return ''
