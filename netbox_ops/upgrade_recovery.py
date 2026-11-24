@@ -163,7 +163,10 @@ def _capture_quiesced_recovery(
             'configuration': files,
             'archive': archive.name,
         }
-        _write_private(manifest, json.dumps(record, indent=2, sort_keys=True).encode('utf-8'))
+        # Publish the completion marker only after the private record is complete.
+        pending = directory / '.recovery.pending'
+        _write_private(pending, json.dumps(record, indent=2, sort_keys=True).encode('utf-8'))
+        os.replace(pending, manifest)
         return UpgradeRecovery(directory, archive, manifest)
     except Exception:
         # Never echo exception text: subprocess output or config may contain secrets.
