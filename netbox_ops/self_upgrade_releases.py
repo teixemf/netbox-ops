@@ -1,7 +1,7 @@
 """Read official netbox-ops releases without changing the local installation.
 
-Compatibility decisions will be added once the release manifest contract is fixed.
-This module intentionally never treats API metadata as proof of a safe upgrade.
+The catalogue only identifies official assets. Compatibility metadata must
+be read and validated separately before a release can be selected for upgrade.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ API_URL = 'https://api.github.com/repos/teixemf/netbox-ops/releases'
 DOWNLOAD_PREFIX = 'https://github.com/teixemf/netbox-ops/releases/download/'
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_PAGES = 5
+MAX_MANIFEST_BYTES = 16 * 1024
 TAG_PATTERN = re.compile(r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')
 
 
@@ -56,6 +57,7 @@ class OfficialRelease:
     published_at: str
     archive: ReleaseAsset
     checksum: ReleaseAsset
+    compatibility: ReleaseAsset | None = None
 
 
 def _official_asset(asset: object, name: str, tag: str) -> ReleaseAsset | None:
@@ -113,8 +115,17 @@ def parse_releases(payload: object) -> list[OfficialRelease]:
         published = item.get('published_at')
         if not isinstance(body, str) or not isinstance(published, str) or not published:
             continue
+        manifest_name = f'netbox-ops-{tag}.compatibility.json'
+        manifests = [asset for asset in assets if isinstance(asset, dict)
+                     and asset.get('name') == manifest_name]
+        manifest = (_official_asset(manifests[0], manifest_name, tag)
+                    if len(manifests) == 1 else None)
+        if manifest is not None and manifest.size > MAX_MANIFEST_BYTES:
+            manifest = None
+        # Older releases without metadata remain visible, but unverified.
         found[version] = OfficialRelease(
-            version, tag, body, published, valid_archives[0], valid_checksums[0]
+            version, tag, body, published, valid_archives[0], valid_checksums[0],
+            manifest,
         )
     return sorted(found.values(), key=lambda release: release.version, reverse=True)
 
