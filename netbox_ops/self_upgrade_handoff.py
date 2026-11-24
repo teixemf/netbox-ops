@@ -256,6 +256,20 @@ def launch_prepared_release(prepared: PreparedRelease) -> int:
                 _sync_parent(ACTIVE.parent)
 
 
+def discard_prepared_release(prepared: PreparedRelease) -> None:
+    """Discard an unused candidate, never a stage owned by a live handoff."""
+    _root()
+    with ExclusiveLock(LOCK_PATH):
+        if _pending(ACTIVE) or _handoff(ACTIVE).exists() or _handoff(ACTIVE).is_symlink():
+            raise SwapError('A handoff may own the candidate; recovery is required')
+        stage = _stage_path(ACTIVE, prepared.path.name)
+        if stage != prepared.path or _identity(stage) != prepared.identity:
+            raise SwapError('Prepared installation identity changed')
+        verify_candidate_layout(stage, prepared.release.version)
+        shutil.rmtree(stage)
+        _sync_parent(ACTIVE.parent)
+
+
 def _preflight(active: Path, staged: Path, record: dict) -> None:
     local = inspect_installation()
     if (_snapshot(local) != record['installed']
