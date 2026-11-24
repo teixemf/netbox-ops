@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .self_upgrade_archive import ReleaseArchiveError
 from .self_upgrade_releases import Version
-from .self_upgrade_stage import _check_tree, _safe_parent
+from .self_upgrade_stage import _check_tree, _safe_parent, stage_release
 
 _RUNTIME_MARGIN = 64 * 1024 * 1024
 _ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'}
@@ -117,4 +117,25 @@ def prepare_staged_runtime(staged: Path, expected: Version, *,
     except BaseException:
         if venv.is_dir() and not venv.is_symlink():
             shutil.rmtree(venv)
+        raise
+
+
+def stage_installation(archive: Path, checksum: bytes, expected: Version, *,
+                       python: Path | None = None,
+                       temp_root: Path = Path('/tmp'),
+                       install_parent: Path = Path('/opt')) -> Path:
+    """Prepare a complete candidate after the caller approves compatibility.
+
+    A failure removes the candidate without touching the active installation.
+    The returned directory is ready for the helper's final validation and swap.
+    """
+    if archive.name != f'netbox-ops-v{expected}.tar.gz':
+        raise ReleaseArchiveError('Archive name does not match the selected version')
+    staged = stage_release(archive, checksum, temp_root=temp_root,
+                           install_parent=install_parent)
+    try:
+        prepare_staged_runtime(staged, expected, python=python)
+        return staged
+    except BaseException:
+        shutil.rmtree(staged)
         raise
