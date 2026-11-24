@@ -32,10 +32,11 @@ def execute_netbox_upgrade(
     rebuild_plan: Callable[[], UpgradePlan],
     health_url: str,
     authorization: str | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> UpgradeRecovery:
     """Run approved NetBox-only stages under the shared operation lock."""
     return _execute_upgrade(cfg, plan, approval, rebuild_plan=rebuild_plan,
-                            health_url=health_url, authorization=authorization,
+                            health_url=health_url, authorization=authorization, progress=progress,
                             operation='netbox')
 
 
@@ -44,10 +45,11 @@ def execute_plugin_upgrade(
     rebuild_plan: Callable[[], UpgradePlan],
     health_url: str,
     authorization: str | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> UpgradeRecovery:
     """Upgrade only selected plugin packages, without checking out NetBox."""
     return _execute_upgrade(cfg, plan, approval, rebuild_plan=rebuild_plan,
-                            health_url=health_url, authorization=authorization,
+                            health_url=health_url, authorization=authorization, progress=progress,
                             operation='plugins')
 
 
@@ -56,10 +58,11 @@ def execute_combined_upgrade(
     rebuild_plan: Callable[[], UpgradePlan],
     health_url: str,
     authorization: str | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> UpgradeRecovery:
     """Execute NetBox and selected plugin stages in one maintenance window."""
     return _execute_upgrade(cfg, plan, approval, rebuild_plan=rebuild_plan,
-                            health_url=health_url, authorization=authorization,
+                            health_url=health_url, authorization=authorization, progress=progress,
                             operation='combined')
 
 
@@ -67,8 +70,17 @@ def _execute_upgrade(
     cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
     rebuild_plan: Callable[[], UpgradePlan],
     health_url: str, authorization: str | None, operation: str,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> UpgradeRecovery:
     """Share approval, maintenance, backup, health and failure handling."""
+    def report(phase: str, done: int = 0) -> None:
+        if progress is not None:
+            try:
+                progress(phase, done, len(plan.stages))
+            except Exception:
+                pass  # A display failure must not interrupt maintenance.
+
+    report('preflight')
     if os.geteuid() != 0:
         raise UpgradeExecutionError('Root privileges required for upgrade')
     with ExclusiveLock():
@@ -104,13 +116,16 @@ def _execute_upgrade(
         write_audit(f'NetBox {operation} upgrade maintenance requested')
         begin_maintenance()
         try:
+            report('stop')
             stop_upgrade_writers(systemd)
             phase = 'capture recovery'
+            report('backup')
             recovery = _capture_quiesced_recovery(cfg, plan, systemd=systemd, pinned_stages=stages)
             write_audit(f'NetBox upgrade recovery={recovery.directory.name}')
             expected_health = baseline
             if operation == 'plugins':
                 phase = 'plugin installation and migration'
+                report('stage', completed)
                 if prepared is None:
                     raise UpgradeExecutionError('Plugin preflight was not completed')
                 loaded = run_plugin_stage(live, plan, prepared, base_python, systemd=systemd)
@@ -118,10 +133,12 @@ def _execute_upgrade(
                     raise UpgradeExecutionError('Configured plugin registry changed during installation')
                 expected_health = replace(baseline, plugins=loaded)
                 completed = 1
+                report('validated', completed)
                 write_audit('NetBox plugin stage completed')
             for index, (stage, planned) in enumerate(zip(stages, plan.stages, strict=True), 1):
                 if operation == 'plugins':
                     break
+                report('stage', completed)
                 if operation == 'combined':
                     phase = f'stage {index} preflight'
                     require_quiesced_writers(systemd)
@@ -145,6 +162,7 @@ def _execute_upgrade(
                         raise UpgradeExecutionError('Plugin registry changed before the final stage')
                     expected_health = replace(baseline, plugins=loaded)
                     completed = index
+                    report('validated', completed)
                     write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
                     continue
                 live = run_stage(live, stage, systemd=systemd)
@@ -159,11 +177,14 @@ def _execute_upgrade(
                        for name, version in planned.plugin_versions):
                     raise UpgradeExecutionError('An approved plugin version changed during the stage')
                 completed = index
+                report('validated', completed)
                 write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
             phase = 'start writers'
+            report('start', completed)
             try:
                 start_upgrade_writers(systemd)
                 phase = 'functional health check'
+                report('health', completed)
                 wait_for_netbox_health(
                     health_url, plan.target_netbox, expected_health, authorization=authorization,
                 )
@@ -182,6 +203,7 @@ def _execute_upgrade(
             phase = 'finish maintenance'
             write_audit('NetBox upgrade completed')
             finish_maintenance()
+            report('complete', completed)
             return recovery
         except Exception:
             # Do not include command output or arbitrary exception text.
@@ -191,6 +213,7 @@ def _execute_upgrade(
                 write_audit(f'NetBox upgrade failed phase={phase} completed={completed} recovery={location}')
             except Exception:
                 pass
+            report('failed', completed)
             last = stages[completed - 1].version if completed else 'none'
             raise UpgradeExecutionError(
                 f'Upgrade failed during {phase}; recovery: {location}; '

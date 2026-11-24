@@ -118,3 +118,42 @@ each stage. Failure reports include the number and release of the last
 validated stage, if any. Review the pending marker, audit log and recovery
 record before performing manual recovery. A failed stage may already have
 applied migrations; there is no automatic full rollback.
+
+
+## CLI and terminal interface
+
+The existing NetBox, plugin and combined upgrade entries open an editable
+plan in the TUI. Choose a target release and select plugin packages, optionally
+pinning a specific stable release. Recalculate after edits, review the compact
+summary and open the compatibility details before approving. An edited
+selection invalidates the previous plan. Execution requires the literal
+`UPGRADE` confirmation and, for uncertain plans, a second `UNCERTAIN`
+confirmation. The API authorization header is optional and entered without echo.
+
+The CLI previews a plan without changing the installation:
+
+```sh
+netbox-ops upgrade inspect
+netbox-ops upgrade netbox --version 4.4.2 --details
+netbox-ops upgrade plugins --plugin example-plugin==2.0.0
+netbox-ops upgrade stack --netbox-version 4.4.2 --plugin example-plugin
+```
+
+Use `--all` for plugins or `--plugins all` for a combined plan to select
+all discovered configured or declared plugin packages. Repeat `--plugin`
+to select multiple packages. Omitting a plugin version selects its latest
+stable release. Review the resulting versions and warnings, not just the
+requested selection.
+
+To execute, repeat the same preview command with `--execute`,
+`--approve-plan <fingerprint>` (copy the complete displayed fingerprint)
+and `--health-url https://netbox.example/api/status/`. Add
+`--accept-unknowns` only after reviewing uncertain compatibility. The
+fingerprint must match the freshly generated plan; a changed plan requires
+a new review. Use `--prompt-authorization` if API authentication is needed.
+Never place credentials in the URL or command arguments.
+
+Progress counts validated stages, not estimated time or downloaded bytes.
+A successful execution displays the recovery directory. On failure, consult
+the safe diagnostic, audit log and recovery record before taking further action.
+Real end-to-end upgrade tests remain in #88.

@@ -859,6 +859,9 @@ class CursesMenu:
                     elif data == ('self-upgrade', ''):
                         self.stdscr.timeout(-1)
                         self._self_upgrade()
+                    elif data[0] == 'upgrade':
+                        self.stdscr.timeout(-1)
+                        self._upgrade(data[1])
                     elif data == ('backup', 'manage'):
                         self.stdscr.timeout(-1)
                         self._backups()
@@ -872,6 +875,164 @@ class CursesMenu:
                     cursor = None
         finally:
             self.stdscr.timeout(-1)
+
+    def _upgrade_input(self, title: str, prompt: str, *, initial: str = '',
+                       secret: bool = False) -> str | None:
+        typed = initial
+        while True:
+            frame = self._frame(title, self.t('tui_confirm_hint'))
+            if frame:
+                _, width = frame
+                for y, line in enumerate(textwrap.wrap(prompt, width=max(10, width - 8))[:3], 3):
+                    self._put(y, 3, line)
+                visible = '*' * len(typed) if secret else typed
+                self._put(7, 3, '> ' + visible[-max(1, width - 9):], 'title')
+                self.stdscr.refresh()
+            key = self.stdscr.getch()
+            if key in (27, 3):
+                return None
+            if not frame:
+                continue
+            if key in (10, 13, curses.KEY_ENTER):
+                return typed
+            if key in (8, 127, curses.KEY_BACKSPACE):
+                typed = typed[:-1]
+            elif 32 <= key <= 126 and len(typed) < 2048:
+                typed += chr(key)
+
+    def _upgrade(self, operation: str) -> None:
+        """Edit a shared plan and require explicit confirmation before execution."""
+        from .upgrade_ui import discover_context, make_plan, summary_lines, execute_plan
+        from .upgrade_execution import UpgradeExecutionError
+
+        title = self.t({'netbox': 'menu_10', 'plugins': 'menu_11', 'stack': 'menu_12'}[operation])
+        hint = self.t('tui_back_hint')
+        try:
+            cfg = load_config(self.config_path)
+            context = self._upgrade_job(title, lambda _: discover_context(cfg, releases=operation != 'plugins'))
+            if context is None:
+                return
+            target = context.targets[0] if operation != 'plugins' and context.targets else None
+            selected = {}
+            plan = None
+            while True:
+                entries = []
+                actions = []
+                if operation != 'plugins':
+                    entries.append((self.t('upgrade_target', target=target or '?'), ''))
+                    actions.append('target')
+                if operation != 'netbox':
+                    entries.append((self.t('upgrade_select_plugins', count=len(selected)), ''))
+                    actions.append('plugins')
+                entries.append((self.t('upgrade_preview'), ''))
+                actions.append('preview')
+                if plan is not None:
+                    entries.extend(((self.t('upgrade_details'), ''), (self.t('upgrade_execute'), '')))
+                    actions.extend(('details', 'execute'))
+                choice = self._choose(title, entries, hint)
+                if not isinstance(choice, int):
+                    return
+                action = actions[choice]
+                if action == 'target':
+                    choice = self._choose(title, [(v, '') for v in context.targets], hint)
+                    if isinstance(choice, int):
+                        target = context.targets[choice]
+                        plan = None
+                elif action == 'plugins':
+                    while True:
+                        packages = context.plugins
+                        items = [(self.t('upgrade_select_all'), ''), (self.t('upgrade_clear_all'), '')]
+                        items.extend((f'[{"x" if name in selected else " "}] {name}: {version}'
+                                      + (f' -> {selected[name] or self.t("upgrade_latest")}'
+                                         if name in selected else ''), '') for name, version in packages)
+                        choice = self._choose(title, items, hint)
+                        if not isinstance(choice, int):
+                            break
+                        if choice == 0:
+                            selected = dict.fromkeys(name for name, _ in packages)
+                        elif choice == 1:
+                            selected = {}
+                        else:
+                            name, _ = packages[choice - 2]
+                            mode = self._choose(name, [(self.t('upgrade_latest'), ''),
+                                                (self.t('upgrade_explicit'), ''),
+                                                (self.t('upgrade_remove'), '')], hint)
+                            if mode == 0:
+                                selected[name] = None
+                            elif mode == 1:
+                                value = self._upgrade_input(name, self.t('upgrade_version_prompt'))
+                                if value:
+                                    selected[name] = value.strip()
+                            elif mode == 2:
+                                selected.pop(name, None)
+                        plan = None
+                elif action == 'preview':
+                    plan = self._upgrade_job(title, lambda _: make_plan(context, operation, target, selected))
+                    if plan is not None:
+                        self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)])
+                elif action == 'details':
+                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t, details=True)])
+                elif action == 'execute':
+                    if not plan.can_execute:
+                        self._show_lines(title, [(self.t('upgrade_blocked'), 'failure')])
+                        continue
+                    # Display the exact plan again immediately before approval.
+                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)])
+                    url = self._upgrade_input(title, self.t('upgrade_url_prompt'))
+                    if not url:
+                        continue
+                    auth = self._upgrade_input(title, self.t('upgrade_auth_prompt'), secret=True)
+                    if auth is None:
+                        continue
+                    if not self._confirm_token(title, self.t('upgrade_confirm'), 'UPGRADE'):
+                        continue
+                    unknowns = plan.requires_strong_confirmation
+                    if unknowns and not self._confirm_token(title, self.t('upgrade_confirm_unknowns'), 'UNCERTAIN'):
+                        continue
+                    approved = plan
+                    result = self._upgrade_job(title, lambda report: execute_plan(
+                        cfg, operation, approved, fingerprint=approved.fingerprint,
+                        acknowledge_unknowns=unknowns, health_url=url, authorization=auth or None,
+                        progress=report,
+                    ))
+                    if result is not None:
+                        self._show_lines(title, [(self.t('upgrade_success', recovery=result.directory), 'success')])
+                    return
+        except UpgradeExecutionError as exc:
+            self._show_lines(title, [(self.t('upgrade_error', message=str(exc)), 'failure')])
+        except Exception:
+            self._show_lines(title, [(self.t('upgrade_discovery_error'), 'failure')])
+
+    def _upgrade_job(self, title: str, worker):
+        """Keep curses in the UI thread and show actual backend stage progress."""
+        from .upgrade_execution import UpgradeExecutionError
+        events = queue.SimpleQueue()
+        phase, done, total = 'preflight', 0, 0
+        tick = 0
+        self.stdscr.timeout(150)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(worker, lambda phase, done, total: events.put((phase, done, total)))
+                while not future.done():
+                    while not events.empty():
+                        phase, done, total = events.get_nowait()
+                    frame = self._frame(title, self.t('upgrade_busy'))
+                    if frame:
+                        self._put(4, 3, self.t('upgrade_progress', phase=self.t('upgrade_phase_' + phase),
+                                              done=done, total=total))
+                        self._put(6, 3, ('|', '/', '-', '/')[tick % 4])
+                        self.stdscr.refresh()
+                    tick += 1
+                    self.stdscr.getch()
+                return future.result()
+        except UpgradeExecutionError as exc:
+            error = self.t('upgrade_error', message=str(exc))
+        except Exception:
+            error = self.t('upgrade_discovery_error')
+        finally:
+            self.stdscr.timeout(-1)
+        self._show_lines(title, [(error, 'failure')])
+        return None
 
     def _self_upgrade(self) -> None:
         """Browse official releases without enabling installation."""

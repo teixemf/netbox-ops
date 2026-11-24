@@ -90,20 +90,28 @@ def build_parser() -> argparse.ArgumentParser:
     updates_commands = updates.add_subparsers(dest='action', required=True)
     updates_commands.add_parser('check', help='Not yet implemented.')
 
-    upgrade = top.add_parser('upgrade', help='NetBox and plugin upgrades (not implemented).')
+    upgrade = top.add_parser('upgrade', help='Inspect, plan and execute NetBox upgrades.')
     upgrade_commands = upgrade.add_subparsers(dest='action', required=True)
-    netbox = upgrade_commands.add_parser('netbox', help='Not yet implemented.')
-    netbox.add_argument('--version', help='Desired NetBox version (reserved).')
-    plugins = upgrade_commands.add_parser('plugins', help='Not yet implemented.')
-    plugin_selector = plugins.add_mutually_exclusive_group()
-    plugin_selector.add_argument('--all', action='store_true')
-    plugin_selector.add_argument('--plugin', action='append')
-    plugins.add_argument('--version', help='Desired version for a selected plugin (reserved).')
-    stack = upgrade_commands.add_parser('stack', help='Not yet implemented.')
-    stack.add_argument('--netbox-version', help='Desired NetBox version (reserved).')
-    stack_selector = stack.add_mutually_exclusive_group()
-    stack_selector.add_argument('--plugins', choices=('all',), help='Upgrade all plugins (reserved).')
-    stack_selector.add_argument('--plugin', action='append', help='Selected plugins (reserved).')
+    upgrade_commands.add_parser('inspect', help='Inspect installed plugins and official NetBox releases.')
+    for operation in ('netbox', 'plugins', 'stack'):
+        cmd = upgrade_commands.add_parser(operation, help='Preview an upgrade plan (read-only by default).')
+        cmd.add_argument('--details', action='store_true', help='Show compatibility evidence and safeguards.')
+        cmd.add_argument('--execute', action='store_true', help='Execute only with the approved fingerprint.')
+        cmd.add_argument('--approve-plan', help='Exact fingerprint from the preview.')
+        cmd.add_argument('--accept-unknowns', action='store_true', help='Explicitly acknowledge uncertain compatibility.')
+        cmd.add_argument('--health-url', help='NetBox API status URL; required for execution.')
+        cmd.add_argument('--prompt-authorization', action='store_true', help='Read an authorization header without echo.')
+        if operation == 'netbox':
+            cmd.add_argument('--version', help='Target stable NetBox release; defaults to newest.')
+        else:
+            selector = cmd.add_mutually_exclusive_group()
+            selector.add_argument('--plugin', action='append', help='Package or package==version; repeat to select more.')
+            if operation == 'plugins':
+                selector.add_argument('--all', action='store_true', help='Select all discovered plugins.')
+                cmd.add_argument('--version', help='Version for a single selected plugin.')
+            else:
+                selector.add_argument('--plugins', choices=('all',), help='Select all discovered plugins.')
+                cmd.add_argument('--netbox-version', help='Target stable NetBox release; defaults to newest.')
 
     top.add_parser('platform', help='Show OS family, systemd units and PostgreSQL tools (read-only).')
     self_upgrade = top.add_parser('self-upgrade', help='Inspect official netbox-ops releases.')
@@ -267,6 +275,9 @@ def perform_backup_action(group: str, action: str, cfg: Configuration,
 
 def dispatch(args: argparse.Namespace, t: Translator) -> int:
     action = getattr(args, 'action', '')
+    if args.command == 'upgrade':
+        from .upgrade_ui import run_cli
+        return run_cli(args, load_config(args.config), t)
     if args.command == 'self-upgrade' and action in ('list', 'show'):
         from .self_upgrade_ui import run_catalogue
         return run_catalogue(action, t, target=getattr(args, 'version', None))
@@ -419,6 +430,16 @@ def interactive_menu(t: Translator, config_path: Path = CONFIG_PATH) -> int:
                         perform_backup_action('backup', kind, cfg, t)
                 elif option == '4':
                     perform_backup_action('backup', 'list', cfg, t)
+            elif group == 'upgrade':
+                from .upgrade_ui import run_cli
+                from shlex import split
+                print(t('upgrade_text_help'))
+                raw = input(t('prompt'))
+                try:
+                    options = build_parser().parse_args(['upgrade', action, *split(raw)])
+                except (SystemExit, ValueError):
+                    continue
+                run_cli(options, cfg, t)
             else:
                 not_implemented(t, f'{group} {action}'.strip())
         except (ServiceError, ConfigError, OSError) as exc:
