@@ -10,6 +10,7 @@ from .upgrade_execution import (
     ExecutionApproval, UpgradeExecutionError, validate_execution_approval,
 )
 from .upgrade_git import pin_release_stages
+from .upgrade_maintenance import begin_maintenance, finish_maintenance
 from .upgrade_plan import UpgradePlan
 from .upgrade_recovery import UpgradeRecovery, _capture_quiesced_recovery
 from .upgrade_services import (
@@ -38,6 +39,7 @@ def execute_netbox_upgrade(
         recovery = None
         phase = 'stop writers'
         write_audit('NetBox upgrade maintenance requested')
+        begin_maintenance()
         try:
             stop_upgrade_writers(systemd)
             phase = 'capture recovery'
@@ -63,6 +65,7 @@ def execute_netbox_upgrade(
                 phase = 'functional health check; writers stopped'
                 raise
             write_audit('NetBox upgrade completed')
+            finish_maintenance()
             return recovery
         except Exception:
             # Do not include command output or arbitrary exception text.
