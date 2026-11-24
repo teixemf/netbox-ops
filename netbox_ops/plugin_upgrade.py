@@ -114,7 +114,7 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
             raise UpgradeExecutionError('Plugin compatibility evidence does not match the approved stage')
 
     _, core_entries = _parse(core)
-    if not core_entries or set(selected) & set(core_entries):
+    if not core_entries or set(selection) & set(core_entries):
         raise UpgradeExecutionError('Cannot select NetBox core dependencies as plugins')
     core_pins = []
     expected = {}
@@ -272,6 +272,16 @@ def run_plugin_stage(
     ):
         require_quiesced_writers(systemd)
         _command([*manage, *args], root, env, label, runner, 1800)
+    return read_plugin_registry(final, env, systemd=systemd, runner=runner)
+
+
+def read_plugin_registry(
+    installation: GitNetBoxInstallation, env: dict[str, str], *,
+    systemd: SystemdServices, runner: Callable = subprocess.run,
+) -> tuple[tuple[str, str | None], ...]:
+    """Read the local Django registry without restarting the writers."""
+    root = installation.root
+    python = str(installation.python)
     # The local Django registry provides app labels and runtime versions, which
     # are not necessarily identical to distribution names and versions.
     probe = (
