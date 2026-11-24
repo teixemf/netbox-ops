@@ -30,7 +30,7 @@ LOCAL = b'# keep comment\r\nexample-plugin[extra] == 1.0.0 # selected\r\nother-p
 CORE = b'Django==5.2.6\npsycopg[c,pool]==3.2.10\n'
 
 
-class PluginUpgradeTests(unittest.TestCase):
+class _PluginFixture(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -73,6 +73,7 @@ class PluginUpgradeTests(unittest.TestCase):
     def prepare(self, plan=None, local=LOCAL, core=CORE):
         return prepare_plugin_upgrade(plan or self.plan, local, core)
 
+class PluginUpgradeTests(_PluginFixture):
     def test_latest_selection_retains_its_own_compatibility_evidence(self):
         checks = {item.package: item.version for item in self.plan.stages[0].plugin_checks}
         self.assertEqual(checks['example-plugin'], '1.5.0')
@@ -171,7 +172,7 @@ class PluginUpgradeTests(unittest.TestCase):
             _apply_requirements(self.root, prepared)
 
 
-class PluginStageTests(PluginUpgradeTests):
+class PluginStageTests(_PluginFixture):
     def setUp(self):
         super().setUp()
         self.prepared = self.prepare()
