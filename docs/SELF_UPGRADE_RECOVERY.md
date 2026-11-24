@@ -33,6 +33,30 @@ Review `/var/log/netbox-ops/operations.log` for the result. A helper PID is not
 proof of a successful upgrade. If there is no remaining handoff directory,
 the normal completion or rollback has cleaned up the independent helper.
 
-The CLI/TUI launch, confirmation and final result presentation are handled in
-#78. End-to-end validation of this path on disposable Linux VMs is tracked in
-#79.
+## Operator commands
+
+```sh
+sudo netbox-ops self-upgrade list
+sudo netbox-ops self-upgrade show vX.Y.Z
+sudo netbox-ops self-upgrade plan vX.Y.Z
+sudo netbox-ops self-upgrade install vX.Y.Z
+sudo netbox-ops self-upgrade status
+```
+
+For a noninteractive installation, pass `--confirm 'UPGRADE vX.Y.Z'` with the
+exact target version. Never use an unverified release. The installation command
+exits after successful handoff (exit 0 means submitted, not installed).
+A mandatory intermediate step is installed separately: check its result and
+review the original target again before submitting the next step.
+
+The last result is stored in `/var/lib/netbox-ops/self-upgrade-result.json`.
+The TUI and fallback text menu also provide access to the last result.
+
+Exit codes: 0 for a successful read/plan/submission or a completed target
+reported by status; 1 for failure; 2 for invalid arguments or missing
+noninteractive confirmation; 3 for a blocked or cancelled upgrade; 4 for
+a pending/unknown result or a completed intermediate step with more steps
+remaining. The status command needs the installed launcher; if it is missing,
+use the independent recovery command above.
+
+End-to-end validation on disposable Linux VMs is tracked in #79.
