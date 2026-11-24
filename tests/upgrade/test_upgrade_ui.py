@@ -48,7 +48,7 @@ class InterfaceFixture(unittest.TestCase):
         return PluginReview(package, version, None, tuple(
             PluginCompatibility(package, version, stage, runtime, 'compatible', (), ())
             for stage, runtime in zip(stages, python_versions)
-        ), ())
+        ), (), release_status='verified')
 
     def build(self, operation='netbox', target='4.4.2', selected=None):
         with patch('netbox_ops.upgrade_ui.build_upgrade_plan',

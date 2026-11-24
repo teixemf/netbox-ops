@@ -330,6 +330,7 @@ def build_upgrade_plan(
         item_warnings = []
         if is_selected:
             chosen = selected_mapping[name]
+            proposed = chosen  # Never substitute the installed version on discovery failure.
             try:
                 selection_review = reviewer(name, [target_versions[-1]], [runtimes[-1][1]],
                                             version=chosen,
@@ -340,12 +341,23 @@ def build_upgrade_plan(
                 # No exception details: upstream errors could expose secrets.
                 item_warnings.append(f'{name}: plugin release review unavailable ({type(exc).__name__})')
                 selection_review = None
+            verified = False
             if selection_review is not None:
-                proposed = selection_review.selected_version
+                if chosen is None:
+                    proposed = selection_review.selected_version
                 item_warnings.extend(selection_review.warnings)
-                if selection_review.stages:
-                    current_to_target[(name, target_versions[-1])] = selection_review.stages[-1]
-            if proposed is None:
+                if (proposed is not None and selection_review.selected_version == proposed
+                        and normalize_name(selection_review.package) == name
+                        and len(selection_review.stages) == 1):
+                    check = selection_review.stages[0]
+                    if (normalize_name(check.package) == name and check.version == proposed
+                            and check.netbox_version == target_versions[-1]
+                            and check.python_version == runtimes[-1][1]):
+                        current_to_target[(name, target_versions[-1])] = check
+                        verified = selection_review.release_status == 'verified'
+                if selection_review.release_status == 'unavailable':
+                    blockers.append(f'{name}: selected plugin release is unavailable')
+            if not verified:
                 item_warnings.append(f'{name}: selected plugin release is not verified')
                 blockers.append(f'{name}: select a verified plugin release before executing')
         else:

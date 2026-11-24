@@ -73,6 +73,7 @@ class PluginReview:
     releases: ReleaseCatalog | None
     stages: tuple[PluginCompatibility, ...]
     warnings: tuple[str, ...]
+    release_status: str = 'unknown'  # verified, unavailable, unknown
 
 
 @dataclass(frozen=True)
@@ -203,6 +204,13 @@ def fetch_pypi_json(package: str, version: str | None = None,
     return result
 
 
+def _published_files(files: object) -> list[dict]:
+    if not isinstance(files, list):
+        return []
+    return [entry for entry in files if isinstance(entry, dict)
+            and not entry.get('yanked') and entry.get('packagetype') in ('bdist_wheel', 'sdist')]
+
+
 def discover_stable_releases(package: str, project: dict, python_version: str) -> ReleaseCatalog:
     """Use non-yanked published files; never treat a beta as the latest stable."""
     package = _validate_package(package)
@@ -221,8 +229,7 @@ def discover_stable_releases(package: str, project: dict, python_version: str) -
         if not isinstance(files, list):
             skipped += 1
             continue
-        published = [entry for entry in files if isinstance(entry, dict)
-                     and not entry.get('yanked') and entry.get('packagetype') in ('bdist_wheel', 'sdist')]
+        published = _published_files(files)
         if not published:
             continue
         python_checks = [_check_specifiers(entry.get('requires_python'), python_version)
@@ -579,22 +586,44 @@ def review_plugin_upgrade(package: str, netbox_steps: Sequence[str],
         return PluginReview(package, None, listing, (), tuple(warnings))
     if _release_key(selected) is None:
         raise CompatibilityError('Select a stable, numeric release version')
-    if listing and selected not in {item.version for item in listing.stable}:
-        warnings.append('Selected version was not found among published non-yanked releases')
+    release_status = 'unknown'
+    release_files = None
+    if listing is not None:
+        entries = project['releases']
+        release_files = entries.get(selected)
+        if _published_files(release_files):
+            release_status = 'verified'
+        elif selected not in entries or isinstance(release_files, list):
+            release_status = 'unavailable'
     metadata = None
     try:
         metadata = fetcher(package, selected)
+    except HTTPError as exc:
+        if exc.code == 404:
+            release_status = 'unavailable' if release_status != 'verified' else 'unknown'
+        warnings.append('Cannot retrieve selected plugin metadata; compatibility remains uncertain')
     except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
         warnings.append('Cannot retrieve selected plugin metadata; compatibility remains uncertain')
+    info = metadata.get('info') if isinstance(metadata, dict) else None
+    identity_matches = (isinstance(info, dict) and isinstance(info.get('name'), str)
+                        and normalize_name(info['name']) == normalize_name(package)
+                        and info.get('version') == selected)
+    if identity_matches and isinstance(metadata.get('urls'), list):
+        # An exact release response can resolve a stale project listing.
+        release_files = metadata['urls']
+        release_status = 'verified' if _published_files(release_files) else 'unavailable'
+    if release_status == 'unavailable':
+        warnings.append('Selected version was not found among published non-yanked releases')
+    elif release_status == 'unknown':
+        warnings.append('Selected release availability could not be verified')
     declaration = None
-    if metadata is not None:
+    if identity_matches:
         try:
             declaration = docs_fetcher(metadata, selected)
         except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
             warnings.append('Cannot verify plugin release documentation')
     alternatives = [item.version for item in listing.stable if item.version != selected] if listing else []
-    release_files = project.get('releases', {}).get(selected) if isinstance(project, dict) else None
     stages = assess_upgrade_stages(package, selected, netbox_steps, python_versions, metadata,
                                    published_files=release_files, declaration=declaration, catalog=catalog, preflights=preflights,
                                    alternatives=alternatives)
-    return PluginReview(package, selected, listing, stages, tuple(warnings))
+    return PluginReview(package, selected, listing, stages, tuple(warnings), release_status)
