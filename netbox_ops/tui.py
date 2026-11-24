@@ -876,7 +876,7 @@ class CursesMenu:
     def _self_upgrade(self) -> None:
         """Browse official releases without enabling installation."""
         from .self_upgrade_releases import ReleaseDiscoveryError, Version, discover_releases
-        from .self_upgrade_ui import catalogue_lines, changelog_lines
+        from .self_upgrade_ui import catalogue_lines, changelog_lines, compatibility_catalogue
 
         title = self.t('menu_13')
         try:
@@ -889,7 +889,8 @@ class CursesMenu:
         except (ReleaseDiscoveryError, OSError):
             self._show_lines(title, [(self.t('self_upgrade_discovery_failed'), 'failure')])
             return
-        lines = catalogue_lines(releases, self.t, installed)
+        catalogue = compatibility_catalogue(releases, installed)
+        lines = catalogue_lines(releases, self.t, installed, catalogue=catalogue)
         if not releases:
             self._show_lines(title, [(line, 'muted') for line in lines])
             return
@@ -899,7 +900,7 @@ class CursesMenu:
             selected = self._choose(title, entries, self.t('tui_back_hint'))
             if not isinstance(selected, int):
                 return
-            details = changelog_lines(releases[selected], self.t, installed)
+            details = changelog_lines(releases[selected], self.t, installed, catalogue=catalogue)
             self._show_lines(self.t('menu_13'), [(line, '') for line in details])
 
     def _render_journal(self, panel: JournalPanel, y: int, rows: int,
