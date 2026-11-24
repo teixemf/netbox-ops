@@ -5,7 +5,7 @@ scenario=${1:?Missing scenario}
 [[ $(id -u) == 0 && -f /run/netbox-ops-ci-e2e ]]
 [[ $(cat /run/netbox-ops-ci-e2e) == netbox-ci-e2e ]]
 case "$(systemd-detect-virt --vm)" in qemu|kvm) ;; *) exit 1 ;; esac
-case "$scenario" in netbox|plugins|combined|intermediate|failure) ;; *) exit 2 ;; esac
+case "$scenario" in netbox|plugins|combined|cross-minor|failure) ;; *) exit 2 ;; esac
 root=/opt/netbox
 cli=(/usr/local/sbin/netbox-ops --lang en)
 status_url=http://127.0.0.1/api/status/
@@ -22,16 +22,8 @@ python=/usr/bin/python3.12
 plugin=netbox-inventory
 old_plugin=2.7.0
 new_plugin=2.7.1
-if [[ "$scenario" == intermediate ]]; then
-  old=3.6.9
-  target=4.0.11
-  # 3.6/3.7 require Python <=3.11; use a separate test-only interpreter.
-  /usr/bin/python3 -m venv /opt/ci-uv
-  /opt/ci-uv/bin/pip install --disable-pip-version-check --only-binary=:all: uv==0.9.13
-  UV_PYTHON_INSTALL_DIR=/opt/ci-python UV_PYTHON_BIN_DIR=/opt/ci-python-bin \
-    /opt/ci-uv/bin/uv python install 3.11.14
-  python=$(UV_PYTHON_INSTALL_DIR=/opt/ci-python /opt/ci-uv/bin/uv python find --managed-python 3.11.14)
-  [[ "$python" == /opt/ci-python/* ]]
+if [[ "$scenario" == cross-minor ]]; then
+  old=4.4.10
 fi
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
@@ -44,10 +36,8 @@ cp "$root/netbox/netbox/configuration.py" "$scratch/configuration.py"
 mv "$root" "$scratch/archive-install"
 git clone --quiet --depth 1 --branch "v$old" https://github.com/netbox-community/netbox.git "$root"
 install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netbox/configuration.py"
-# Old releases require DATABASE, current releases use DATABASES.
-if [[ "$scenario" == intermediate ]]; then
-  printf '\nDATABASE = DATABASES["default"]\n' >> "$root/netbox/netbox/configuration.py"
-fi
+# Keep both supported database configuration forms for early NetBox 4 releases.
+printf '\\nDATABASE = DATABASES["default"]\\n' >> "$root/netbox/netbox/configuration.py"
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
@@ -202,8 +192,8 @@ assert record['git_commit'] == commit and record['current_netbox'] == old
 assert record['target_netbox'] == target
 assert hashlib.sha256((directory / 'configuration.py').read_bytes()).hexdigest() == config_sha
 assert record['stages'][-1] == target
-if scenario == 'intermediate':
-    assert len(record['stages']) == 2 and record['stages'][0].startswith('3.7.')
+if scenario == 'cross-minor':
+    assert old == '4.4.10' and record['stages'] == [target]
 if scenario in ('plugins', 'combined'):
     assert ['netbox-inventory', '2.7.0'] in record['plugin_versions']
     assert ['netbox-inventory', '2.7.1'] in record['stage_commits'][-1]['plugin_versions']
