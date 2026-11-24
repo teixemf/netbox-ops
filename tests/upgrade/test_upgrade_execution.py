@@ -25,7 +25,9 @@ class ExecutionApprovalTests(unittest.TestCase):
         self.plan = Mock(
             can_execute=True, stages=(stage,), selected_plugins=(),
             source=source, fingerprint='approved',
-            requires_strong_confirmation=False, current_netbox='4.4.0',\n            target_netbox='4.4.1',\n        )
+            requires_strong_confirmation=False, current_netbox='4.4.0',
+            target_netbox='4.4.1',
+        )
         self.approval = ExecutionApproval('approved', 'a' * 40, '/opt/netbox')
         self.inspector = Mock(return_value=self.install)
 
@@ -33,11 +35,12 @@ class ExecutionApprovalTests(unittest.TestCase):
         with self.assertRaises(UpgradeExecutionError):
             validate_execution_approval(
                 plan or self.plan, approval or self.approval,
-                inspector=self.inspector,
+                inspector=self.inspector, fresh_plan=self.plan,
             )
 
     def test_valid_approval_is_read_only(self):
-        validate_execution_approval(self.plan, self.approval, inspector=self.inspector)
+        validate_execution_approval(self.plan, self.approval, inspector=self.inspector,
+                                    fresh_plan=self.plan)
         self.inspector.assert_called_once_with(Path('/opt/netbox'))
 
     def test_wrong_fingerprint_rejected_before_inspection(self):
@@ -68,7 +71,7 @@ class ExecutionApprovalTests(unittest.TestCase):
         self.check_rejected()
         validate_execution_approval(
             self.plan, replace(self.approval, approved_unknowns=True),
-            inspector=self.inspector,
+            inspector=self.inspector, fresh_plan=self.plan,
         )
 
     def test_plugin_stage_rejected(self):
@@ -90,6 +93,20 @@ class ExecutionApprovalTests(unittest.TestCase):
     def test_final_target_must_match(self):
         self.plan.target_netbox = '4.4.2'
         self.check_rejected()
+
+    def test_fresh_plan_is_mandatory(self):
+        with self.assertRaisesRegex(UpgradeExecutionError, 'Fresh preflight'):
+            validate_execution_approval(self.plan, self.approval,
+                                        inspector=self.inspector)
+        self.inspector.assert_not_called()
+
+    def test_blocked_fresh_plan_rejected_before_inspection(self):
+        with self.assertRaisesRegex(UpgradeExecutionError, 'changed during preflight'):
+            validate_execution_approval(
+                self.plan, self.approval, inspector=self.inspector,
+                fresh_plan=Mock(fingerprint='approved', can_execute=False),
+            )
+        self.inspector.assert_not_called()
 
     def test_fresh_plan_mismatch_rejected(self):
         with self.assertRaises(UpgradeExecutionError):
