@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Callable
 
 from .config import Configuration
@@ -11,9 +12,10 @@ from .upgrade_execution import (
     validate_netbox_only_pins,
 )
 from .upgrade_checkout import fetch_pinned_stage
-from .upgrade_git import pin_release_stages
+from .upgrade_git import PinnedStage, pin_release_stages
 from .upgrade_health import read_netbox_health, wait_for_netbox_health
 from .plugin_inventory import inventory_plugins, normalize_name
+from .plugin_upgrade import preflight_plugin_upgrade, run_plugin_stage
 from .upgrade_maintenance import begin_maintenance, finish_maintenance
 from .upgrade_plan import UpgradePlan
 from .upgrade_recovery import UpgradeRecovery, _capture_quiesced_recovery, _private_directory
@@ -30,41 +32,78 @@ def execute_netbox_upgrade(
     health_url: str,
     authorization: str | None = None,
 ) -> UpgradeRecovery:
-    """Run approved stages using fresh evidence and the explicit NetBox status URL.
+    """Run approved NetBox-only stages under the shared operation lock."""
+    return _execute_upgrade(cfg, plan, approval, rebuild_plan=rebuild_plan,
+                            health_url=health_url, authorization=authorization,
+                            operation='netbox')
 
-    Keep writers stopped across intermediate stages; validate Django and plugin
-    packages at each stage, and verify live HTTP health after the final start.
-    Never automatically roll back or restart after a failed stage.
-    """
+
+def execute_plugin_upgrade(
+    cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
+    rebuild_plan: Callable[[], UpgradePlan],
+    health_url: str,
+    authorization: str | None = None,
+) -> UpgradeRecovery:
+    """Upgrade only selected plugin packages, without checking out NetBox."""
+    return _execute_upgrade(cfg, plan, approval, rebuild_plan=rebuild_plan,
+                            health_url=health_url, authorization=authorization,
+                            operation='plugins')
+
+
+def _execute_upgrade(
+    cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
+    rebuild_plan: Callable[[], UpgradePlan],
+    health_url: str, authorization: str | None, operation: str,
+) -> UpgradeRecovery:
+    """Share approval, maintenance, backup, health and failure handling."""
     if os.geteuid() != 0:
         raise UpgradeExecutionError('Root privileges required for upgrade')
     with ExclusiveLock():
         fresh = rebuild_plan()
-        validate_execution_approval(plan, approval, fresh_plan=fresh)
+        validate_execution_approval(plan, approval, fresh_plan=fresh, operation=operation)
         live = plan.source.installation
         # This NetBox-only executor uses the currently selected interpreter.
         # An explicitly different runtime requires a separately approved workflow.
         if any(version != live.python_version for _, version in plan.source.python_by_stage):
             raise UpgradeExecutionError('Changing the selected Python runtime is not supported')
-        validate_netbox_only_pins(plan)
+        prepared = None
+        if operation == 'netbox':
+            validate_netbox_only_pins(plan)
+        else:
+            if inventory_plugins(live) != plan.source.inventory:
+                raise UpgradeExecutionError('Plugin inventory changed before dependency preflight')
+            prepared = preflight_plugin_upgrade(plan, approval)
         base_python = resolve_base_python(live)
         validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
         _private_directory(cfg.backup_directory)
         baseline = read_netbox_health(health_url, authorization=authorization)
         if baseline.version != plan.current_netbox:
             raise UpgradeExecutionError('HTTP status does not match the installed NetBox release')
-        stages = pin_release_stages(plan)
+        stages = (pin_release_stages(plan) if operation == 'netbox' else
+                  (PinnedStage(live.version, live.commit),))
         systemd = SystemdServices(cfg)
         recovery = None
         phase = 'stop writers'
-        write_audit('NetBox upgrade maintenance requested')
+        write_audit(f'NetBox {operation} upgrade maintenance requested')
         begin_maintenance()
         try:
             stop_upgrade_writers(systemd)
             phase = 'capture recovery'
             recovery = _capture_quiesced_recovery(cfg, plan, systemd=systemd, pinned_stages=stages)
             write_audit(f'NetBox upgrade recovery={recovery.directory.name}')
+            expected_health = baseline
+            if operation == 'plugins':
+                phase = 'plugin installation and migration'
+                if prepared is None:
+                    raise UpgradeExecutionError('Plugin preflight was not completed')
+                loaded = run_plugin_stage(live, plan, prepared, base_python, systemd=systemd)
+                if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
+                    raise UpgradeExecutionError('Configured plugin registry changed during installation')
+                expected_health = replace(baseline, plugins=loaded)
+                write_audit('NetBox plugin stage completed')
             for index, (stage, planned) in enumerate(zip(stages, plan.stages, strict=True), 1):
+                if operation == 'plugins':
+                    break
                 phase = f'stage {index} fetch'
                 require_quiesced_writers(systemd)
                 write_audit(f'NetBox upgrade starting stage={index} version={stage.version} commit={stage.commit}')
@@ -87,7 +126,7 @@ def execute_netbox_upgrade(
                 start_upgrade_writers(systemd)
                 phase = 'functional health check'
                 wait_for_netbox_health(
-                    health_url, plan.target_netbox, baseline, authorization=authorization,
+                    health_url, plan.target_netbox, expected_health, authorization=authorization,
                 )
             except Exception:
                 # Try both writers independently: one failed unit must not
