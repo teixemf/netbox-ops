@@ -69,7 +69,7 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
     digest = None if local is None else hashlib.sha256(local).hexdigest()
     if digest != inventory.requirements_hash or inventory.enabled is None:
         raise UpgradeExecutionError('Plugin requirements or configuration changed after planning')
-    if (len(plan.stages) != 1 or plan.stages[0].kind != 'plugins'
+    if (not plan.can_execute or len(plan.stages) != 1 or plan.stages[0].kind != 'plugins'
             or plan.current_netbox != plan.target_netbox):
         raise UpgradeExecutionError('Only one plugin-only stage is supported')
     installed = {}
