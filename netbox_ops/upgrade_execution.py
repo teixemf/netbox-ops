@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from .plugin_inventory import normalize_name
 from .upgrade_discovery import inspect_git_installation
 from .upgrade_plan import UpgradePlan
 
@@ -82,3 +83,26 @@ def validate_execution_approval(
             raise UpgradeExecutionError('A stage has incompatible plugins')
     if previous != plan.target_netbox:
         raise UpgradeExecutionError('Final NetBox stage does not match the target')
+
+
+def validate_netbox_only_pins(plan: UpgradePlan) -> None:
+    """Do not let the upstream venv rebuild silently update configured plugins."""
+    inventory = plan.source.inventory
+    if inventory.enabled is None:
+        raise UpgradeExecutionError('Configured plugins must be identifiable before upgrading')
+    for module in inventory.enabled:
+        top_level = module.split('.')[0]
+        matches = [p for p in inventory.packages
+                   if top_level in p.modules or
+                   (not p.modules and normalize_name(top_level) == normalize_name(p.name))]
+        if len(matches) != 1:
+            raise UpgradeExecutionError('A configured plugin cannot be mapped to an installed package')
+        package = matches[0]
+        name = normalize_name(package.name)
+        requirements = [item for item in inventory.requirements
+                        if normalize_name(item.name) == name]
+        if (len(requirements) != 1 or requirements[0].kind != 'pinned'
+                or requirements[0].version != package.version
+                or any(dict(stage.plugin_versions).get(name) != package.version
+                       for stage in plan.stages)):
+            raise UpgradeExecutionError('Pin configured plugins to their installed versions before upgrading')
