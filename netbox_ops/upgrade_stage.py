@@ -66,6 +66,7 @@ def run_stage(
     inspector: Callable = inspect_git_installation,
     checkout: Callable = checkout_pinned_stage,
     base_python: Callable = resolve_base_python,
+    prepare_script: Callable[[GitNetBoxInstallation], dict[str, str]] | None = None,
 ) -> GitNetBoxInstallation:
     """Run a stage after verified backup and under the shared exclusive lock.
 
@@ -86,6 +87,9 @@ def run_stage(
     if script.resolve() != script or not script.is_file():
         raise UpgradeExecutionError('NetBox upgrade script is missing or unsafe')
     env = upgrade_environment(selected_python)
+    if prepare_script is not None:
+        require_quiesced_writers(systemd)
+        env.update(prepare_script(live))
     commands = (
         ('upgrade script', ['/bin/bash', str(script)], 3600),
         ('Django system check', [str(live.python), str(root / 'netbox/manage.py'),
