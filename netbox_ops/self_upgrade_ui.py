@@ -41,6 +41,8 @@ def release_status(release: OfficialRelease, installed: Version,
 
 def detect_environment(installed: Version) -> LocalEnvironment:
     """Fail closed for source checkouts, non-root access and unknown layouts."""
+    from .self_upgrade_installation import inspect_installation
+
     unknown = LocalEnvironment(None, None, None)
     try:
         local = inspect_installation()
