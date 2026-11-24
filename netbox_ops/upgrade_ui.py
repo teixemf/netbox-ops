@@ -103,6 +103,8 @@ def make_plan(context: UpgradeContext, operation: str, target: str | None,
         raise UpgradeExecutionError('Select at least one plugin')
     if (operation == 'netbox' and selected) or (operation == 'plugins' and target):
         raise UpgradeExecutionError('Selection does not match the upgrade operation')
+    if operation != 'plugins' and target is not None and target.removeprefix('v') == context.installation.version:
+        raise UpgradeExecutionError('Select a newer NetBox release')
     if set(selected) - set(dict(context.plugins)):
         raise UpgradeExecutionError('Select only installed configured or declared plugins')
     return build_upgrade_plan(
@@ -138,7 +140,8 @@ def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) ->
         lines.extend(plan.release_notes)
         lines.extend(plan.safeguards)
     lines.append(t('upgrade_fingerprint', fingerprint=plan.fingerprint))
-    return lines
+    # External metadata and error details must never inject terminal controls.
+    return [''.join(c if c.isprintable() else ' ' for c in line) for line in lines]
 
 
 def execute_plan(cfg: Configuration, operation: str, plan: UpgradePlan, *,
@@ -197,6 +200,10 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
             return 0 if plan.can_execute else 1
         if not args.approve_plan or not args.health_url:
             raise UpgradeExecutionError('Execution requires --approve-plan and --health-url')
+        if not plan.can_execute or args.approve_plan != plan.fingerprint:
+            raise UpgradeExecutionError('Approved fingerprint does not match an executable plan')
+        if plan.requires_strong_confirmation and not args.accept_unknowns:
+            raise UpgradeExecutionError('Explicit confirmation of uncertain compatibility is required')
         authorization = None
         if args.prompt_authorization:
             if not sys.stdin.isatty():
