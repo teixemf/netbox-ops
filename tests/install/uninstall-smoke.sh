@@ -35,14 +35,14 @@ if /opt/netbox-ops/uninstall.sh </dev/null; then
     echo 'Noninteractive uninstall unexpectedly succeeded' >&2
     exit 1
 fi
-printf 'UNINSTALL\n\n\n' | script -qec /opt/netbox-ops/uninstall.sh /dev/null
+printf 'UNINSTALL\n\n\n' | timeout 30 script -qec /opt/netbox-ops/uninstall.sh /dev/null
 [[ ! -e /opt/netbox-ops && ! -e /usr/local/sbin/netbox-ops && ! -L /usr/sbin/netbox-ops ]]
 [[ ! -e /etc/logrotate.d/netbox-ops ]]
 grep -Fxq '{}' /etc/netbox-ops/config.json
 grep -Fxq audit /var/log/netbox-ops/operations.log
 grep -Fxq backup /var/lib/netbox-ops/backups/test.dump
 grep -Fxq 'netbox remains' /opt/netbox/marker
-printf 'UNINSTALL\nREMOVE CONFIG\nREMOVE LOGS\nCONFIRM\n' | script -qec /tmp/uninstaller/uninstall.sh /dev/null
+printf 'UNINSTALL\nREMOVE CONFIG\nREMOVE LOGS\nCONFIRM\n' | timeout 30 script -qec /tmp/uninstaller/uninstall.sh /dev/null
 [[ ! -e /etc/netbox-ops/config.json && ! -e /var/log/netbox-ops/operations.log ]]
 grep -Fxq backup /var/lib/netbox-ops/backups/test.dump
 grep -Fxq 'netbox remains' /opt/netbox/marker

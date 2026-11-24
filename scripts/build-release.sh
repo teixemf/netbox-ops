@@ -38,9 +38,12 @@ trap 'rm -rf -- "$TEMP"' EXIT
 ARCHIVE="$TEMP/$STEM.tar.gz"
 
 # Only commit-tracked installation files; never include local secrets or runtime data.
-git archive --format=tar --prefix=netbox-ops/ "$REF" \
-    LICENSE README.md CHANGELOG.md config.example.json \
-    install.sh upgrade.sh uninstall.sh netbox_ops.py netbox_ops \
+FILES=(LICENSE README.md CHANGELOG.md config.example.json install.sh upgrade.sh netbox_ops.py netbox_ops)
+# Older tags predate the uninstaller. New archives must not ship writable-by-group code.
+if git cat-file -e "${REF}:uninstall.sh" 2>/dev/null; then
+    FILES+=(uninstall.sh)
+fi
+git -c tar.umask=0022 archive --format=tar --prefix=netbox-ops/ "$REF" "${FILES[@]}" \
     | gzip -n > "$ARCHIVE"
 
 # Validate the committed package before exposing any output artifacts.
