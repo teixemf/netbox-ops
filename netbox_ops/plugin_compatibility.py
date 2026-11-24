@@ -30,7 +30,7 @@ _STABLE = re.compile(r'^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,4}(?:\.post\d+)?$')
 _TARGET = re.compile(r'^v?\d+\.\d+\.\d+$')
 _SPEC = re.compile(r'\s*(<=|>=|==|!=|~=|<|>)\s*(\d+(?:\.\d+){0,4}(?:\.\*)?)\s*')
 _DIST = re.compile(r'^\s*([A-Za-z0-9_.-]+)\s*(?:\(([^)]*)\)|([^;]*?))?\s*(?:;\s*(.*))?$')
-_PIN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}==\d+[A-Za-z0-9.+_-]*$')
+_PIN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?==\d+[A-Za-z0-9.+_-]*$')
 
 
 class CompatibilityError(Exception):
@@ -430,7 +430,7 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
                    '--ignore-installed', '--only-binary=:all:', '--no-input',
                    '--no-cache-dir', '--disable-pip-version-check', '--quiet',
                    '--timeout', '8', '--retries', '0', '--index-url', PYPI_INDEX,
-                   '--python-version', f'{match.group(1)}.{match.group(2)}',
+                   '--python-version', python_version,
                    '--report', str(report), *pins]
         try:
             completed = runner(command, cwd=temp, env=env, text=True, capture_output=True,

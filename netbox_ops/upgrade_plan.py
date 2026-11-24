@@ -342,7 +342,7 @@ def build_upgrade_plan(
             proposed = original
         # When crossing NetBox versions, the installed plugin remains active
         # until the final pin change. Assess it at *every* earlier stage.
-        original_stages = target_versions[:-1] if is_selected and len(target_versions) > 1 else target_versions
+        original_stages = target_versions[:-1] if is_selected else target_versions
         if original is not None and original_stages:
             try:
                 active_review = reviewer(

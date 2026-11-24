@@ -150,9 +150,11 @@ class CompatibilityTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, '', '')
 
         result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'],
-                                               ['django==5.2.1'], '3.12.3', runner=run)
+                                               ['django==5.2.1', 'psycopg[c,pool]==3.2.10'], '3.12.3', runner=run)
         self.assertEqual(result.status, 'passed')
         command, kwargs = calls[0]
+        self.assertIn('psycopg[c,pool]==3.2.10', command)
+        self.assertEqual(command[command.index('--python-version') + 1], '3.12.3')
         self.assertIn('--dry-run', command)
         self.assertIn('--ignore-installed', command)
         self.assertIn('--only-binary=:all:', command)

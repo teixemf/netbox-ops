@@ -8,6 +8,7 @@ from unittest.mock import Mock, call, patch
 from netbox_ops import upgrade_orchestration as orchestration
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_git import PinnedStage
+from netbox_ops.upgrade_health import NetBoxHealth
 
 
 class OrchestrationTests(unittest.TestCase):
@@ -19,7 +20,7 @@ class OrchestrationTests(unittest.TestCase):
             'require_quiesced_writers', 'run_stage', 'start_upgrade_writers',
             'resolve_base_python', 'read_netbox_health', 'wait_for_netbox_health',
             'fetch_pinned_stage', 'inventory_plugins', 'validate_netbox_only_pins',
-            'validate_upgrade_runtime', '_private_directory',
+            'validate_upgrade_runtime', '_private_directory', 'preflight_plugin_upgrade', 'run_plugin_stage',
         )
         for name in names:
             self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
@@ -135,4 +136,102 @@ class OrchestrationTests(unittest.TestCase):
         with self.assertRaises(UpgradeExecutionError):
             self.execute()
         self.calls.stop_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
+
+
+class PluginOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = Mock()
+        names = (
+            'validate_execution_approval', 'pin_release_stages', 'SystemdServices',
+            'write_audit', 'begin_maintenance', 'finish_maintenance', 'stop_upgrade_writers',
+            '_capture_quiesced_recovery', 'require_quiesced_writers', 'run_stage',
+            'start_upgrade_writers', 'resolve_base_python', 'read_netbox_health',
+            'wait_for_netbox_health', 'fetch_pinned_stage', 'inventory_plugins',
+            'validate_netbox_only_pins', 'validate_upgrade_runtime', '_private_directory',
+            'preflight_plugin_upgrade', 'run_plugin_stage',
+        )
+        for name in names:
+            self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
+        self.enterContext(patch.object(orchestration.os, 'geteuid', return_value=0))
+        self.enterContext(patch.object(orchestration, 'ExclusiveLock', nullcontext))
+        self.installation = SimpleNamespace(
+            root=Path('/opt/netbox'), version='4.4.1', commit='a' * 40,
+            python_version='3.12.1',
+        )
+        self.inventory = SimpleNamespace(requirements_hash='hash', enabled=('example_plugin',), packages=())
+        self.plan = SimpleNamespace(
+            source=SimpleNamespace(installation=self.installation, inventory=self.inventory,
+                                   python_by_stage=(('4.4.1', '3.12.1'),)),
+            current_netbox='4.4.1', target_netbox='4.4.1',
+            stages=(SimpleNamespace(plugin_versions=(('example-plugin', '2.0.0'),)),),
+        )
+        self.baseline = NetBoxHealth('4.4.1', 'netbox', (('example_plugin', '1.0.0'),), 1)
+        self.calls.read_netbox_health.return_value = self.baseline
+        self.calls.run_plugin_stage.return_value = (('example_plugin', '2.0.0'),)
+        self.calls.inventory_plugins.return_value = self.inventory
+        self.calls._capture_quiesced_recovery.return_value.directory = Path('/backup/pre-upgrade-test')
+
+    def execute(self):
+        return orchestration.execute_plugin_upgrade(
+            Mock(), self.plan, Mock(), rebuild_plan=self.calls.rebuild,
+            health_url='https://netbox.example/api/status/',
+        )
+
+    def test_plugin_execution_reuses_recovery_and_never_changes_checkout(self):
+        result = self.execute()
+        calls = self.calls
+        self.assertIs(result, calls._capture_quiesced_recovery.return_value)
+        names = [item[0] for item in calls.mock_calls]
+        ordered = ('validate_execution_approval', 'preflight_plugin_upgrade',
+                   'begin_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
+                   'run_plugin_stage', 'start_upgrade_writers', 'wait_for_netbox_health',
+                   'finish_maintenance')
+        positions = [names.index(name) for name in ordered]
+        self.assertEqual(positions, sorted(positions))
+        calls.pin_release_stages.assert_not_called()
+        calls.fetch_pinned_stage.assert_not_called()
+        calls.run_stage.assert_not_called()
+        self.assertEqual(calls._capture_quiesced_recovery.call_args.kwargs['pinned_stages'],
+                         (PinnedStage('4.4.1', 'a' * 40),))
+        self.assertEqual(calls.wait_for_netbox_health.call_args.args[2].plugins,
+                         (('example_plugin', '2.0.0'),))
+
+    def test_resolver_failure_never_enters_maintenance(self):
+        self.calls.preflight_plugin_upgrade.side_effect = UpgradeExecutionError('conflict')
+        with self.assertRaises(UpgradeExecutionError):
+            self.execute()
+        self.calls.begin_maintenance.assert_not_called()
+        self.calls.stop_upgrade_writers.assert_not_called()
+        self.calls.run_plugin_stage.assert_not_called()
+
+    def test_backup_failure_never_installs_plugins(self):
+        self.calls._capture_quiesced_recovery.side_effect = UpgradeExecutionError('backup failed')
+        with self.assertRaises(UpgradeExecutionError):
+            self.execute()
+        self.calls.run_plugin_stage.assert_not_called()
+        self.calls.start_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
+
+    def test_installation_failure_leaves_recovery_and_no_restart(self):
+        self.calls.run_plugin_stage.side_effect = RuntimeError('private package credentials')
+        with self.assertRaisesRegex(UpgradeExecutionError, 'plugin installation') as caught:
+            self.execute()
+        self.assertIn('pre-upgrade-test', str(caught.exception))
+        self.assertNotIn('private package credentials', str(caught.exception))
+        self.calls.start_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
+
+    def test_missing_loaded_plugin_blocks_restart(self):
+        self.calls.run_plugin_stage.return_value = ()
+        with self.assertRaises(UpgradeExecutionError):
+            self.execute()
+        self.calls.start_upgrade_writers.assert_not_called()
+
+    def test_failed_http_health_keeps_recovery_and_stops_writers(self):
+        self.calls.wait_for_netbox_health.side_effect = UpgradeExecutionError('unhealthy')
+        with self.assertRaisesRegex(UpgradeExecutionError, 'functional health check; writers stopped'):
+            self.execute()
+        self.assertEqual(self.calls.SystemdServices.return_value.stop.call_args_list,
+                         [call(['netbox-rq']), call(['netbox'])])
         self.calls.finish_maintenance.assert_not_called()
