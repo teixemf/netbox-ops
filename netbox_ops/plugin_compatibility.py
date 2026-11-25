@@ -443,7 +443,7 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
         try:
             completed = runner(command, cwd=temp, env=env, text=True, capture_output=True,
                                timeout=120, check=False)
-        except ManagedOutputError:
+        except (ManagedOutputError, UnicodeError):
             return DependencyPreflight('unknown', 'Isolated resolver output exceeds safety limit')
         except (OSError, subprocess.TimeoutExpired):
             return DependencyPreflight('unknown', 'Isolated resolver unavailable or timed out')

@@ -62,7 +62,7 @@ class CommandFailure(UpgradeExecutionError):
             outcome = (f'timed out after {self.timeout}s'
                        if type(self.timeout) is int and 0 < self.timeout <= 86400 else 'timed out')
         elif self.reason == 'interrupted':
-            outcome = 'interruption requested; managed group stopped'
+            outcome = 'interruption requested'
         elif self.reason == 'descendants':
             outcome = 'left active descendants; managed group stopped'
         elif self.reason == 'output':
