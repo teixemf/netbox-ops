@@ -107,9 +107,32 @@ class PluginUpgradeTests(_PluginFixture):
             self.prepare(local=LOCAL + b'# changed\n')
 
     def test_core_dependency_cannot_be_selected(self):
+        # Even a configured module that maps to core must not bypass the core guard.
+        self.inventory = replace(self.inventory, enabled=self.inventory.enabled + ('django',))
         plan = self.build({'django': '5.2.7'})
         with self.assertRaisesRegex(UpgradeExecutionError, 'core dependencies'):
             self.prepare(plan)
+
+    def test_backend_rejects_plan_with_ineligible_selected_package(self):
+        inventory = replace(self.inventory, enabled=('other_plugin',))
+        forged = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+        with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugins'):
+            self.prepare(forged)
+        with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugins'):
+            validate_execution_approval(
+                forged, self.approval, operation='plugins',
+                inspector=Mock(return_value=self.installation), fresh_plan=forged)
+
+    def test_additional_local_pin_is_preserved(self):
+        raw = LOCAL + b'tomli-w==1.2.0\r\n'
+        inventory = replace(
+            self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest(),
+            packages=self.packages + (InstalledPackage('tomli-w', '1.2.0', ('tomli_w',)),))
+        plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+        prepared = self.prepare(plan, local=raw)
+        self.assertIn(b'tomli-w==1.2.0\r\n', prepared.requirements)
+        self.assertIn('tomli-w==1.2.0', prepared.local_pins)
+        self.assertEqual(dict(prepared.expected)['tomli-w'], '1.2.0')
 
     def test_core_versions_must_match_installed_release(self):
         with self.assertRaises(UpgradeExecutionError):
