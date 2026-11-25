@@ -11,6 +11,7 @@ from typing import Callable
 from .upgrade_checkout import checkout_pinned_stage
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_process import run_managed
 from .upgrade_git import PinnedStage
 from .upgrade_runtime import upgrade_environment
 from .upgrade_services import require_quiesced_writers
@@ -62,7 +63,7 @@ def resolve_base_python(
 
 def run_stage(
     installation: GitNetBoxInstallation, stage: PinnedStage, *,
-    systemd: SystemdServices, runner: Callable = subprocess.run,
+    systemd: SystemdServices, runner: Callable = run_managed,
     inspector: Callable = inspect_git_installation,
     checkout: Callable = checkout_pinned_stage,
     base_python: Callable = resolve_base_python,

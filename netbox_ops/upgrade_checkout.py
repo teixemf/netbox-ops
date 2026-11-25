@@ -14,6 +14,7 @@ from typing import Callable
 
 from .upgrade_discovery import _trusted_origin, inspect_git_installation
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_process import run_managed
 from .upgrade_git import OFFICIAL_REMOTE, PinnedStage
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -21,7 +22,7 @@ _VERSION = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+\Z')
 
 
 def _run_git(root: Path, arguments: list[str], *,
-             runner: Callable = subprocess.run, timeout: int = 120) -> str:
+             runner: Callable = run_managed, timeout: int = 120) -> str:
     """Run Git without inherited Git overrides or hooks; never leak Git output."""
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('GIT_')}
@@ -41,7 +42,7 @@ def _run_git(root: Path, arguments: list[str], *,
 
 
 def fetch_pinned_stage(
-    root: Path, stage: PinnedStage, *, runner: Callable = subprocess.run,
+    root: Path, stage: PinnedStage, *, runner: Callable = run_managed,
     inspector: Callable = inspect_git_installation,
 ) -> None:
     """Fetch an exact official release and check its commit before checkout.
@@ -67,7 +68,7 @@ def fetch_pinned_stage(
 
 def checkout_pinned_stage(
     root: Path, stage: PinnedStage, *, expected_commit: str,
-    runner: Callable = subprocess.run,
+    runner: Callable = run_managed,
     inspector: Callable = inspect_git_installation,
 ) -> None:
     """Select a previously fetched, pinned release; reject drift and dirty files.

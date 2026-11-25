@@ -26,6 +26,7 @@ from .services import SystemdServices
 from .upgrade_checkout import _run_git, fetch_pinned_stage
 from .upgrade_discovery import GitNetBoxInstallation, check_prerequisites
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
+from .upgrade_process import run_managed
 from .upgrade_git import PinnedStage
 from .upgrade_plan import UpgradePlan, UpgradeStage
 from .upgrade_recovery import _read_config
@@ -124,7 +125,7 @@ def _resolve(pins: PluginUpgrade, live: GitNetBoxInstallation,
 
 
 def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
-                          directory: Path, *, runner: Callable = subprocess.run) -> None:
+                          directory: Path, *, runner: Callable = run_managed) -> None:
     """Prepare one wheel set for core, plugins and the upstream pip bootstrap.
 
     Resolve together before downtime; the official script installs core and
@@ -254,7 +255,7 @@ def run_combined_stage(
     live: GitNetBoxInstallation, plan: UpgradePlan, prepared: CombinedStage,
     base_python: Path, *, systemd: SystemdServices,
     stage_runner: Callable = run_stage, inventory_reader: Callable = inventory_plugins,
-    runner: Callable = subprocess.run,
+    runner: Callable = run_managed,
 ) -> tuple[GitNetBoxInstallation, tuple[tuple[str, str | None], ...]]:
     """Use the official script with exact constraints and verify all approved pins."""
     root = live.root

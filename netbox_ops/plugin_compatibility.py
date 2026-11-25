@@ -20,6 +20,7 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from .plugin_inventory import normalize_name
+from .upgrade_process import run_managed
 
 PYPI_API = 'https://pypi.org/pypi'
 PYPI_INDEX = 'https://pypi.org/simple'
@@ -415,7 +416,7 @@ def assess_upgrade_stages(package: str, version: str, netbox_steps: Sequence[str
 
 
 def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequence[str],
-                                  python_version: str, *, runner: Callable = subprocess.run,
+                                  python_version: str, *, runner: Callable = run_managed,
                                   interpreter: Path | None = None,
                                   wheelhouse: Path | None = None) -> DependencyPreflight:
     """Use pip's dry-run wheel-only resolver; no installation or builds.
