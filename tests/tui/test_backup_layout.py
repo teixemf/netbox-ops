@@ -80,7 +80,7 @@ class BackupLayoutTests(unittest.TestCase):
         for language in ('en', 'pt'):
             with self.subTest(language=language):
                 t = Translator(language)
-                frames = self.render(language, (16, 50), [curses.KEY_DOWN, 10, 27, 27, 27])
+                frames = self.render(language, (16, 50), [curses.KEY_DOWN, ord('i'), 27, 27, 27])
                 focused, details = frames[1:3]
                 action_y = self.find(focused, t('nbo_backup_actions_label')[:40])[0]
                 detail_y = self.find(focused, t('nbo_detail_label'))[0]
