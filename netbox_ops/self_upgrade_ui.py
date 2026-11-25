@@ -212,6 +212,10 @@ def status_lines(t: Translator) -> tuple[int, list[str]]:
         result = read_result()
     except (SwapError, OSError):
         return 1, [t('self_upgrade_status_unavailable')]
+    return _result_lines(result, t)
+
+
+def _result_lines(result: dict | None, t: Translator) -> tuple[int, list[str]]:
     if result is None:
         return 4, [t('self_upgrade_no_result')]
     phase = result['phase']
@@ -226,6 +230,29 @@ def status_lines(t: Translator) -> tuple[int, list[str]]:
         # A completed intermediate step is not a completed target upgrade.
         return (0 if result['step'] == result['target'] else 4), lines
     return (4 if phase in ('submitted', 'applying') else 1), lines
+
+
+def tui_recovery_state(t: Translator) -> tuple[bool, list[str]]:
+    """Read the recorded result and actual handoff/transaction state.
+
+    This is only a display/availability guard. The installer must still
+    perform its own locked checks; the absence of markers is not approval.
+    """
+    from .self_upgrade_handoff import _handoff, _pending
+    from .self_upgrade_installation import ACTIVE
+
+    try:
+        result = read_result()
+        handoff = _handoff(ACTIVE)
+        pending = _pending(ACTIVE) or handoff.exists() or handoff.is_symlink()
+    except (SwapError, OSError):
+        return False, [t('self_upgrade_status_unavailable')]
+    _, lines = _result_lines(result, t)
+    if pending or (result is not None and result['phase'] in
+                   ('submitted', 'applying', 'recovery_required')):
+        return False, [t('self_upgrade_recovery_pending'), *lines,
+                       t('self_upgrade_recovery_hint')]
+    return True, lines
 
 
 def run_execution(action: str, t: Translator, *, target: str | None = None,
