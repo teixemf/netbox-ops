@@ -22,6 +22,8 @@ Use clear commit messages, preferably in Conventional Commits style (for example
 
 ## Testing and safety
 
+CI selects test suites from the changed files. Documentation-only PRs run lightweight checks; changes to application code run the relevant unit, integration and VM tests. See [CI test selection](tests/README.md#ci-test-selection) for the routing policy. Keep unrelated changes in separate PRs, and review the scope output to confirm the expected suites were selected. Release candidates still require full validation.
+
 Run the relevant tests before merging. The standard test command is:
 
 ```bash
