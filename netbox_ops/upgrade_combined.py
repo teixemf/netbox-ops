@@ -219,6 +219,10 @@ def recheck_combined_stage(
     if (prepared.resolution.status == 'passed' and prepared.resolution.checked_core
             and (result.status != 'passed' or not result.checked_core)):
         raise UpgradeExecutionError('Combined stage dependency verification became uncertain')
+    if prepared.resolution.packages:
+        # The full compatibility plan was refreshed under the lock, and these
+        # exact offline artifacts cannot acquire new versions during maintenance.
+        return
     previous = {normalize_name(check.package): check for check in planned.plugin_checks}
     for package, version in planned.plugin_versions:
         try:

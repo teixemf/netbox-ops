@@ -119,6 +119,14 @@ def validate_netbox_only_pins(plan: UpgradePlan) -> None:
     inventory = plan.source.inventory
     if inventory.enabled is None:
         raise UpgradeExecutionError('Configured plugins must be identifiable before upgrading')
+    installed = {normalize_name(package.name): package.version for package in inventory.packages}
+    seen = set()
+    for entry in inventory.requirements:
+        name = normalize_name(entry.name)
+        if (name in seen or entry.kind != 'pinned' or not entry.version
+                or installed.get(name) != entry.version):
+            raise UpgradeExecutionError('Pin all local packages to their installed versions before upgrading')
+        seen.add(name)
     for module in inventory.enabled:
         top_level = module.split('.')[0]
         matches = [p for p in inventory.packages

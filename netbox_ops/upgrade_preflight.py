@@ -97,7 +97,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
         # These helpers raise fixed local messages; never display arbitrary
         # subprocess output, URLs, or requirements content.
         blockers.append(str(exc))
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         blockers.append('Cannot complete read-only dependency review')
     draft = replace(plan, dependency_reviews=tuple(reviews), warnings=tuple(dict.fromkeys(warnings)),
                     blockers=tuple(dict.fromkeys(blockers)),

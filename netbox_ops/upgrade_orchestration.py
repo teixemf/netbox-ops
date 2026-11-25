@@ -13,11 +13,10 @@ from .upgrade_execution import (
     ExecutionApproval, UpgradeExecutionError, validate_execution_approval,
     validate_netbox_only_pins,
 )
-from .upgrade_checkout import fetch_pinned_stage
-from .upgrade_combined import prepare_combined_stages, recheck_combined_stage, run_combined_stage
+from .upgrade_combined import download_stage_wheels, prepare_combined_stages, recheck_combined_stage, run_combined_stage
 from .upgrade_git import PinnedStage, pin_release_stages
 from .upgrade_health import read_netbox_health, wait_for_netbox_health
-from .plugin_inventory import inventory_plugins, normalize_name
+from .plugin_inventory import inventory_plugins
 from .plugin_upgrade import preflight_plugin_upgrade, run_plugin_stage
 from .upgrade_maintenance import begin_maintenance, finish_maintenance
 from .upgrade_plan import UpgradePlan
@@ -26,7 +25,7 @@ from .upgrade_runtime import validate_upgrade_runtime
 from .upgrade_services import (
     require_quiesced_writers, start_upgrade_writers, stop_upgrade_writers,
 )
-from .upgrade_stage import resolve_base_python, run_stage
+from .upgrade_stage import resolve_base_python
 
 
 # Only fixed, reviewed backend messages may be included in a recovery diagnostic.
@@ -125,11 +124,12 @@ def _execute_upgrade(
         prepared = None
         if operation == 'netbox':
             validate_netbox_only_pins(plan)
-        else:
-            if inventory_plugins(live) != plan.source.inventory:
-                raise UpgradeExecutionError('Plugin inventory changed before dependency preflight')
-            if operation == 'plugins':
-                prepared = preflight_plugin_upgrade(plan, approval)
+        if inventory_plugins(live) != plan.source.inventory:
+            raise UpgradeExecutionError('Plugin inventory changed before dependency preflight')
+        if operation == 'plugins':
+            prepared = preflight_plugin_upgrade(
+                plan, approval, wheelhouse=Path(wheel_root) / 'plugins', download=download_stage_wheels,
+            )
         base_python = resolve_base_python(live)
         validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
         _private_directory(cfg.backup_directory)
@@ -139,7 +139,7 @@ def _execute_upgrade(
         stages = (pin_release_stages(plan) if operation != 'plugins' else
                   (PinnedStage(live.version, live.commit),))
         combined = (prepare_combined_stages(cfg, plan, approval, stages, wheel_root=Path(wheel_root))
-                    if operation == 'combined' else ())
+                    if operation != 'plugins' else ())
         systemd = SystemdServices(cfg)
         recovery = None
         phase = 'stop writers'
@@ -170,43 +170,25 @@ def _execute_upgrade(
                 if operation == 'plugins':
                     break
                 report('stage', completed)
-                if operation == 'combined':
-                    phase = f'stage {index} preflight'
-                    require_quiesced_writers(systemd)
-                    validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
-                    recheck_combined_stage(
-                        cfg, live, planned, combined[index - 1], approval,
-                        approved_warnings=plan.warnings,
-                    )
-                phase = f'stage {index} fetch'
+                phase = f'stage {index} preflight'
+                require_quiesced_writers(systemd)
+                validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
+                recheck_combined_stage(
+                    cfg, live, planned, combined[index - 1], approval,
+                    approved_warnings=plan.warnings,
+                )
                 require_quiesced_writers(systemd)
                 write_audit(f'NetBox upgrade starting stage={index} version={stage.version} commit={stage.commit}')
-                fetch_pinned_stage(live.root, stage)
                 phase = f'stage {index} checkout and upgrade script'
-                if operation == 'combined':
-                    live, loaded = run_combined_stage(
-                        live, plan, combined[index - 1], base_python, systemd=systemd,
-                    )
-                    if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
-                        raise UpgradeExecutionError('Configured plugin registry changed during combined upgrade')
-                    if index < len(stages) and loaded != baseline.plugins:
-                        raise UpgradeExecutionError('Plugin registry changed before the final stage')
-                    expected_health = replace(baseline, plugins=loaded)
-                    completed = index
-                    report('validated', completed)
-                    write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
-                    continue
-                live = run_stage(live, stage, systemd=systemd)
-                phase = f'stage {index} plugin validation'
-                actual = inventory_plugins(live)
-                if actual.requirements_hash != plan.source.inventory.requirements_hash:
-                    raise UpgradeExecutionError('Plugin requirements changed during the stage')
-                if actual.enabled != plan.source.inventory.enabled:
-                    raise UpgradeExecutionError('Configured plugins changed during the stage')
-                installed = {normalize_name(p.name): p.version for p in actual.packages}
-                if any(installed.get(normalize_name(name)) != version
-                       for name, version in planned.plugin_versions):
-                    raise UpgradeExecutionError('An approved plugin version changed during the stage')
+                # Git objects and the offline wheelhouse are already prepared.
+                live, loaded = run_combined_stage(
+                    live, plan, combined[index - 1], base_python, systemd=systemd,
+                )
+                if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
+                    raise UpgradeExecutionError('Configured plugin registry changed during upgrade')
+                if (operation == 'netbox' or index < len(stages)) and loaded != baseline.plugins:
+                    raise UpgradeExecutionError('Unselected plugin registry changed during upgrade')
+                expected_health = replace(baseline, plugins=loaded)
                 completed = index
                 report('validated', completed)
                 write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')

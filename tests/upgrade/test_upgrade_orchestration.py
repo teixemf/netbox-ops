@@ -1,5 +1,6 @@
 """Exercise orchestration without touching systemd, Git or backups."""
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -17,9 +18,9 @@ class OrchestrationTests(unittest.TestCase):
         names = (
             'validate_execution_approval', 'pin_release_stages', 'SystemdServices',
             'write_audit', 'begin_maintenance', 'finish_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
-            'require_quiesced_writers', 'run_stage', 'start_upgrade_writers',
+            'require_quiesced_writers', 'start_upgrade_writers',
             'resolve_base_python', 'read_netbox_health', 'wait_for_netbox_health',
-            'fetch_pinned_stage', 'inventory_plugins', 'validate_netbox_only_pins',
+            'inventory_plugins', 'validate_netbox_only_pins',
             'validate_upgrade_runtime', '_private_directory', 'preflight_plugin_upgrade', 'run_plugin_stage',
         )
         for name in names:
@@ -37,7 +38,13 @@ class OrchestrationTests(unittest.TestCase):
             current_netbox='4.3.9', target_netbox='4.4.1',
             stages=(SimpleNamespace(plugin_versions=()), SimpleNamespace(plugin_versions=())),
         )
-        self.calls.read_netbox_health.return_value.version = self.plan.current_netbox
+        self.plan.warnings = ()
+        self.baseline = NetBoxHealth(self.plan.current_netbox, 'netbox', (), 1)
+        self.calls.read_netbox_health.return_value = self.baseline
+        for name in ('prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage'):
+            self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
+        self.calls.prepare_combined_stages.return_value = ('first', 'second')
+        self.calls.run_combined_stage.return_value = (self.installation, ())
         self.calls.inventory_plugins.return_value = self.inventory
         self.calls._capture_quiesced_recovery.return_value.directory = Path(
             '/backup/pre-upgrade-test'
@@ -56,20 +63,20 @@ class OrchestrationTests(unittest.TestCase):
         names = [call[0] for call in calls.mock_calls]
         ordered = ('rebuild', 'validate_execution_approval', 'validate_netbox_only_pins', 'resolve_base_python',
                    'validate_upgrade_runtime', '_private_directory', 'read_netbox_health',
-                   'pin_release_stages',
+                   'pin_release_stages', 'prepare_combined_stages',
                    'begin_maintenance', 'stop_upgrade_writers', '_capture_quiesced_recovery',
-                   'fetch_pinned_stage', 'run_stage', 'inventory_plugins', 'start_upgrade_writers',
+                   'recheck_combined_stage', 'run_combined_stage', 'start_upgrade_writers',
                    'wait_for_netbox_health', 'finish_maintenance')
         indices = [names.index(name) for name in ordered]
         self.assertEqual(indices, sorted(indices))
-        self.assertEqual(calls.run_stage.call_count, 2)
-        self.assertIs(calls.run_stage.call_args.args[0], calls.run_stage.return_value)
+        self.assertEqual(calls.run_combined_stage.call_count, 2)
+        self.assertIs(calls.run_combined_stage.call_args.args[0], self.installation)
 
     def test_failure_never_starts_writers(self):
         for failure in (
             'validate_execution_approval', 'validate_netbox_only_pins', 'validate_upgrade_runtime',
             'pin_release_stages', 'stop_upgrade_writers',
-            '_capture_quiesced_recovery', 'fetch_pinned_stage', 'run_stage',
+            '_capture_quiesced_recovery', 'prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage',
         ):
             with self.subTest(failure=failure):
                 self.calls.reset_mock()
@@ -81,8 +88,8 @@ class OrchestrationTests(unittest.TestCase):
                     self.calls.start_upgrade_writers.assert_not_called()
                     self.calls.wait_for_netbox_health.assert_not_called()
                     self.calls.finish_maintenance.assert_not_called()
-                    self.assertEqual(self.calls.run_stage.call_count,
-                                     1 if failure == 'run_stage' else 0)
+                    self.assertEqual(self.calls.run_combined_stage.call_count,
+                                     1 if failure == 'run_combined_stage' else 0)
                 finally:
                     operation.side_effect = None
 
@@ -92,7 +99,7 @@ class OrchestrationTests(unittest.TestCase):
             ('NetBox upgrade script failed: secret token', False),
         ):
             with self.subTest(message=message):
-                self.calls.run_stage.side_effect = UpgradeExecutionError(message)
+                self.calls.run_combined_stage.side_effect = UpgradeExecutionError(message)
                 with self.assertRaises(UpgradeExecutionError) as error:
                     self.execute()
                 self.assertEqual('detail: NetBox upgrade script failed;' in str(error.exception), visible)
@@ -113,7 +120,7 @@ class OrchestrationTests(unittest.TestCase):
     def test_health_failure_with_failed_stop_reports_uncertain_state(self):
         self.calls.wait_for_netbox_health.side_effect = RuntimeError('health failed')
         self.calls.SystemdServices.return_value.stop.side_effect = RuntimeError('stop failed')
-        self.calls.require_quiesced_writers.side_effect = [None, None, UpgradeExecutionError('not stopped')]
+        self.calls.require_quiesced_writers.side_effect = [None] * 4 + [UpgradeExecutionError('not stopped')]
         with self.assertRaisesRegex(UpgradeExecutionError, 'maintenance unverified'):
             self.execute()
         self.calls.start_upgrade_writers.assert_called_once()
@@ -130,19 +137,28 @@ class OrchestrationTests(unittest.TestCase):
         self.calls.finish_maintenance.assert_not_called()
 
     def test_wrong_baseline_version_blocks_before_maintenance(self):
-        self.calls.read_netbox_health.return_value.version = '4.1.0'
+        self.calls.read_netbox_health.return_value = replace(self.baseline, version='4.1.0')
         with self.assertRaises(UpgradeExecutionError):
             self.execute()
         self.calls.begin_maintenance.assert_not_called()
         self.calls.stop_upgrade_writers.assert_not_called()
 
     def test_plugin_version_drift_blocks_second_stage(self):
-        self.plan.stages[0].plugin_versions = (('example-plugin', '1.0'),)
+        self.calls.run_combined_stage.return_value = (self.installation, (('unexpected', '1.0'),))
         with self.assertRaisesRegex(UpgradeExecutionError, 'stage 1'):
             self.execute()
-        self.calls.run_stage.assert_called_once()
+        self.calls.run_combined_stage.assert_called_once()
         self.calls.start_upgrade_writers.assert_not_called()
         self.calls.finish_maintenance.assert_not_called()
+
+    def test_full_netbox_preflight_failure_keeps_services_running(self):
+        self.calls.prepare_combined_stages.side_effect = UpgradeExecutionError('conflict')
+        with self.assertRaises(UpgradeExecutionError):
+            self.execute()
+        self.calls.begin_maintenance.assert_not_called()
+        self.calls.stop_upgrade_writers.assert_not_called()
+        self.calls._capture_quiesced_recovery.assert_not_called()
+        self.calls.run_combined_stage.assert_not_called()
 
     def test_pending_marker_blocks_upgrade(self):
         self.calls.begin_maintenance.side_effect = UpgradeExecutionError('pending')
@@ -180,6 +196,8 @@ class PluginOrchestrationTests(unittest.TestCase):
             stages=(SimpleNamespace(plugin_versions=(('example-plugin', '2.0.0'),)),),
         )
         self.baseline = NetBoxHealth('4.4.1', 'netbox', (('example_plugin', '1.0.0'),), 1)
+        for name in ('prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage'):
+            self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
         self.calls.read_netbox_health.return_value = self.baseline
         self.calls.run_plugin_stage.return_value = (('example_plugin', '2.0.0'),)
         self.calls.inventory_plugins.return_value = self.inventory
@@ -203,8 +221,8 @@ class PluginOrchestrationTests(unittest.TestCase):
         positions = [names.index(name) for name in ordered]
         self.assertEqual(positions, sorted(positions))
         calls.pin_release_stages.assert_not_called()
-        calls.fetch_pinned_stage.assert_not_called()
-        calls.run_stage.assert_not_called()
+        calls.prepare_combined_stages.assert_not_called()
+        calls.run_combined_stage.assert_not_called()
         self.assertEqual(calls._capture_quiesced_recovery.call_args.kwargs['pinned_stages'],
                          (PinnedStage('4.4.1', 'a' * 40),))
         self.assertEqual(calls.wait_for_netbox_health.call_args.args[2].plugins,
@@ -253,8 +271,6 @@ class PluginOrchestrationTests(unittest.TestCase):
 class CombinedOrchestrationTests(unittest.TestCase):
     def setUp(self):
         PluginOrchestrationTests.setUp(self)
-        for name in ('prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage'):
-            self.enterContext(patch.object(orchestration, name, getattr(self.calls, name)))
         self.plan.target_netbox = '4.6.1'
         self.plan.warnings = ()
         self.plan.stages = (
@@ -284,7 +300,7 @@ class CombinedOrchestrationTests(unittest.TestCase):
         names = [item[0] for item in calls.mock_calls]
         ordered = ('prepare_combined_stages', 'begin_maintenance', 'stop_upgrade_writers',
                    '_capture_quiesced_recovery', 'recheck_combined_stage',
-                   'fetch_pinned_stage', 'run_combined_stage', 'start_upgrade_writers',
+                   'run_combined_stage', 'start_upgrade_writers',
                    'wait_for_netbox_health', 'finish_maintenance')
         positions = [names.index(name) for name in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -295,7 +311,6 @@ class CombinedOrchestrationTests(unittest.TestCase):
         self.assertEqual(calls.run_combined_stage.call_count, 2)
         self.assertIs(calls.run_combined_stage.call_args.args[0], self.intermediate)
         self.assertEqual(calls.run_combined_stage.call_args.args[2], 'prepared-final')
-        calls.run_stage.assert_not_called()
         calls.run_plugin_stage.assert_not_called()
         self.assertEqual(calls.wait_for_netbox_health.call_args.args[2].plugins,
                          (('example_plugin', '2.0.0'),))
