@@ -1913,7 +1913,7 @@ class CursesMenu:
                     # minimum terminal size. Bottom panels use at most half the
                     # space left after reserving the action bar.
                     panel_height = min(12 if pane else 10,
-                                       max(3, (h - 5 - action_rows - 3) // 2))
+                                       max(3, (h - 5 - action_rows - 4) // 2))
                     detail_y = h - 2 - panel_height
                     action_y = detail_y - action_rows - 2
                     list_title_y = 3
@@ -1929,6 +1929,10 @@ class CursesMenu:
                     show_tag = 4 + sum(column_widths) + 4 * 3 + 12 <= table_width
                     indexes = [0, 1, 2, 3, 4] if show_tag else [0, 1, 2, 4]
                     widths = [column_widths[i] for i in indexes[:-1]]
+                    # On the minimum 50-column terminal keep at least one
+                    # name cell even for unusually large disk sizes.
+                    if not show_tag:
+                        widths[2] = min(widths[2], table_width - 4 - sum(widths[:2]) - 4)
                     gap = 3 if 4 + sum(widths) + len(widths) * 3 + 8 <= table_width else 1
                     widths.append(max(1, table_width - 4 - sum(widths) - len(widths) * gap))
 
@@ -1995,10 +1999,10 @@ class CursesMenu:
                                                   break_long_words=True) or ['']
                             if j:
                                 parts = parts[:2]
-                            for line in parts:
+                            for k, line in enumerate(parts):
                                 if y >= detail_end:
                                     break
-                                if j == 0 and y == detail_end - 1 and line != parts[-1]:
+                                if j == 0 and y == detail_end - 1 and k < len(parts) - 1:
                                     line = line[:detail_width - 1] + '…'
                                 self._put(y, 4, line, style)
                                 y += 1
