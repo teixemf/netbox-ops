@@ -12,14 +12,14 @@ from unittest.mock import Mock, patch
 from netbox_ops.cli import build_parser, dispatch
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
-from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview
-from netbox_ops.plugin_inventory import InstalledPackage, PluginInventory
+from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview, ReleaseChoice
+from netbox_ops.plugin_inventory import InstalledPackage, PinProposal, PluginInventory
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_plan import build_upgrade_plan
 from netbox_ops.upgrade_ui import (
-    UpgradeContext, execute_plan, make_plan, official_tags, parse_plugins, summary_lines,
+    UpgradeContext, alternative_release_choices, execute_plan, make_plan, official_tags, parse_plugins, summary_lines,
 )
 from tests.helpers.fake_screen import FakeScreen
 
@@ -82,6 +82,16 @@ class SharedInterfaceTests(InterfaceFixture):
         ))
         second = self.build()
         self.assertNotEqual(first.fingerprint, second.fingerprint)
+
+    def test_alternative_versions_are_read_only_published_candidates(self):
+        project = {'releases': {
+            '3.0.0': [{'packagetype': 'bdist_wheel', 'requires_python': '>=3.13'}],
+            '2.0.0': [{'packagetype': 'bdist_wheel', 'requires_python': '>=3.12'}],
+            '2.1.0': [{'packagetype': 'bdist_wheel', 'yanked': True}],
+        }}
+        with patch('netbox_ops.upgrade_ui.fetch_pypi_json', return_value=project):
+            choices = alternative_release_choices(self.context, 'example-plugin')
+        self.assertEqual([(c.version, c.status) for c in choices], [('3.0.0', 'blocked'), ('2.0.0', 'ok')])
 
     def test_wrong_fingerprint_or_unknown_confirmation_never_executes(self):
         plan = replace(self.build(), requires_strong_confirmation=True)
@@ -215,6 +225,50 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertEqual(build.call_count, 2)
         self.assertEqual(build.call_args.args[2], '4.4.1')
         execute.assert_not_called()
+
+    def test_alternative_selection_rebuilds_plan(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        choices = (ReleaseChoice('1.8.0', '>=3.12', 'ok'),)
+        plan = self.build('plugins', None, {'example-plugin': '1.8.0'})
+        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
+            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
+        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, patch(
+            'netbox_ops.upgrade_ui.alternative_release_choices', return_value=choices,
+        ), patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())), patch.object(
+            menu, '_choose', side_effect=[0, 2, 3, 0, None, 1, None],
+        ), patch.object(menu, '_show_lines'):
+            menu._upgrade('plugins')
+        self.assertEqual(build.call_args.args[3], {'example-plugin': '1.8.0'})
+
+    def test_pin_review_cancel_does_not_write(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        inventory = replace(self.inventory, proposals=(
+            PinProposal('example-plugin', '1.0.0', 1, 'example-plugin\\n', 'example-plugin==1.0.0\\n'),
+        ))
+        with patch.object(menu, '_choose', side_effect=[0, 2]), patch.object(
+            menu, '_show_lines',
+        ) as show, patch.object(menu, '_confirm_token', return_value=False), patch(
+            'netbox_ops.plugin_pin_ui.apply_pin_review',
+        ) as apply:
+            self.assertFalse(menu._review_plugin_pins('Pins', inventory))
+        apply.assert_not_called()
+        self.assertIn('example-plugin==1.0.0', str(show.call_args_list))
+
+    def test_pin_review_applies_only_selected_proposal(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        inventory = replace(self.inventory, proposals=(
+            PinProposal('example-plugin', '1.0.0', 1, 'example-plugin\\n', 'example-plugin==1.0.0\\n'),
+            PinProposal('other-plugin', '2.0.0', None, '', 'other-plugin==2.0.0\\n'),
+        ))
+        with patch.object(menu, '_choose', side_effect=[4, 2]), patch.object(
+            menu, '_show_lines',
+        ), patch.object(menu, '_confirm_token', return_value=True), patch(
+            'netbox_ops.plugin_pin_ui.apply_pin_review',
+        ) as apply:
+            self.assertTrue(menu._review_plugin_pins('Pins', inventory))
+        review, fingerprint = apply.call_args.args
+        self.assertEqual(review.selected, ('other-plugin',))
+        self.assertEqual(fingerprint, review.fingerprint)
 
     def test_authorization_input_is_not_echoed(self):
         screen = FakeScreen([*(ord(c) for c in 'secret'), 10])

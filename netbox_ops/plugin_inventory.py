@@ -298,6 +298,7 @@ def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
         current = inventory_plugins(state)
         if (current.requirements_hash != inventory.requirements_hash or
                 current.enabled != inventory.enabled or
+                current.packages != inventory.packages or
                 current.proposals != inventory.proposals):
             raise PluginInventoryError('Plugin inventory changed since the plan was prepared')
         text, digest = _requirements(inventory.root)
@@ -312,21 +313,40 @@ def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
                 lines[proposal.line - 1] = proposal.after
         additions = [proposal.after for proposal in chosen if proposal.line is None]
         if additions and lines and not lines[-1].endswith(('\n', '\r')):
-            lines[-1] += '\n'
+            lines[-1] += '\r\n' if '\r\n' in text else '\n'
         result = ''.join(lines) + ''.join(additions)
         target = inventory.root / 'local_requirements.txt'
+        try:
+            existing = target.lstat()
+        except FileNotFoundError:
+            existing = None
+        if (existing is None) != (digest is None):
+            raise PluginInventoryError('Requirements changed before pin replacement')
+        mode, group = 0o600, 0
+        if existing is not None:
+            mode = stat.S_IMODE(existing.st_mode)
+            if (not stat.S_ISREG(existing.st_mode) or existing.st_uid != 0
+                    or existing.st_nlink != 1 or mode & 0o7022):
+                raise PluginInventoryError('Local requirements must be a safe root-controlled file')
+            group = existing.st_gid
         # Keep audit failure from occurring *after* the replacement.
         write_audit('plugin requirements: approved exact pins: ' + ','.join(unique))
         fd, temporary = tempfile.mkstemp(prefix='.netbox-ops-pins-', dir=inventory.root)
         try:
-            os.fchmod(fd, 0o600)
-            os.fchown(fd, 0, 0)
             with os.fdopen(fd, 'wb') as stream:
+                os.fchown(stream.fileno(), 0, group)
+                os.fchmod(stream.fileno(), mode)
                 stream.write(result.encode('utf-8'))
                 stream.flush()
                 os.fsync(stream.fileno())
+            try:
+                now = target.lstat()
+            except FileNotFoundError:
+                now = None
+            if now != existing:
+                raise PluginInventoryError('Requirements changed before pin replacement')
             os.replace(temporary, target)
-            directory_fd = os.open(inventory.root, os.O_RDONLY | os.O_DIRECTORY)
+            directory_fd = os.open(inventory.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 os.fsync(directory_fd)
             finally:

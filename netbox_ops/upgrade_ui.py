@@ -10,6 +10,7 @@ from typing import Callable
 from .config import Configuration
 from .i18n import Translator
 from .plugin_inventory import PluginInventory, inventory_plugins, normalize_name
+from .plugin_compatibility import CompatibilityError, ReleaseChoice, discover_stable_releases, fetch_pypi_json
 from .upgrade_combined import probe_server_versions
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
@@ -80,6 +81,18 @@ def discover_context(cfg: Configuration, *, releases: bool = True) -> UpgradeCon
                           postgres, redis, cfg)
 
 
+def alternative_release_choices(context: UpgradeContext, package: str) -> tuple[ReleaseChoice, ...]:
+    """Published stable candidates, not a claim of NetBox compatibility."""
+    name = normalize_name(package)
+    if name not in dict(context.plugins):
+        raise UpgradeExecutionError('Select an installed configured or declared plugin')
+    try:
+        listing = discover_stable_releases(name, fetch_pypi_json(name), context.installation.python_version)
+    except (CompatibilityError, OSError, ValueError):
+        raise UpgradeExecutionError('Cannot retrieve alternative plugin releases') from None
+    return listing.stable
+
+
 def parse_plugins(values: list[str], version: str | None = None) -> dict[str, str | None]:
     selected = {}
     if version is not None and len(values) != 1:
@@ -136,6 +149,9 @@ def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) ->
             for check in stage.plugin_checks:
                 lines.append(f'  {check.package}=={check.version}: {check.status}')
                 lines.extend(f'    {e.source}: {e.detail}' for e in check.evidence)
+                if check.alternatives:
+                    lines.append('    ' + t('upgrade_alternative_hint'))
+                    lines.extend(f'      {version}' for version in check.alternatives)
             lines.extend('  ' + instruction for instruction in stage.instructions)
     for review in plan.dependency_reviews:
         lines.append(t('upgrade_dependency_status', version=review.version,
@@ -188,7 +204,16 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
     import sys
     from .upgrade_process import UpgradeInterrupted
     try:
-        context = discover_context(cfg, releases=args.action != 'plugins')
+        if args.action == 'pins':
+            from .plugin_pin_ui import run_pin_cli
+            return run_pin_cli(args, t)
+        context = discover_context(cfg, releases=args.action not in ('plugins', 'versions'))
+        if args.action == 'versions':
+            choices = alternative_release_choices(context, args.package)
+            print(t('upgrade_alternative_hint'))
+            for choice in choices:
+                print(f'{choice.version}: {t("upgrade_python_" + choice.status)}')
+            return 0 if choices else 1
         if args.action == 'inspect':
             print(t('upgrade_versions', current=context.installation.version,
                     target=context.targets[0] if context.targets else '-'))
