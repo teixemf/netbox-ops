@@ -1,0 +1,95 @@
+name: Coverage overhead experiment (issue 159)
+on:
+  push:
+    branches: ['ci/159-coverage-overhead']
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 8fab09ce56ea582c36cbac6ff2ed04444bd26281
+          persist-credentials: false
+      - name: Compare identical unit suites on one runner
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/coverage-overhead"
+          docker run --rm \
+            --volume "$PWD:/workspace" \
+            --volume "$RUNNER_TEMP/coverage-overhead:/results" \
+            --workdir /workspace python:3.12-bookworm \
+            bash -ec '
+              git config --global --add safe.directory /workspace
+              python -m pip install --disable-pip-version-check coverage==7.10.7
+              python --version
+              python -m coverage --version
+              python - <<'"'"'PY'"'"'
+          import json
+          import os
+          import re
+          import statistics
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          results = Path("/results")
+          measurements = []
+          # Alternate order to reduce warm-cache/order effects. Coverage is
+          # installed for both modes so the coverage fixture runs in both.
+          for index, mode in enumerate(("plain", "coverage", "coverage", "plain",
+                                        "plain", "coverage"), start=1):
+              data = str(results / f"data-{index}")
+              env = dict(os.environ, COVERAGE_FILE=data)
+              command = [sys.executable, "-m"]
+              if mode == "coverage":
+                  command += ["coverage", "run", "--branch", "--source=netbox_ops", "-m"]
+              command += ["unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
+              start = time.monotonic()
+              with (results / f"{index}-{mode}.log").open("w") as output:
+                  subprocess.run(command, env=env, stdout=output,
+                                 stderr=subprocess.STDOUT, check=True)
+              elapsed = time.monotonic() - start
+              log = (results / f"{index}-{mode}.log").read_text()
+              count = re.search(r"Ran (\d+) tests in ([\d.]+)s", log)
+              outcome = re.search(r"^OK(?: \(skipped=(\d+)\))?$", log, re.M)
+              if not count or not outcome:
+                  raise RuntimeError("Missing successful unittest summary")
+              row = dict(mode=mode, run=index, tests=int(count[1]),
+                         skipped=int(outcome[1] or 0), elapsed=round(elapsed, 3),
+                         unittest_seconds=float(count[2]))
+              if mode == "coverage":
+                  report = results / f"coverage-{index}.json"
+                  subprocess.run([sys.executable, "-m", "coverage", "json",
+                                  "-o", str(report)], env=env, check=True)
+                  totals = json.loads(report.read_text())["totals"]
+                  row.update(statements=totals["num_statements"],
+                             covered_lines=totals["covered_lines"],
+                             branches=totals["num_branches"],
+                             covered_branches=totals["covered_branches"])
+              measurements.append(row)
+              print(json.dumps(row), flush=True)
+          if len({(r["tests"], r["skipped"]) for r in measurements}) != 1:
+              raise RuntimeError("Test counts or skips differ; benchmark invalid")
+          medians = {mode: statistics.median(r["elapsed"] for r in measurements
+                                            if r["mode"] == mode)
+                     for mode in ("plain", "coverage")}
+          summary = dict(medians=medians,
+                         overhead_seconds=medians["coverage"] - medians["plain"],
+                         overhead_percent=100 * (medians["coverage"] / medians["plain"] - 1),
+                         measurements=measurements)
+          (results / "benchmark.json").write_text(json.dumps(summary, indent=2))
+          print("BENCHMARK:", json.dumps(summary))
+          PY
+          '
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-overhead
+          path: ${{ runner.temp }}/coverage-overhead/
+          retention-days: 30
+          if-no-files-found: error
