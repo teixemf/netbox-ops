@@ -38,7 +38,8 @@ jobs:
               python -m coverage xml -o /coverage/coverage.xml
               python -m coverage json -o /coverage/coverage.json
               python -m coverage html -d /coverage/html
-              bash scripts/ci/coverage-diff-smoke.sh /coverage'
+              bash scripts/ci/coverage-diff-smoke.sh /coverage
+              python scripts/ci/coverage_diff.py --base f9b31d3a43a6ee4143219a04c5a8031cb3173a97 --coverage /coverage/coverage.json --output /coverage/diff-guarded.json | tee /coverage/diff-guarded.txt'
       - name: Publish coverage summary
         if: success()
         run: |
@@ -50,6 +51,7 @@ jobs:
             cat "$RUNNER_TEMP/netbox-ops-coverage/coverage.txt"
             cat "$RUNNER_TEMP/netbox-ops-coverage/coverage-totals.txt"
             cat "$RUNNER_TEMP/netbox-ops-coverage/diff-experiment.txt"
+            cat "$RUNNER_TEMP/netbox-ops-coverage/diff-guarded.txt"
             echo '~~~'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage reports
