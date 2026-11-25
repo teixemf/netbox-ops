@@ -196,8 +196,12 @@ netbox-ops upgrade stack --netbox-version 4.4.2 --plugin example-plugin
 ```
 
 Use `--all` for plugins or `--plugins all` for a combined plan to select
-all discovered configured or declared plugin packages. Repeat `--plugin`
-to select multiple packages. Omitting a plugin version selects its latest
+only installed packages reliably mapped to configured `PLUGINS` modules.
+The mapping uses installed distribution metadata (`top_level.txt` or wheel
+`RECORD`), not package names or local requirement declarations. Missing or
+ambiguous metadata needs manual review. Additional local packages remain
+pinned and included in dependency review; they are not plugin upgrade
+targets. Repeat `--plugin` to select multiple packages. Omitting a plugin version selects its latest
 stable release. Review the resulting versions and warnings, not just the
 requested selection. Published alternatives are candidates, not verified
 NetBox compatibility. Choose a version and recalculate the plan.
