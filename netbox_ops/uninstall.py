@@ -185,6 +185,10 @@ def _raise(error):
 
 
 def check_pending(layout):
+    marker = layout.data / 'upgrade.pending'
+    safe_parents(marker, layout)
+    if entry(marker) is not None:
+        raise UninstallError('NetBox upgrade recovery is pending; resolve it before uninstalling')
     for name in ('.netbox-ops-handoff', '.netbox-ops-backup', '.netbox-ops-transaction.json'):
         if entry(layout.app.parent / name) is not None:
             raise UninstallError('Self-upgrade recovery is pending; resolve it before uninstalling')

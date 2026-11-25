@@ -1,7 +1,14 @@
 """Exercise maintenance transitions without touching systemd."""
+import os
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+from netbox_ops.config import Configuration, DEFAULT_UNITS
+from netbox_ops.services import SystemdServices
 
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_services import (
@@ -30,6 +37,25 @@ class UpgradeServiceTests(unittest.TestCase):
         self.systemd.status.side_effect = [states('inactive'), states('active')]
         start_upgrade_writers(self.systemd)
         self.systemd.start.assert_called_once_with(['netbox', 'netbox-rq'])
+
+    @unittest.skipUnless(os.geteuid() == 0, 'Root ownership checks')
+    def test_controlled_final_start_keeps_pending_marker(self):
+        marker = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'upgrade.pending'
+        marker.write_text('pending')
+        current = {'netbox.service': 'inactive', 'netbox-rq.service': 'inactive'}
+
+        def runner(command, **kwargs):
+            action, unit = command[1], command[-1]
+            if action == 'start':
+                current[unit] = 'active'
+            output = f'LoadState=loaded\nActiveState={current[unit]}\nUnitFileState=enabled\n'
+            return subprocess.CompletedProcess(command, 0, output, '')
+
+        systemd = SystemdServices(Configuration(DEFAULT_UNITS), runner=runner)
+        with patch('netbox_ops.services.UPGRADE_PENDING_PATH', marker):
+            start_upgrade_writers(systemd)
+        self.assertEqual(set(current.values()), {'active'})
+        self.assertEqual(marker.read_text(), 'pending')
 
     def test_unhealthy_initial_state_blocks_stop(self):
         self.systemd.status.return_value = states('failed')

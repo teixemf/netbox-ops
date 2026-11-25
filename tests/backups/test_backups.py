@@ -7,10 +7,11 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from netbox_ops.backups import (BackupError, BackupManager, _create_archive,
-                                _validate_archive)
+                                _validate_archive, _services_stop_for_restore, _services_restart_after)
 from netbox_ops.config import DEFAULT_UNITS, Configuration, ConfigError, load_config
 from netbox_ops.cli import build_parser, perform_backup_action
 from netbox_ops.i18n import Translator
@@ -60,6 +61,26 @@ class FileBackupTests(unittest.TestCase):
         self.assertEqual(self.photo.read_text(), 'original')
         self.assertEqual(stat.S_IMODE(self.configfile.stat().st_mode), 0o600)
         self.assertEqual(len(self.ops.list_backups('media')), 2)  # includes pre-restore safety copy
+
+    def test_recovery_restore_preserves_marker_and_stopped_writers(self):
+        marker = self.base / 'upgrade.pending'
+        marker.write_text('recovery evidence')
+        systemd = MagicMock()
+        systemd.status.return_value = [
+            SimpleNamespace(name='netbox', loaded='loaded', active='inactive'),
+            SimpleNamespace(name='netbox-rq', loaded='loaded', active='inactive'),
+        ]
+        with patch('netbox_ops.services.UPGRADE_PENDING_PATH', marker), \
+             patch('netbox_ops.backups.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.backups.write_audit'), \
+             patch('netbox_ops.backups._version', return_value='4.4.1'):
+            result = self.ops.backup('media')
+            self.photo.write_text('changed')
+            report = self.ops.restore('media', result.path)
+        self.assertEqual(self.photo.read_text(), 'original')
+        self.assertIn('recovery remains pending', report.detail)
+        self.assertEqual(marker.read_text(), 'recovery evidence')
+        systemd.start.assert_not_called()
 
     def test_sha_tamper_is_rejected_before_changes(self):
         with patch('netbox_ops.backups.write_audit'), patch('netbox_ops.backups._version', return_value='4.4.1'):
@@ -267,3 +288,26 @@ class FileBackupTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, 'PGDMP'):
                 self.ops.verify('db', bad)
             run.assert_not_called()
+
+
+class PendingRecoveryBackupTests(unittest.TestCase):
+    def test_pending_recovery_requires_stopped_writers_and_does_not_restart(self):
+        systemd = MagicMock()
+        systemd.status.return_value = [
+            SimpleNamespace(name='netbox', loaded='loaded', active='inactive'),
+            SimpleNamespace(name='netbox-rq', loaded='loaded', active='inactive'),
+        ]
+        with patch('netbox_ops.backups.upgrade_recovery_pending', return_value=True):
+            self.assertEqual(_services_stop_for_restore(systemd), [])
+            systemd.status.return_value[0].active = 'active'
+            with self.assertRaisesRegex(BackupError, 'stop both writers'):
+                _services_stop_for_restore(systemd)
+        systemd.start.assert_not_called()
+        systemd.stop.assert_not_called()
+
+    def test_restore_restart_cannot_bypass_pending_recovery(self):
+        systemd = MagicMock()
+        with patch('netbox_ops.services.upgrade_recovery_pending', return_value=True):
+            with self.assertRaisesRegex(BackupError, 'recovery is pending'):
+                _services_restart_after(systemd, ['netbox'])
+        systemd.start.assert_not_called()

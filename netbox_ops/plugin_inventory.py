@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
-from .services import ExclusiveLock, write_audit
+from .services import ExclusiveLock, ServiceError, upgrade_recovery_pending, write_audit
 
 _NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
 _VERSION = re.compile(r'^[0-9][A-Za-z0-9.+_-]*$')
@@ -286,6 +286,11 @@ def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
     if len(available) != len(inventory.proposals) or any(name not in available for name in unique):
         raise PluginInventoryError('Only unambiguous proposed pins can be approved')
     with ExclusiveLock():
+        try:
+            if upgrade_recovery_pending():
+                raise PluginInventoryError('NetBox upgrade recovery is pending; inspect recovery before changing pins')
+        except ServiceError as exc:
+            raise PluginInventoryError(str(exc)) from None
         # Revalidate trust and source content after acquiring the lock.
         state = inspect_git_installation(inventory.root)
         if state.root != inventory.root:

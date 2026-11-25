@@ -25,7 +25,8 @@ from typing import Callable
 from .config import Configuration
 from .netbox_version import read_netbox_version
 from .platform import pg_binary, PlatformError
-from .services import ExclusiveLock, SystemdServices, write_audit
+from .services import (ExclusiveLock, ServiceError, SystemdServices,
+                       require_service_action_allowed, upgrade_recovery_pending, write_audit)
 from .restore_environment import RuntimeErrorSafe, check_staged_migrations
 
 FORMAT = 1
@@ -575,8 +576,23 @@ def _django_check(cfg: Configuration, staged_name: str) -> None:
         raise BackupError(str(exc)) from exc
 
 
+def _pending_recovery() -> bool:
+    try:
+        return upgrade_recovery_pending()
+    except ServiceError as exc:
+        raise BackupError(str(exc)) from None
+
+
 def _services_stop_for_restore(systemd: SystemdServices) -> list[str]:
+    pending = _pending_recovery()
     states = systemd.status(['netbox', 'netbox-rq'])
+    if pending:
+        # Recovery restores and quiesced backups remain available, but only
+        # with both writers already stopped. Never restart them implicitly.
+        if (len(states) != 2 or {s.name for s in states} != {'netbox', 'netbox-rq'}
+                or any(s.loaded != 'loaded' or s.active != 'inactive' for s in states)):
+            raise BackupError('NetBox upgrade recovery is pending; stop both writers first')
+        return []
     active = [s.name for s in states if s.active == 'active']
     stopped = []
     try:
@@ -586,7 +602,7 @@ def _services_stop_for_restore(systemd: SystemdServices) -> list[str]:
     except Exception:
         for name in reversed(stopped):
             try:
-                systemd.start([name])
+                _services_restart_after(systemd, [name])
             except Exception:
                 pass
         raise
@@ -594,6 +610,10 @@ def _services_stop_for_restore(systemd: SystemdServices) -> list[str]:
 
 
 def _services_restart_after(systemd: SystemdServices, active: list[str]) -> None:
+    try:
+        require_service_action_allowed('start', active)
+    except ServiceError as exc:
+        raise BackupError(str(exc)) from None
     for name in active:
         systemd.start([name])
 
@@ -997,6 +1017,7 @@ class BackupManager:
         total = 8
         _progress(progress, 'prepare', 0, total)
         with ExclusiveLock():
+            pending = _pending_recovery()
             _safe_directory(self.directory)
             if source.is_symlink():
                 raise BackupError('Refusing a symlinked backup source')
@@ -1082,6 +1103,8 @@ class BackupManager:
                     msg = f'Previous database preserved: {previous_name}' if previous_name else ''
                     if restore_db:
                         msg += '\nRedis cache and RQ data were preserved; check cache coherency before production use.'
+                    if pending:
+                        msg += '\nNetBox upgrade recovery remains pending; writers were not restarted.'
                     return BackupReport(source, kind, msg)
                 except Exception as exc:
                     if old_files_undo:
