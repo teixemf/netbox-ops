@@ -307,6 +307,7 @@
   "self_upgrade_reviewed": "Reviewed — separate approval required",
   "self_upgrade_install_reviewed": "Install reviewed next step",
   "self_upgrade_recovery_pending": "Recovery or pending handoff — installation blocked",
+  "self_upgrade_recovery_unverified": "Installation blocked: recovery state unverified",
   "upgrade_status_blocked": "Blocked",
   "upgrade_status_needs_confirmation": "Requires additional confirmation",
   "upgrade_unchanged": "unchanged",
