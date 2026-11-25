@@ -16,6 +16,7 @@ from .plugin_compatibility import PYPI_INDEX, isolated_dependency_preflight
 from .plugin_inventory import inventory_plugins, normalize_name
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
+from .upgrade_process import run_managed
 from .upgrade_plan import UpgradePlan
 from .upgrade_recovery import _read_config
 from .upgrade_runtime import upgrade_environment
@@ -228,7 +229,7 @@ def _command(command: list[str], root: Path, env: dict[str, str], label: str,
 
 def run_plugin_stage(
     installation: GitNetBoxInstallation, plan: UpgradePlan, prepared: PluginUpgrade,
-    base_python: Path, *, systemd: SystemdServices, runner: Callable = subprocess.run,
+    base_python: Path, *, systemd: SystemdServices, runner: Callable = run_managed,
     inspector: Callable = inspect_git_installation, inventory_reader: Callable = inventory_plugins,
 ) -> tuple[tuple[str, str | None], ...]:
     """Install exact pins in the existing venv, then migrate and collect static files.
@@ -277,7 +278,7 @@ def run_plugin_stage(
 
 def read_plugin_registry(
     installation: GitNetBoxInstallation, env: dict[str, str], *,
-    systemd: SystemdServices, runner: Callable = subprocess.run,
+    systemd: SystemdServices, runner: Callable = run_managed,
 ) -> tuple[tuple[str, str | None], ...]:
     """Read the local Django registry without restarting the writers."""
     root = installation.root

@@ -1057,14 +1057,17 @@ class CursesMenu:
 
     def _upgrade_job(self, title: str, worker):
         """Keep curses in the UI thread and show actual backend stage progress."""
+        from contextvars import copy_context
         from .upgrade_execution import UpgradeExecutionError
+        from .upgrade_process import UpgradeInterrupted, check_cancelled, upgrade_signals
         events = queue.SimpleQueue()
         phase, done, total = 'preflight', 0, 0
         tick = 0
         self.stdscr.timeout(150)
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(worker, lambda phase, done, total: events.put((phase, done, total)))
+            with upgrade_signals(), concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(copy_context().run, worker,
+                                     lambda phase, done, total: events.put((phase, done, total)))
                 while not future.done():
                     while not events.empty():
                         phase, done, total = events.get_nowait()
@@ -1076,7 +1079,11 @@ class CursesMenu:
                         self.stdscr.refresh()
                     tick += 1
                     self.stdscr.getch()
-                return future.result()
+                result = future.result()
+                check_cancelled()
+                return result
+        except UpgradeInterrupted:
+            error = self.t('upgrade_cancelled')
         except UpgradeExecutionError as exc:
             error = self.t('upgrade_error', message=str(exc))
         except Exception:

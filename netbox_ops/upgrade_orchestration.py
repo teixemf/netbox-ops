@@ -27,6 +27,7 @@ from .upgrade_services import (
     require_quiesced_writers, start_upgrade_writers, stop_upgrade_writers,
 )
 from .upgrade_stage import resolve_base_python, run_stage
+from .upgrade_process import ManagedProcessError, UpgradeInterrupted, check_cancelled, upgrade_signals
 
 
 # Only fixed, reviewed backend messages may be included in a recovery diagnostic.
@@ -97,6 +98,7 @@ def execute_combined_upgrade(
                             operation='combined')
 
 
+@upgrade_signals()
 def _execute_upgrade(
     cfg: Configuration, plan: UpgradePlan, approval: ExecutionApproval, *,
     rebuild_plan: Callable[[], UpgradePlan],
@@ -111,6 +113,7 @@ def _execute_upgrade(
             except Exception:
                 pass  # A display failure must not interrupt maintenance.
 
+    check_cancelled()
     report('preflight')
     if os.geteuid() != 0:
         raise UpgradeExecutionError('Root privileges required for upgrade')
@@ -144,15 +147,19 @@ def _execute_upgrade(
         recovery = None
         phase = 'stop writers'
         completed = 0
+        check_cancelled()
         write_audit(f'NetBox {operation} upgrade maintenance requested')
         begin_maintenance()
         try:
+            check_cancelled()
             report('stop')
             stop_upgrade_writers(systemd)
+            check_cancelled()
             phase = 'capture recovery'
             report('backup')
             recovery = _capture_quiesced_recovery(cfg, plan, systemd=systemd, pinned_stages=stages)
             write_audit(f'NetBox upgrade recovery={recovery.directory.name}')
+            check_cancelled()
             expected_health = baseline
             if operation == 'plugins':
                 phase = 'plugin installation and migration'
@@ -169,6 +176,7 @@ def _execute_upgrade(
             for index, (stage, planned) in enumerate(zip(stages, plan.stages, strict=True), 1):
                 if operation == 'plugins':
                     break
+                check_cancelled()
                 report('stage', completed)
                 if operation == 'combined':
                     phase = f'stage {index} preflight'
@@ -210,16 +218,19 @@ def _execute_upgrade(
                 completed = index
                 report('validated', completed)
                 write_audit(f'NetBox upgrade completed stage={index} version={stage.version} commit={stage.commit}')
+            check_cancelled()
             phase = 'start writers'
             report('start', completed)
             try:
                 start_upgrade_writers(systemd)
+                check_cancelled()
                 phase = 'functional health check'
                 report('health', completed)
                 wait_for_netbox_health(
                     health_url, plan.target_netbox, expected_health, authorization=authorization,
                 )
-            except Exception:
+                check_cancelled()
+            except (Exception, KeyboardInterrupt):
                 # Try both writers independently: one failed unit must not
                 # prevent an attempt to stop the other.
                 phase += '; maintenance unverified'
@@ -236,7 +247,7 @@ def _execute_upgrade(
             finish_maintenance()
             report('complete', completed)
             return recovery
-        except Exception as exc:
+        except (Exception, KeyboardInterrupt) as exc:
             # Do not include command output or arbitrary exception text.
             # A partial stop/start may require manual service inspection.
             location = recovery.directory.name if recovery else 'not verified'
@@ -247,6 +258,10 @@ def _execute_upgrade(
             report('failed', completed)
             last = stages[completed - 1].version if completed else 'none'
             detail = str(exc) if isinstance(exc, UpgradeExecutionError) and str(exc) in _SAFE_STAGE_ERRORS else ''
+            if isinstance(exc, (UpgradeInterrupted, KeyboardInterrupt)):
+                detail = 'Upgrade interruption requested'
+            elif isinstance(exc, ManagedProcessError):
+                detail = 'Upgrade command left active descendants; managed group stopped'
             diagnostic = f'detail: {detail}; ' if detail else ''
             raise UpgradeExecutionError(
                 f'Upgrade failed during {phase}; recovery: {location}; '
