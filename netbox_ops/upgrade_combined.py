@@ -16,7 +16,7 @@ from .config import Configuration
 from .plugin_compatibility import (
     DependencyPreflight, PYPI_INDEX, isolated_dependency_preflight, review_plugin_upgrade,
 )
-from .plugin_inventory import inventory_plugins, normalize_name
+from .plugin_inventory import configured_plugin_packages, inventory_plugins, normalize_name
 from .plugin_upgrade import (
     PluginUpgrade, _apply_requirements, _command, prepare_plugin_upgrade, read_plugin_registry,
     additional_dependency_pins, bind_reviewed_dependencies, verify_reviewed_resolution,
@@ -261,7 +261,9 @@ def run_combined_stage(
     actual = inventory_reader(live)
     expected_before = {p.package: p.installed_version for p in plan.plugins}
     installed_before = {normalize_name(p.name): p.version for p in actual.packages}
+    eligible = set(dict(configured_plugin_packages(plan.source.inventory)))
     if (len(installed_before) != len(actual.packages)
+            or set(dict(configured_plugin_packages(actual))) != eligible
             or any(installed_before.get(name) != version for name, version in expected_before.items())
             or actual.requirements_hash != prepared.pins.original_hash
             or actual.enabled != plan.source.inventory.enabled):
@@ -297,6 +299,7 @@ def run_combined_stage(
                      else hashlib.sha256(prepared.pins.requirements).hexdigest())
     installed = {normalize_name(p.name): p.version for p in inventory.packages}
     if (len(installed) != len(inventory.packages)
+            or set(dict(configured_plugin_packages(inventory))) != eligible
             or inventory.requirements_hash != expected_hash
             or inventory.enabled != plan.source.inventory.enabled
             or any(installed.get(name) != version for name, version in prepared.pins.expected)):

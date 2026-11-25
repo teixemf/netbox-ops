@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from .plugin_compatibility import PYPI_INDEX, isolated_dependency_preflight
-from .plugin_inventory import inventory_plugins, normalize_name
+from .plugin_inventory import configured_plugin_packages, inventory_plugins, normalize_name, resolve_plugin_package
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
 from .upgrade_diagnostics import run_checked
@@ -90,6 +90,8 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
             raise UpgradeExecutionError('Duplicate installed package metadata')
         installed[key] = package.version
     selection = dict(plan.selected_plugins)
+    if set(selection) - set(dict(configured_plugin_packages(inventory))):
+        raise UpgradeExecutionError('Selected packages are not reliably mapped configured plugins')
     planned = {p.package: p for p in plan.plugins if p.selected}
     if (not combined and not selection) or len(selection) != len(plan.selected_plugins) or set(selection) != set(planned):
         raise UpgradeExecutionError('Invalid selected plugin packages')
@@ -131,12 +133,10 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
     if set(entries) & set(core_entries):
         raise UpgradeExecutionError('Local requirements overlap NetBox core dependencies')
     for module in inventory.enabled:
-        top = module.split('.')[0]
-        matches = [p for p in inventory.packages
-                   if top in p.modules or (not p.modules and normalize_name(p.name) == normalize_name(top))]
-        if len(matches) != 1:
+        package = resolve_plugin_package(inventory.packages, module)
+        if package is None:
             raise UpgradeExecutionError('Cannot map a configured plugin to an installed distribution')
-        name = normalize_name(matches[0].name)
+        name = normalize_name(package.name)
         if name not in selected and name not in entries:
             raise UpgradeExecutionError('Pin unselected configured plugins before upgrading')
     local_pins = []
@@ -306,6 +306,8 @@ def run_plugin_stage(
     actual = {normalize_name(p.name): p.version for p in inventory.packages}
     if (len(actual) != len(inventory.packages)
             or inventory.enabled != plan.source.inventory.enabled
+            or set(dict(configured_plugin_packages(inventory))) !=
+            set(dict(configured_plugin_packages(plan.source.inventory)))
             or inventory.requirements_hash != hashlib.sha256(prepared.requirements).hexdigest()
             or any(actual.get(name) != version for name, version in prepared.expected)):
         raise UpgradeExecutionError('Installed plugin or core versions differ from approved pins')

@@ -16,7 +16,7 @@ from netbox_ops.plugin_upgrade import bind_reviewed_dependencies, prepare_plugin
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_git import PinnedStage
-from netbox_ops.upgrade_plan import build_upgrade_plan
+from netbox_ops.upgrade_plan import UpgradePlanError, build_upgrade_plan
 from netbox_ops.upgrade_preflight import review_plan_dependencies, target_requirements
 from netbox_ops.upgrade_runtime import probe_ltree
 from netbox_ops.upgrade_ui import summary_lines
@@ -53,10 +53,11 @@ class DependencyReviewTests(unittest.TestCase):
             for stage, runtime in zip(stages, runtimes)
         ), (), release_status='verified')
 
-    def build(self, target='4.7.3', selected=None):
+    def build(self, target='4.7.3', selected=None, *, inventory_packages=None, enabled=()):
         local = (self.root / 'local_requirements.txt').read_bytes()
         inventory = PluginInventory(
-            self.root, hashlib.sha256(local).hexdigest(), (), self.installed, (), (), (),
+            self.root, hashlib.sha256(local).hexdigest(), (),
+            self.installed if inventory_packages is None else inventory_packages, enabled, (), (),
         )
         return build_upgrade_plan(
             self.live, inventory, target_netbox=target, selected_plugins=selected,
@@ -92,16 +93,33 @@ class DependencyReviewTests(unittest.TestCase):
         self.resolver.assert_not_called()
 
     def test_combined_and_plugin_only_review_exact_selection(self):
+        local = self.local + b'configured-plugin==1.0\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        packages = self.installed + (InstalledPackage('configured-plugin', '1.0', ('configured_plugin',)),)
         for target, django in ((None, '5.2.1'), ('4.7.3', '6.1.0')):
             with self.subTest(target=target):
                 self.resolver.return_value = DependencyPreflight(
-                    'passed', 'resolved', True, (('django', django), ('disabled-plugin', '2.0')),
+                    'passed', 'resolved', True, (('django', django), ('disabled-plugin', '1.0'),
+                                                 ('configured-plugin', '2.0')),
                 )
-                plan = self.review(self.build(target, {'disabled-plugin': '2.0'}))
+                plan = self.review(self.build(target, {'configured-plugin': '2.0'},
+                                              inventory_packages=packages, enabled=('configured_plugin',)))
                 self.assertTrue(plan.can_execute)
-                self.assertIn(('disabled-plugin', '1.0', '2.0'), plan.dependency_reviews[0].changes)
-                self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), self.local)
+                review = plan.dependency_reviews[0]
+                self.assertIn(('configured-plugin', '1.0', '2.0'), review.changes)
+                self.assertEqual(dict(review.exact_pins)['disabled-plugin'], '1.0')
+                self.assertIn('disabled-plugin==1.0', self.resolver.call_args.args[0])
+                self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
         self.assertEqual(self.pin.call_count, 1)
+
+    def test_disabled_plugin_cannot_be_selected_for_dependency_review(self):
+        packages = (self.installed[0], replace(self.installed[1], modules=('disabled_plugin',)))
+        for target in (None, '4.7.3'):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(UpgradePlanError, 'configured plugins'):
+                    self.build(target, {'disabled-plugin': '2.0'}, inventory_packages=packages)
+        self.pin.assert_not_called()
+        self.resolver.assert_not_called()
 
     def test_conflict_and_unknown_are_distinct_nonexecutable_plans(self):
         self.resolver.return_value = DependencyPreflight('blocked', 'conflict', True)

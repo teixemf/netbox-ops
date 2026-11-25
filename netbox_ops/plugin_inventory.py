@@ -6,7 +6,9 @@ ambiguous requirements must be reviewed by an operator, not rewritten automatica
 from __future__ import annotations
 
 import ast
+import csv
 import hashlib
+import io
 import os
 import re
 import stat
@@ -25,6 +27,7 @@ _HEAD = re.compile(r'^([ \t]*)([A-Za-z0-9][A-Za-z0-9_.-]*)(\[[A-Za-z0-9_,.-]+\])
 _BARE_TAIL = re.compile(r'^([ \t]*)(#[^\r\n]*)?$')
 _PIN_TAIL = re.compile(r'^[ \t]*==[ \t]*([0-9][A-Za-z0-9.+_-]*)(?:[ \t]*#[^\r\n]*)?$')
 _METADATA_LIMIT = 128 * 1024
+_RECORD_LIMIT = 4 * 1024 * 1024
 _REQUIREMENTS_LIMIT = 1024 * 1024
 
 
@@ -69,6 +72,31 @@ class PluginInventory:
 
 def normalize_name(name: str) -> str:
     return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def resolve_plugin_package(packages: Sequence[InstalledPackage],
+                           configured: str) -> InstalledPackage | None:
+    """Resolve a configured module using distribution metadata, never names alone."""
+    if not all(part.isidentifier() for part in configured.split('.')):
+        return None
+    top = configured.split('.')[0]
+    matching = [package for package in packages if top in package.modules]
+    if len(matching) != 1:
+        return None
+    name = normalize_name(matching[0].name)
+    if sum(normalize_name(package.name) == name for package in packages) != 1:
+        return None
+    return matching[0]
+
+
+def configured_plugin_packages(inventory: PluginInventory) -> tuple[tuple[str, str], ...]:
+    """Return only unambiguously mapped, installed, configured plugins."""
+    mapped = {
+        (normalize_name(package.name), package.version)
+        for module in inventory.enabled or ()
+        if (package := resolve_plugin_package(inventory.packages, module)) is not None
+    }
+    return tuple(sorted(mapped))
 
 
 def _read_regular(path: Path, limit: int) -> bytes | None:
@@ -165,6 +193,39 @@ def _enabled_plugins(configuration: Path) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(values)) if found == 1 else None
 
 
+def _record_modules(path: Path) -> tuple[str, ...]:
+    """Use bounded wheel file metadata when top_level.txt is absent or empty."""
+    try:
+        raw = _read_regular(path, _RECORD_LIMIT)
+        if raw is None:
+            return ()
+        modules = set()
+        for row in csv.reader(io.StringIO(raw.decode('utf-8')), strict=True):
+            if len(row) != 3:
+                return ()
+            parts = row[0].split('/')
+            if not all(parts) or any(part in ('.', '..') for part in parts):
+                continue
+            # A directory containing arbitrary Python data is not proof of
+            # importable ownership. Require a package initializer or a module.
+            if len(parts) == 2 and parts[1] == '__init__.py':
+                top = parts[0]
+            elif len(parts) == 1 and parts[0].endswith('.py'):
+                top = parts[0][:-3]
+            elif len(parts) == 1 and re.fullmatch(
+                r'[A-Za-z_][A-Za-z0-9_]*(?:\.(?:cpython-[A-Za-z0-9_-]+|abi3))?\.so', parts[0]
+            ):
+                top = parts[0].split('.')[0]
+            else:
+                continue
+            if top.isidentifier():
+                modules.add(top)
+        return tuple(sorted(modules))
+    except (PluginInventoryError, OSError, UnicodeDecodeError, csv.Error):
+        # Optional metadata is not evidence when missing, unsafe or malformed.
+        return ()
+
+
 def _installed_packages(root: Path, python_version: str) -> tuple[InstalledPackage, ...]:
     match = re.fullmatch(r'(\d+)\.(\d+)\.\d+', python_version)
     if not match:
@@ -204,6 +265,8 @@ def _installed_packages(root: Path, python_version: str) -> tuple[InstalledPacka
                                     if line.isidentifier())
                 except UnicodeDecodeError:
                     pass
+            if not modules:
+                modules = _record_modules(dist / 'RECORD')
             packages.append(InstalledPackage(name, version, modules))
     return tuple(sorted(packages, key=lambda p: normalize_name(p.name)))
 
@@ -230,13 +293,10 @@ def inventory_plugins(installation: GitNetBoxInstallation) -> PluginInventory:
                      '-e ', '--editable', 'git+', 'hg+', 'svn+', 'bzr+'))
                      for line in text.splitlines())
     for plugin in enabled or ():
-        module = plugin.split('.')[0]
-        matches = [p for p in installed if module in p.modules or
-                   (not p.modules and normalize_name(p.name) == normalize_name(module))]
-        if len(matches) != 1:
+        package = resolve_plugin_package(installed, plugin)
+        if package is None:
             warnings.append(f'Cannot reliably map enabled plugin {plugin} to one installed package')
             continue
-        package = matches[0]
         key = normalize_name(package.name)
         if any(normalize_name(egg) == key for egg in
                re.findall(r'[#&]egg=([A-Za-z0-9_.-]+)', text, flags=re.IGNORECASE)):

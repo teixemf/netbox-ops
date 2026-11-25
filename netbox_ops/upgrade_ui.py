@@ -9,7 +9,7 @@ from typing import Callable
 
 from .config import Configuration
 from .i18n import Translator
-from .plugin_inventory import PluginInventory, inventory_plugins, normalize_name
+from .plugin_inventory import PluginInventory, inventory_plugins, normalize_name, resolve_plugin_package
 from .plugin_compatibility import CompatibilityError, ReleaseChoice, discover_stable_releases, fetch_pypi_json
 from .upgrade_combined import probe_server_versions
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
@@ -57,11 +57,15 @@ class UpgradeContext:
 
     @property
     def plugins(self) -> tuple[tuple[str, str | None], ...]:
-        """Only known configured or explicitly declared packages are offered."""
-        known = {normalize_name(p.name): p.version for p in self.inventory.packages}
-        names = set(dict(_configured_packages(self.inventory)))
-        names.update(normalize_name(p.name) for p in self.inventory.requirements)
-        return tuple(sorted((name, known[name]) for name in names if name in known))
+        """Only reliably mapped installed configured plugins are offered."""
+        return _configured_packages(self.inventory)
+
+    @property
+    def plugin_selection_incomplete(self) -> bool:
+        return self.inventory.enabled is None or any(
+            resolve_plugin_package(self.inventory.packages, module) is None
+            for module in self.inventory.enabled
+        )
 
     @property
     def targets(self) -> tuple[str, ...]:
@@ -85,7 +89,7 @@ def alternative_release_choices(context: UpgradeContext, package: str) -> tuple[
     """Published stable candidates, not a claim of NetBox compatibility."""
     name = normalize_name(package)
     if name not in dict(context.plugins):
-        raise UpgradeExecutionError('Select an installed configured or declared plugin')
+        raise UpgradeExecutionError('Select a reliably mapped installed configured plugin')
     try:
         listing = discover_stable_releases(name, fetch_pypi_json(name), context.installation.python_version)
     except (CompatibilityError, OSError, ValueError):
@@ -115,13 +119,15 @@ def make_plan(context: UpgradeContext, operation: str, target: str | None,
     if operation != 'plugins' and not target:
         raise UpgradeExecutionError('Select a target NetBox version')
     if operation != 'netbox' and not selected:
+        if not context.plugins:
+            raise UpgradeExecutionError('No reliably identified configured plugins; review PLUGINS and distribution metadata')
         raise UpgradeExecutionError('Select at least one plugin')
     if (operation == 'netbox' and selected) or (operation == 'plugins' and target):
         raise UpgradeExecutionError('Selection does not match the upgrade operation')
     if operation != 'plugins' and target is not None and target.removeprefix('v') == context.installation.version:
         raise UpgradeExecutionError('Select a newer NetBox release')
     if set(selected) - set(dict(context.plugins)):
-        raise UpgradeExecutionError('Select only installed configured or declared plugins')
+        raise UpgradeExecutionError('Select only reliably mapped installed configured plugins')
     plan = build_upgrade_plan(
         context.installation, context.inventory, target_netbox=target,
         selected_plugins=selected, available_tags=context.tags,
@@ -208,6 +214,8 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
             from .plugin_pin_ui import run_pin_cli
             return run_pin_cli(args, t)
         context = discover_context(cfg, releases=args.action not in ('plugins', 'versions'))
+        if args.action in ('plugins', 'stack', 'versions', 'inspect') and context.plugin_selection_incomplete:
+            print(t('upgrade_plugin_selection_warning'), file=sys.stderr)
         if args.action == 'versions':
             choices = alternative_release_choices(context, args.package)
             print(t('upgrade_alternative_hint'))

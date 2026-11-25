@@ -16,7 +16,9 @@ from .plugin_compatibility import (
     CompatibilityError, DependencyPreflight, PluginCompatibility, PluginReview,
     review_plugin_upgrade,
 )
-from .plugin_inventory import PluginInventory, normalize_name
+from .plugin_inventory import (
+    PluginInventory, configured_plugin_packages, normalize_name, resolve_plugin_package,
+)
 from .upgrade_discovery import (
     GitNetBoxInstallation, Prerequisite, check_prerequisites,
 )
@@ -204,31 +206,22 @@ def _release_notes_between(current: str, target: str) -> tuple[str, ...]:
 
 
 def _configured_packages(inventory: PluginInventory) -> tuple[tuple[str, str | None], ...]:
-    """Map configured modules to packages only when the mapping is unambiguous."""
-    packages = []
-    for configured in inventory.enabled or ():
-        module = configured.split('.')[0]
-        matching = [p for p in inventory.packages
-                    if module in p.modules or (
-                        not p.modules and normalize_name(module) == normalize_name(p.name)
-                    )]
-        if len(matching) == 1:
-            packages.append((normalize_name(matching[0].name), matching[0].version))
-    return tuple(dict.fromkeys(packages))
+    """Use the shared eligibility contract for configured plugins."""
+    return configured_plugin_packages(inventory)
 
 
 def _validated_selection(inventory: PluginInventory,
                          selected: Mapping[str, str | None]) -> tuple[tuple[str, str | None], ...]:
     if not isinstance(selected, Mapping):
         raise UpgradePlanError('Select plugin packages and explicit stable versions')
-    known = {normalize_name(item.name) for item in inventory.packages}
+    known = set(dict(_configured_packages(inventory)))
     chosen = {}
     for package, version in selected.items():
         if not isinstance(package, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', package):
             raise UpgradePlanError('Invalid plugin package name')
         name = normalize_name(package)
         if name not in known or name in chosen:
-            raise UpgradePlanError('Selected plugin is missing from inventory or is duplicated')
+            raise UpgradePlanError('Select only reliably mapped configured plugins, without duplicates')
         if version is not None:
             if not isinstance(version, str) or not re.fullmatch(
                 r'(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,4}(?:\.post\d+)?', version
@@ -316,10 +309,9 @@ def build_upgrade_plan(
     warnings = list(inventory.warnings)
     if inventory.enabled is None:
         warnings.append('Enabled PLUGINS could not be read statically; verify them manually')
-    else:
-        mapped = len(_configured_packages(inventory))
-        if mapped < len(set(inventory.enabled)):
-            warnings.append('Some enabled plugins could not be mapped to installed distributions')
+    elif any(resolve_plugin_package(inventory.packages, module) is None
+             for module in inventory.enabled):
+        warnings.append('Some enabled plugins could not be mapped to installed distributions')
     if notes:
         warnings.append('Review all intervening NetBox release notes before approving the plan')
     if installation.warnings:

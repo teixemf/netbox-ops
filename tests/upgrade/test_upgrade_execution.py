@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
+from netbox_ops.plugin_inventory import InstalledPackage, PluginInventory
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import (
     ExecutionApproval, UpgradeExecutionError, validate_execution_approval,
@@ -20,7 +21,8 @@ class ExecutionApprovalTests(unittest.TestCase):
             'HEAD', 'https://github.com/netbox-community/netbox.git',
             Path('/opt/netbox/venv/bin/python'), '3.12.0', (), (),
         )
-        source = Mock(installation=self.install, available_tags=('v4.4.1',))
+        inventory = PluginInventory(self.install.root, None, (), (), (), (), ())
+        source = Mock(installation=self.install, available_tags=('v4.4.1',), inventory=inventory)
         stage = UpgradeStage('netbox', '4.4.0', '4.4.1', (), (), (), (), (), ())
         self.plan = Mock(
             can_execute=True, stages=(stage,), selected_plugins=(),
@@ -79,8 +81,17 @@ class ExecutionApprovalTests(unittest.TestCase):
         self.check_rejected()
 
     def test_plugin_selection_rejected(self):
+        # A configured, eligible plugin still cannot use the NetBox-only executor.
+        self.plan.source.inventory = replace(
+            self.plan.source.inventory,
+            packages=(InstalledPackage('plugin', '1.0', ('plugin',)),),
+            enabled=('plugin',),
+        )
         self.plan.selected_plugins = (('plugin', '1.0'),)
-        self.check_rejected()
+        with self.assertRaisesRegex(UpgradeExecutionError, 'Plugin changes require the combined executor'):
+            validate_execution_approval(self.plan, self.approval, inspector=self.inspector,
+                                        fresh_plan=self.plan)
+        self.inspector.assert_not_called()
 
     def test_unverified_git_tag_rejected(self):
         self.plan.source.available_tags = ()

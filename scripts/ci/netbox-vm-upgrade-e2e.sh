@@ -51,6 +51,7 @@ printf '\nLOGIN_REQUIRED = False\n' >> "$root/netbox/netbox/configuration.py"
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
+  printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
 else
   printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
 fi
@@ -102,6 +103,21 @@ commit=$(git -C "$root" rev-parse HEAD)
 for unit in nginx redis-server postgresql@16-main; do
   systemctl show -p ActiveEnterTimestampMonotonic --value "$unit" > "$scratch/$unit"
 done
+
+if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
+  if "${cli[@]}" upgrade plugins --plugin tomli-w > "$scratch/rejected-non-plugin" 2>&1; then
+    echo 'FAIL: additional local package was accepted as a plugin' >&2
+    exit 1
+  fi
+  grep -Fq 'Select only reliably mapped installed configured plugins' "$scratch/rejected-non-plugin"
+  "${cli[@]}" upgrade inspect > "$scratch/plugin-inventory"
+  grep -Fq "$plugin: $old_plugin" "$scratch/plugin-inventory"
+  if grep -Fq 'tomli-w:' "$scratch/plugin-inventory"; then
+    echo 'FAIL: additional local package was offered for plugin upgrade' >&2
+    exit 1
+  fi
+  echo 'PASS: additional local package excluded from plugin selection'
+fi
 
 case "$scenario" in
   plugins) args=(upgrade plugins --plugin "$plugin==$new_plugin") ;;
@@ -181,6 +197,8 @@ fi
 (cd "$root" && "$root/venv/bin/python" netbox/manage.py migrate --check --noinput)
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   grep -qx "$plugin==$new_plugin" "$root/local_requirements.txt"
+  grep -qx 'tomli-w==1.2.0' "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import importlib.metadata as m; assert m.version("tomli-w")=="1.2.0"'
   "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]' "$plugin" "$new_plugin"
   curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
 fi

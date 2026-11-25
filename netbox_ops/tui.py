@@ -1001,6 +1001,11 @@ class CursesMenu:
                         selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
                     continue
                 elif action == 'plugins':
+                    if context.plugin_selection_incomplete:
+                        self._show_lines(title, [(self.t('upgrade_plugin_selection_warning'), 'warning')])
+                    if not context.plugins:
+                        self._show_lines(title, [(self.t('upgrade_no_eligible_plugins'), 'warning')])
+                        continue
                     while True:
                         packages = context.plugins
                         items = [(self.t('upgrade_select_all'), ''), (self.t('upgrade_clear_all'), '')]

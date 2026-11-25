@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .plugin_inventory import normalize_name
+from .plugin_inventory import configured_plugin_packages, normalize_name, resolve_plugin_package
 from .upgrade_discovery import inspect_git_installation
 from .upgrade_plan import UpgradePlan, required_netbox_path
 
@@ -61,6 +61,8 @@ def validate_execution_approval(
         raise UpgradeExecutionError('Approval does not match the planned installation')
     if plan.requires_strong_confirmation and not approval.approved_unknowns:
         raise UpgradeExecutionError('Explicit confirmation of unknown requirements is required')
+    if set(dict(plan.selected_plugins)) - set(dict(configured_plugin_packages(plan.source.inventory))):
+        raise UpgradeExecutionError('Selected packages are not reliably mapped configured plugins')
     if operation == 'netbox':
         if any(stage.kind != 'netbox' for stage in plan.stages):
             raise UpgradeExecutionError('This executor supports NetBox-only stages')
@@ -120,13 +122,9 @@ def validate_netbox_only_pins(plan: UpgradePlan) -> None:
     if inventory.enabled is None:
         raise UpgradeExecutionError('Configured plugins must be identifiable before upgrading')
     for module in inventory.enabled:
-        top_level = module.split('.')[0]
-        matches = [p for p in inventory.packages
-                   if top_level in p.modules or
-                   (not p.modules and normalize_name(top_level) == normalize_name(p.name))]
-        if len(matches) != 1:
+        package = resolve_plugin_package(inventory.packages, module)
+        if package is None:
             raise UpgradeExecutionError('A configured plugin cannot be mapped to an installed package')
-        package = matches[0]
         name = normalize_name(package.name)
         requirements = [item for item in inventory.requirements
                         if normalize_name(item.name) == name]
