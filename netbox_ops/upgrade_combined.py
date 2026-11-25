@@ -25,6 +25,7 @@ from .services import SystemdServices
 from .upgrade_checkout import _run_git, fetch_pinned_stage
 from .upgrade_discovery import GitNetBoxInstallation, check_prerequisites
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
+from .upgrade_diagnostics import CommandFailure, run_checked
 from .upgrade_process import run_managed
 from .upgrade_git import PinnedStage
 from .upgrade_plan import UpgradePlan, UpgradeStage
@@ -149,16 +150,11 @@ def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
         '--timeout', '20', '--retries', '2',
         'pip', 'wheel', *pins.core_pins, *pins.local_pins,
     ]
-    try:
-        result = runner(command, cwd=directory, env=env, stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=900, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        raise UpgradeExecutionError('Combined wheel download unavailable or timed out') from None
-    if result.returncode or not any(directory.glob('*.whl')):
-        detail = ('; check Python headers, C compiler and PostgreSQL client development files'
-                  if build_psycopg else '')
-        raise UpgradeExecutionError('Cannot prepare all combined upgrade wheels before maintenance' + detail)
+    command_id = 'wheel.psycopg' if build_psycopg else 'wheel.prepare'
+    run_checked(command_id, command, runner=runner, timeout=900, cwd=directory, env=env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not any(directory.glob('*.whl')):
+        raise CommandFailure(command_id, 'artifacts')
 
 
 def prepare_combined_stages(

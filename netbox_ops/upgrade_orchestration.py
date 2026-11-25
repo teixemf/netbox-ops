@@ -28,6 +28,7 @@ from .upgrade_services import (
 )
 from .upgrade_stage import resolve_base_python, run_stage
 from .upgrade_process import ManagedProcessError, UpgradeInterrupted, check_cancelled, upgrade_signals
+from .upgrade_diagnostics import CommandFailure
 
 
 # Only fixed, reviewed backend messages may be included in a recovery diagnostic.
@@ -252,20 +253,25 @@ def _execute_upgrade(
             # Do not include command output or arbitrary exception text.
             # A partial stop/start may require manual service inspection.
             location = recovery.directory.name if recovery else 'not verified'
-            try:
-                write_audit(f'NetBox upgrade failed phase={phase} completed={completed} recovery={location}')
-            except Exception:
-                pass
-            report('failed', completed)
             last = stages[completed - 1].version if completed else 'none'
-            detail = str(exc) if isinstance(exc, UpgradeExecutionError) and str(exc) in _SAFE_STAGE_ERRORS else ''
-            if isinstance(exc, (UpgradeInterrupted, KeyboardInterrupt)):
+            target = stages[min(completed, len(stages) - 1)].version
+            detail = str(exc) if type(exc) is UpgradeExecutionError and str(exc) in _SAFE_STAGE_ERRORS else ''
+            if type(exc) is CommandFailure:
+                detail = exc.safe_message()
+            elif isinstance(exc, (UpgradeInterrupted, KeyboardInterrupt)):
                 detail = 'Upgrade interruption requested'
             elif isinstance(exc, ManagedProcessError):
                 detail = 'Upgrade command left active descendants; managed group stopped'
             diagnostic = f'detail: {detail}; ' if detail else ''
+            try:
+                write_audit(f'NetBox upgrade failed phase={phase} target={target} completed={completed} '
+                            f'recovery={location} {diagnostic}')
+            except Exception:
+                pass
+            report('failed', completed)
             raise UpgradeExecutionError(
                 f'Upgrade failed during {phase}; recovery: {location}; '
                 f'completed stages: {completed}/{len(stages)}; last completed release: {last}; '
-                f'{diagnostic}inspect service state and recovery.json before manual recovery; no automatic rollback'
+                f'target stage release: {target}; {diagnostic}'
+                'inspect service state and recovery.json before manual recovery; no automatic rollback'
             ) from None

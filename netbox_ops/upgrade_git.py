@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_diagnostics import run_checked
+from .upgrade_process import run_managed
 from .upgrade_plan import UpgradePlan
 
 OFFICIAL_REMOTE = 'https://github.com/netbox-community/netbox.git'
@@ -26,7 +27,7 @@ class PinnedStage:
 
 
 def pin_release_stages(plan: UpgradePlan, *,
-                       runner: Callable = subprocess.run) -> tuple[PinnedStage, ...]:
+                       runner: Callable = run_managed) -> tuple[PinnedStage, ...]:
     """Resolve exact remote tags, peeling annotated tags to their commits."""
     versions = tuple(stage.netbox_version for stage in plan.stages)
     if (not plan.can_execute or not versions or len(set(versions)) != len(versions)
@@ -39,16 +40,11 @@ def pin_release_stages(plan: UpgradePlan, *,
            if not key.startswith('GIT_')}
     env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                GIT_TERMINAL_PROMPT='0')
-    try:
-        result = runner(
-            ['git', '-C', '/', 'ls-remote', '--exit-code', '--', OFFICIAL_REMOTE,
-             *sorted(wanted)],
-            cwd='/', env=env, capture_output=True, text=True, check=False, timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        raise UpgradeExecutionError('Official release lookup failed or timed out') from None
-    if result.returncode:
-        raise UpgradeExecutionError('Official release lookup failed')
+    result = run_checked(
+        'git.release_lookup',
+        ['git', '-C', '/', 'ls-remote', '--exit-code', '--', OFFICIAL_REMOTE, *sorted(wanted)],
+        runner=runner, timeout=60, cwd='/', env=env, capture_output=True, text=True,
+    )
     found = {}
     for line in result.stdout.splitlines():
         fields = line.split('\t')

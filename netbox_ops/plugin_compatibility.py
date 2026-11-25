@@ -20,7 +20,7 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from .plugin_inventory import normalize_name
-from .upgrade_process import run_managed
+from .upgrade_process import ManagedOutputError, run_managed
 
 PYPI_API = 'https://pypi.org/pypi'
 PYPI_INDEX = 'https://pypi.org/simple'
@@ -443,10 +443,12 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
         try:
             completed = runner(command, cwd=temp, env=env, text=True, capture_output=True,
                                timeout=120, check=False)
+        except ManagedOutputError:
+            return DependencyPreflight('unknown', 'Isolated resolver output exceeds safety limit')
         except (OSError, subprocess.TimeoutExpired):
             return DependencyPreflight('unknown', 'Isolated resolver unavailable or timed out')
         if completed.returncode:
-            error = (completed.stderr or '') + '\n' + (completed.stdout or '')
+            error = (completed.stderr or '')[-65536:] + '\n' + (completed.stdout or '')[-65536:]
             if 'ResolutionImpossible' in error or 'conflicting dependencies' in error.lower():
                 return DependencyPreflight('blocked', 'pip confirmed conflicting Python dependencies', bool(core_pins))
             return DependencyPreflight('unknown', 'pip could not complete a wheel-only dependency check')
