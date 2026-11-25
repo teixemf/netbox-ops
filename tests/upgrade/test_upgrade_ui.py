@@ -13,7 +13,7 @@ from netbox_ops.cli import build_parser, dispatch
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import Translator
 from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview, ReleaseChoice
-from netbox_ops.plugin_inventory import InstalledPackage, PinProposal, PluginInventory
+from netbox_ops.plugin_inventory import DeclaredRequirement, InstalledPackage, PinProposal, PluginInventory
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import UpgradeExecutionError
@@ -33,7 +33,7 @@ class InterfaceFixture(unittest.TestCase):
             root / 'venv/bin/python', '3.12.3', (), (),
         )
         self.inventory = PluginInventory(
-            root, 'hash', (), (
+            root, 'hash', (DeclaredRequirement(1, 'django', 'pinned', '5.2.6'),), (
                 InstalledPackage('example-plugin', '1.0.0', ('example_plugin',)),
                 InstalledPackage('django', '5.2.6', ('django',)),
             ), ('example_plugin',), (), (),
@@ -74,6 +74,24 @@ class SharedInterfaceTests(InterfaceFixture):
             parse_plugins(['example-plugin', 'example_plugin'])
         with self.assertRaises(UpgradeExecutionError):
             self.build('plugins', None, {'django': '6.0'})
+
+    def test_non_plugin_alternative_release_discovery_is_rejected(self):
+        with patch('netbox_ops.upgrade_ui.fetch_pypi_json') as fetch:
+            with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugin'):
+                alternative_release_choices(self.context, 'django')
+        fetch.assert_not_called()
+
+    def test_dynamic_and_ambiguous_plugin_configuration_is_reported(self):
+        for inventory in (
+            replace(self.inventory, enabled=None),
+            replace(self.inventory, packages=self.inventory.packages + (
+                InstalledPackage('ambiguous', '1.0.0', ('example_plugin',)),)),
+        ):
+            context = replace(self.context, inventory=inventory)
+            self.assertTrue(context.plugin_selection_incomplete)
+            self.assertEqual(context.plugins, ())
+            with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugins'):
+                make_plan(context, 'plugins', None, {'example-plugin': None})
 
     def test_plan_fingerprint_binds_runtime_and_inventory(self):
         first = self.build()
@@ -147,6 +165,22 @@ class UpgradeCliTests(InterfaceFixture):
             result = dispatch(args, self.t)
         return result, out.getvalue(), execute
 
+    def test_cli_select_all_uses_only_configured_plugins(self):
+        cases = (
+            (['plugins', '--all'], 'plugins', None),
+            (['stack', '--netbox-version', '4.4.2', '--plugins', 'all'], 'stack', '4.4.2'),
+        )
+        for argv, operation, target in cases:
+            with self.subTest(operation=operation):
+                args = build_parser().parse_args(['upgrade', *argv])
+                plan = self.build(operation, target, {'example-plugin': None})
+                with patch('netbox_ops.cli.load_config', return_value=self.cfg), patch(
+                    'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
+                ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, \
+                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(dispatch(args, self.t), 0)
+                build.assert_called_once_with(self.context, operation, target, {'example-plugin': None})
+
     def test_preview_default_and_details_are_read_only(self):
         plan = self.build()
         result, output, execute = self.invoke(['netbox', '--version', '4.4.2', '--details'], plan)
@@ -200,6 +234,17 @@ class UpgradeTuiTests(InterfaceFixture):
         ), patch.object(menu, '_confirm_token', side_effect=confirmations) as confirm:
             menu._upgrade('netbox')
         return build, execute, confirm
+
+    def test_tui_select_all_excludes_declared_non_plugin(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        plan = self.build('plugins', None, {'example-plugin': None})
+        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
+            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
+        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, patch.object(
+            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
+        ), patch.object(menu, '_choose', side_effect=[0, 0, None, 1, None]), patch.object(menu, '_show_lines'):
+            menu._upgrade('plugins')
+        build.assert_called_once_with(self.context, 'plugins', None, {'example-plugin': None})
 
     def test_cancel_confirmation_never_executes(self):
         _, execute, confirm = self.run_menu(self.build(), [1, 3, None], [False])
