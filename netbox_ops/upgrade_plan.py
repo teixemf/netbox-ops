@@ -70,6 +70,17 @@ class UpgradeStage:
 
 
 @dataclass(frozen=True)
+class StageDependencyReview:
+    version: str
+    commit: str
+    core_hash: str
+    exact_pins: tuple[tuple[str, str], ...]
+    resolution: DependencyPreflight
+    changes: tuple[tuple[str, str | None, str], ...]
+    ltree: str
+
+
+@dataclass(frozen=True)
 class UpgradePlan:
     source: PlanSource
     current_netbox: str
@@ -84,6 +95,7 @@ class UpgradePlan:
     blockers: tuple[str, ...]
     requires_strong_confirmation: bool
     fingerprint: str
+    dependency_reviews: tuple[StageDependencyReview, ...] = ()
 
     @property
     def can_execute(self) -> bool:
@@ -249,6 +261,9 @@ def _fingerprint(plan: UpgradePlan) -> str:
                    for s in plan.stages],
         'warnings': plan.warnings,
         'blockers': plan.blockers,
+        'dependency_reviews': [(r.version, r.commit, r.core_hash, r.exact_pins,
+                                r.resolution.status, r.resolution.checked_core, r.resolution.packages,
+                                r.resolution.detail, r.changes, r.ltree) for r in plan.dependency_reviews],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()
 

@@ -135,3 +135,11 @@ def validate_netbox_only_pins(plan: UpgradePlan) -> None:
                 or any(dict(stage.plugin_versions).get(name) != package.version
                        for stage in plan.stages)):
             raise UpgradeExecutionError('Pin configured plugins to their installed versions before upgrading')
+    installed = {normalize_name(package.name): package.version for package in inventory.packages}
+    seen = set()
+    for entry in inventory.requirements:
+        name = normalize_name(entry.name)
+        if (name in seen or entry.kind != 'pinned' or not entry.version
+                or installed.get(name) != entry.version):
+            raise UpgradeExecutionError('Pin all local packages to their installed versions before upgrading')
+        seen.add(name)

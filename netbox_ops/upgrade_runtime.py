@@ -118,3 +118,73 @@ def validate_upgrade_runtime(
             'NetBox services, upgrade environment and local database/media backup targets '
             'could not be matched'
         ) from None
+
+# NetBox 4.7+: ltree is trusted; a missing extension requires CREATE on the
+# database and target schema. Query catalogs only, never CREATE EXTENSION.
+_LTREE_SQL = """
+SELECT
+    EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'ltree'),
+    EXISTS (
+        SELECT 1 FROM pg_extension e
+        JOIN pg_type t ON t.typnamespace = e.extnamespace AND t.typname = 'ltree'
+        WHERE e.extname = 'ltree'
+          AND pg_type_is_visible(t.oid)
+          AND has_schema_privilege(e.extnamespace, 'USAGE')
+          AND has_type_privilege(t.oid, 'USAGE')
+    ),
+    EXISTS (
+        SELECT 1 FROM pg_available_extensions a
+        JOIN pg_available_extension_versions v
+          ON v.name = a.name AND v.version = a.default_version
+        WHERE a.name = 'ltree' AND (v.trusted OR NOT v.superuser)
+    ),
+    has_database_privilege(current_database(), 'CREATE')
+        AND COALESCE(has_schema_privilege(current_schema(), 'CREATE'), false)
+"""
+_LTREE_PROBE = """
+import json, os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
+from django.db import connections
+with connections['default'].cursor() as cursor:
+    cursor.execute(%r)
+    print(json.dumps(cursor.fetchone()))
+""" % _LTREE_SQL
+
+
+def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
+                runner: Callable = subprocess.run, discover: Callable = netbox_runtime) -> str:
+    """Check both actual service and restricted script environments without writes."""
+    states = []
+    try:
+        for name in ('netbox', 'netbox-rq'):
+            service_cfg = replace(cfg, units={**cfg.units, 'netbox': cfg.units[name]})
+            runtime = discover(service_cfg, runner=runner)
+            if runtime.python != live.python or runtime.working_directory != live.root / 'netbox':
+                return 'unknown'
+            account = (pwd.getpwuid(int(runtime.username)) if runtime.username.isdigit()
+                       else pwd.getpwnam(runtime.username))
+            if account.pw_uid == 0:
+                return 'unknown'
+            for env in (runtime.environment, upgrade_environment(live.python)):
+                result = runner(
+                    [str(runtime.python), '-c', _LTREE_PROBE], cwd=runtime.working_directory,
+                    env=env, user=account.pw_uid, group=account.pw_gid,
+                    extra_groups=os.getgrouplist(account.pw_name, account.pw_gid),
+                    capture_output=True, text=True, timeout=30, check=False,
+                )
+                values = json.loads(result.stdout) if not result.returncode else None
+                if not isinstance(values, list) or len(values) != 4 or any(type(x) is not bool for x in values):
+                    return 'unknown'
+                installed, usable, available, permitted = values
+                if installed:
+                    states.append('installed' if usable else 'permission')
+                elif not available:
+                    states.append('missing')
+                else:
+                    states.append('available' if permitted else 'permission')
+    except Exception:
+        return 'unknown'
+    for status in ('missing', 'permission', 'unknown', 'available'):
+        if status in states:
+            return status
+    return 'installed' if states else 'unknown'
