@@ -58,7 +58,8 @@ def pin_review_lines(review: PinReview, t: Translator) -> list[str]:
 
 
 def apply_pin_review(review: PinReview, fingerprint: str) -> None:
-    if not review.selected or fingerprint != review.fingerprint:
+    if (not review.selected or fingerprint != review.fingerprint
+            or review != build_pin_review(review.inventory, review.selected)):
         raise PluginInventoryError('Approval must match the exact pin review fingerprint')
     apply_approved_pins(review.inventory, review.selected, approved=True)
 
