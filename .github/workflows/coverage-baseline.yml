@@ -63,3 +63,73 @@ jobs:
           include-hidden-files: false
           if-no-files-found: error
           retention-days: 30
+
+  postgres-coverage:
+    name: PostgreSQL coverage / ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: Ubuntu 22.04
+            image: ubuntu:22.04
+            artifact: ubuntu-22.04
+          - distro: Rocky Linux 9
+            image: rockylinux:9
+            artifact: rocky-9
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare report directory
+        run: mkdir -p "$RUNNER_TEMP/netbox-ops-postgres-coverage"
+      - name: Measure existing real PostgreSQL tests
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace:ro" \
+            --volume "$RUNNER_TEMP/netbox-ops-postgres-coverage:/coverage" \
+            --workdir /workspace \
+            --env COVERAGE_FILE=/coverage/.coverage \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            "${{ matrix.image }}" \
+            bash -ec 'set -o pipefail
+              source /etc/os-release
+              case "$ID" in
+                ubuntu)
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq
+                  apt-get install -y -qq --no-install-recommends python3-pip
+                  ;;
+                rocky)
+                  dnf install -y --setopt=install_weak_deps=False python3-pip
+                  ;;
+                *) exit 1 ;;
+              esac
+              python3 -m pip install --disable-pip-version-check --target /tmp/nbo-coverage-tool coverage==7.10.7
+              export PYTHONPATH=/tmp/nbo-coverage-tool
+              python3 --version | tee /coverage/python-version.txt
+              bash tests/integration/run_postgres.sh python3 -m coverage run --branch --source=netbox_ops -m unittest discover -s tests/integration -p "integration_*.py" -v
+              python3 -m coverage report -m | tee /coverage/coverage.txt
+              python3 -m coverage json -o /coverage/coverage.json
+              python3 -m coverage xml -o /coverage/coverage.xml'
+      - name: Publish integration coverage summary
+        if: success()
+        run: |
+          {
+            echo '### PostgreSQL integration coverage (separate measurement)'
+            echo 'Uses the distribution Python; do not add percentages to the unit baseline.'
+            echo '~~~text'
+            cat "$RUNNER_TEMP/netbox-ops-postgres-coverage/python-version.txt"
+            cat "$RUNNER_TEMP/netbox-ops-postgres-coverage/coverage.txt"
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload PostgreSQL coverage
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/netbox-ops-postgres-coverage/
+          include-hidden-files: false
+          if-no-files-found: error
+          retention-days: 30
