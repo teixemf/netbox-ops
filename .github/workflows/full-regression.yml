@@ -1,0 +1,28 @@
+name: Full regression
+
+# Scheduled runs use the default branch (main). Select dev manually to test
+# the ongoing development revision without changing its normal PR checks.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-regression-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  baseline:
+    uses: ./.github/workflows/vm-netbox-integration.yml
+
+  upgrades:
+    uses: ./.github/workflows/vm-netbox-upgrades.yml
+
+  self_upgrade:
+    uses: ./.github/workflows/vm-self-upgrade.yml

@@ -1,12 +1,13 @@
 name: VM integration - NetBox services and reusable baseline
 
 on:
+  workflow_call:
   pull_request:
     branches: [dev]
   workflow_dispatch:
 
 concurrency:
-  group: baseline-vm-${{ github.ref }}
+  group: baseline-vm-${{ github.ref }}-${{ github.workflow == 'Full regression' && 'full' || 'normal' }}
   cancel-in-progress: true
 
 permissions:

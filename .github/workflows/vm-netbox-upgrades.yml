@@ -1,6 +1,7 @@
 name: VM E2E - NetBox upgrades
 
 on:
+  workflow_call:
   # Verify the integrated revision after workflow or release-version changes.
   push:
     branches: [dev]
@@ -14,7 +15,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: netbox-upgrade-e2e-${{ github.ref }}
+  group: netbox-upgrade-e2e-${{ github.ref }}-${{ github.workflow == 'Full regression' && 'full' || 'normal' }}
   cancel-in-progress: true
 
 permissions:

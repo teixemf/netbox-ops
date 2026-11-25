@@ -9,9 +9,10 @@ import time
 import unittest
 from contextvars import copy_context
 from pathlib import Path
+from unittest.mock import patch
 
 from netbox_ops.upgrade_process import (
-    ManagedProcessError, UpgradeInterrupted, run_managed, upgrade_signals,
+    ManagedProcessError, UpgradeInterrupted, _group_active, run_managed, upgrade_signals,
 )
 
 
@@ -84,3 +85,29 @@ class ManagedProcessTests(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
         time.sleep(2.1)
         self.assertFalse(self.changed.exists())
+
+
+class ProcessGroupScanTests(unittest.TestCase):
+    def test_disappearing_proc_entry_does_not_hide_active_group(self):
+        entries = [Path('/proc/123'), Path('/proc/456')]
+        with (
+            patch.object(Path, 'iterdir', return_value=iter(entries)),
+            patch.object(Path, 'read_bytes', side_effect=[
+                FileNotFoundError(), b'456 (worker) S 1 42 42',
+            ]),
+        ):
+            self.assertTrue(_group_active(42))
+
+    def test_disappearing_proc_entry_alone_is_not_an_active_group(self):
+        with (
+            patch.object(Path, 'iterdir', return_value=iter([Path('/proc/123')])),
+            patch.object(Path, 'read_bytes', side_effect=ProcessLookupError()),
+        ):
+            self.assertFalse(_group_active(42))
+
+    def test_unreadable_proc_entry_fails_conservatively(self):
+        with (
+            patch.object(Path, 'iterdir', return_value=iter([Path('/proc/123')])),
+            patch.object(Path, 'read_bytes', side_effect=PermissionError()),
+        ):
+            self.assertTrue(_group_active(42))

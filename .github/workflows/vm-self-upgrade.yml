@@ -1,6 +1,16 @@
 name: VM integration - netbox-ops self-upgrade
 
 on:
+  workflow_call:
+    inputs:
+      official_from:
+        type: string
+        required: false
+        default: ''
+      official_target:
+        type: string
+        required: false
+        default: ''
   # Verify the integrated revision after workflow or release-version changes.
   push:
     branches: [dev]
@@ -23,7 +33,7 @@ on:
         required: false
 
 concurrency:
-  group: self_upgrade-vm-${{ github.ref }}
+  group: self_upgrade-vm-${{ github.ref }}-${{ github.workflow == 'Full regression' && 'full' || 'normal' }}
   cancel-in-progress: true
 
 permissions:
