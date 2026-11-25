@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from netbox_ops.plugin_compatibility import (
-    CompatibilityEvidence, DependencyPreflight, PluginCompatibility, PluginReview,
+    CompatibilityError, CompatibilityEvidence, DependencyPreflight, PluginCompatibility, PluginReview,
     ReleaseCatalog,
 )
 from netbox_ops.plugin_inventory import InstalledPackage, PluginInventory
@@ -42,7 +42,7 @@ class PlannerTests(unittest.TestCase):
                                                'fixture', 'confirmed', 'supports'),), ())
                        for stage, runtime in zip(stages, python_versions))
         return PluginReview(package, chosen, ReleaseCatalog(package, (), '2.0.0', ()),
-                            checks, ())
+                            checks, (), release_status='verified')
 
     def build(self, **kwargs):
         options = dict(available_tags=self.tags, postgres_version='15.2', redis_version='7.0',
@@ -156,7 +156,7 @@ class PlannerTests(unittest.TestCase):
                                                'blocked', (CompatibilityEvidence(
                                                    'pip', 'ResolutionImpossible', 'blocks'),), ())
                            for stage, runtime in zip(stages, python_versions))
-            return PluginReview(package, version or '2.0.0', None, checks, ())
+            return PluginReview(package, version or '2.0.0', None, checks, (), release_status='verified')
         plan = self.build(target_netbox='4.6.2', reviewer=blocked)
         self.assertEqual(plan.status, 'blocked')
         self.assertIn('sample-plugin', plan.blockers[0])
@@ -238,6 +238,51 @@ class PlannerTests(unittest.TestCase):
         plan = self.build(selected_plugins={'sample-plugin': None}, reviewer=unavailable)
         self.assertTrue(plan.requires_strong_confirmation)
         self.assertTrue(any('not verified' in w for w in plan.warnings))
+        self.assertFalse(plan.can_execute)
+
+    def test_discovery_exception_preserves_exact_target_and_blocks(self):
+        def failing(*args, **kwargs):
+            raise CompatibilityError('Unavailable')
+
+        for target in ('2.5.0', None):
+            with self.subTest(target=target):
+                plan = self.build(selected_plugins={'sample-plugin': target}, reviewer=failing)
+                self.assertEqual(plan.plugins[0].proposed_version, target)
+                self.assertFalse(plan.can_execute)
+
+    def test_review_cannot_substitute_a_different_explicit_version(self):
+        def stale(package, stages, python_versions, *, version, preflights):
+            return self.reviewer(package, stages, python_versions,
+                                 version='1.0.0', preflights=preflights)
+
+        plan = self.build(selected_plugins={'sample-plugin': '2.5.0'}, reviewer=stale)
+        self.assertEqual(plan.plugins[0].proposed_version, '2.5.0')
+        self.assertFalse(plan.can_execute)
+        self.assertEqual(plan.stages[0].plugin_checks, ())
+
+    def test_unavailable_and_unknown_releases_cannot_be_approved(self):
+        from dataclasses import replace
+
+        for status in ('unavailable', 'unknown'):
+            with self.subTest(status=status):
+                def reviewer(*args, **kwargs):
+                    return replace(self.reviewer(*args, **kwargs), release_status=status)
+
+                plan = self.build(selected_plugins={'sample-plugin': '2.5.0'}, reviewer=reviewer)
+                self.assertEqual(plan.plugins[0].proposed_version, '2.5.0')
+                self.assertFalse(plan.can_execute)
+
+    def test_verified_release_with_uncertain_compatibility_can_be_approved(self):
+        from dataclasses import replace
+
+        def reviewer(*args, **kwargs):
+            result = self.reviewer(*args, **kwargs)
+            return replace(result, stages=tuple(replace(check, status='uncertain')
+                                                for check in result.stages))
+
+        plan = self.build(selected_plugins={'sample-plugin': '2.5.0'}, reviewer=reviewer)
+        self.assertTrue(plan.can_execute)
+        self.assertTrue(plan.requires_strong_confirmation)
 
 
 if __name__ == '__main__':

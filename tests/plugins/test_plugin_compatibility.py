@@ -267,6 +267,7 @@ class OrchestrationTests(unittest.TestCase):
                                        ['3.12', '3.12'], fetcher=fetcher,
                                        docs_fetcher=lambda *_: None)
         self.assertEqual(review.selected_version, '2.0.0')
+        self.assertEqual(review.release_status, 'verified')
         self.assertEqual([s.status for s in review.stages], ['uncertain', 'blocked'])
         self.assertEqual(review.stages[0].alternatives, ('1.9.0',))
         self.assertEqual(calls, [('netbox-plugin-demo',), ('netbox-plugin-demo', '2.0.0')])
@@ -279,7 +280,74 @@ class OrchestrationTests(unittest.TestCase):
         review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12.1'],
                                        version='2.0.0', fetcher=fetcher)
         self.assertEqual(review.stages[0].status, 'uncertain')
+        self.assertEqual(review.release_status, 'unknown')
         self.assertTrue(review.warnings)
+
+    def test_missing_release_is_unavailable_not_a_compatibility_conflict(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+
+        def fetcher(*args):
+            if len(args) == 1:
+                return {'releases': {'1.0.0': [{'packagetype': 'bdist_wheel'}]}}
+            raise OSError('Offline')
+
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12'],
+                                       version='2.0.0', fetcher=fetcher)
+        self.assertEqual(review.selected_version, '2.0.0')
+        self.assertEqual(review.release_status, 'unavailable')
+        self.assertEqual(review.stages[0].status, 'uncertain')
+
+    def test_exact_release_response_can_resolve_stale_listing(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+
+        def fetcher(*args):
+            if len(args) == 1:
+                return {'releases': {}}
+            return {**self.metadata(), 'urls': [{'packagetype': 'bdist_wheel'}]}
+
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12'],
+                                       version='2.0.0', fetcher=fetcher,
+                                       docs_fetcher=lambda *_: None)
+        self.assertEqual(review.release_status, 'verified')
+
+    def test_yanked_release_is_not_available(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+
+        files = [{'packagetype': 'bdist_wheel', 'yanked': True}]
+
+        def fetcher(*args):
+            if len(args) == 1:
+                return {'releases': {'2.0.0': files}}
+            return {**self.metadata(), 'urls': files}
+
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12'],
+                                       version='2.0.0', fetcher=fetcher,
+                                       docs_fetcher=lambda *_: None)
+        self.assertEqual(review.release_status, 'unavailable')
+
+    def test_malformed_listing_does_not_crash_exact_version_review(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+
+        def fetcher(*args):
+            if len(args) == 1:
+                return {'releases': None}
+            raise OSError('Offline')
+
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12'],
+                                       version='2.0.0', fetcher=fetcher)
+        self.assertEqual(review.release_status, 'unknown')
+
+    def test_malformed_release_entry_stays_unknown(self):
+        from netbox_ops.plugin_compatibility import review_plugin_upgrade
+
+        def fetcher(*args):
+            if len(args) == 1:
+                return {'releases': {'2.0.0': 42}}
+            raise OSError('Offline')
+
+        review = review_plugin_upgrade('netbox-plugin-demo', ['4.5.0'], ['3.12'],
+                                       version='2.0.0', fetcher=fetcher)
+        self.assertEqual(review.release_status, 'unknown')
 
     def test_file_level_python_conflict_proven(self):
         result = assess_compatibility('netbox-plugin-demo', '2.0.0', '4.5.0', '3.12.0',

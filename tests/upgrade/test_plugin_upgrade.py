@@ -60,7 +60,7 @@ class _PluginFixture(unittest.TestCase):
         return PluginReview(package, chosen, None, tuple(
             PluginCompatibility(package, chosen, stage, runtime, 'compatible', (), ())
             for stage, runtime in zip(stages, python_versions)
-        ), ())
+        ), (), release_status='verified')
 
     def build(self, selection=None, reviewer=None):
         return build_upgrade_plan(

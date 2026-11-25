@@ -69,7 +69,7 @@ class CombinedStageTests(unittest.TestCase):
         return PluginReview(package, version, None, tuple(
             PluginCompatibility(package, version, stage, runtime, 'compatible', (), ())
             for stage, runtime in zip(stages, python_versions)
-        ), ())
+        ), (), release_status='verified')
 
     def prepare(self):
         return prepare_combined_stages(
