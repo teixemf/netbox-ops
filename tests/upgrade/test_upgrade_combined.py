@@ -13,12 +13,14 @@ from netbox_ops.upgrade_combined import (
     download_stage_wheels, prepare_combined_stages, recheck_combined_stage, run_combined_stage,
     probe_server_versions,
 )
+from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import (
     ExecutionApproval, UpgradeExecutionError, validate_execution_approval,
 )
 from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_plan import build_upgrade_plan
+from netbox_ops.upgrade_preflight import review_plan_dependencies
 
 LOCAL = b'# preserve\nexample-plugin==1.0.0\nother-plugin==2.0.0\n'
 CORE = 'Django==4.2.15\npsycopg[c,pool]==3.2.1'
@@ -93,6 +95,34 @@ class CombinedStageTests(unittest.TestCase):
         self.assertEqual(self.download.call_count, 2)
         self.assertNotEqual(stages[0].wheelhouse, stages[1].wheelhouse)
         self.assertEqual(self.git.call_args.args[1], ['show', 'c' * 40 + ':requirements.txt'])
+
+    def test_conflicting_intermediate_overlap_does_not_hide_final_review(self):
+        raw = LOCAL + b'additional==1.0\n'
+        (self.root / 'local_requirements.txt').write_bytes(raw)
+        inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest(),
+                            packages=self.packages + (InstalledPackage('additional', '1.0', ()),))
+        plan = build_upgrade_plan(
+            self.install, inventory, target_netbox='5.0.1',
+            selected_plugins={'example-plugin': '1.5.0'},
+            available_tags=('v4.7.3', 'v5.0.1'), postgres_version='15.2',
+            redis_version='7.2', reviewer=self.reviewer,
+        )
+        core_reader = Mock(side_effect=[(CORE + '\nadditional==2.0').encode(),
+                                       (CORE + '\nadditional==1.0').encode()])
+        ltree = Mock(return_value='available')
+        resolver = Mock(return_value=DependencyPreflight('passed', 'resolved', True, (
+            ('additional', '1.0'), ('django', '4.2.15'), ('psycopg', '3.2.1'),
+            ('example-plugin', '1.5.0'), ('other-plugin', '2.0.0'))))
+        reviewed = review_plan_dependencies(
+            plan, Configuration(DEFAULT_UNITS), pin=Mock(return_value=self.stages),
+            core_reader=core_reader, resolver=resolver, ltree_probe=ltree,
+        )
+        self.assertFalse(reviewed.can_execute)
+        self.assertEqual([r.resolution.status for r in reviewed.dependency_reviews], ['not-run', 'passed'])
+        self.assertEqual([r.overlaps[0].status for r in reviewed.dependency_reviews], ['conflict', 'redundant'])
+        self.assertEqual(ltree.call_count, 2)
+        resolver.assert_called_once()
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), raw)
 
     def test_download_uses_joint_pins_and_bootstrap_packages(self):
         pins = self.prepare()[1].pins
