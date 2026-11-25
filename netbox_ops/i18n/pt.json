@@ -216,7 +216,7 @@
   "nbo_unknown_version_warning": "A versão NetBox deste backup não é fiável ou não foi identificada (versões antigas podiam guardar a versão do Django). Só avance após confirmar a compatibilidade.",
   "nbo_job_failed": "Operação falhada; consulte as tarefas concluídas e o erro.",
   "nbo_progress_result_hint": "Enter/Esc — Voltar à gestão (resultado apresentado acima)",
-  "nbo_backup_hint_034": "Esc Voltar/Limpar | I Detalhe | ↑↓ Backup | Espaço Marcar | * Todos | Tab Acções | F5",
+  "nbo_backup_hint_034": "Esc Voltar/Limpar | I Detalhe | ↑↓ | Espaço | * Todos | Tab Acções | F5",
   "nbo_multi_title": "SELECÇÃO MÚLTIPLA",
   "nbo_total_size": "Tamanho total",
   "nbo_multi_available": "Pode validar ou apagar os backups marcados.",
