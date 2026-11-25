@@ -254,6 +254,15 @@ class PluginStageTests(_PluginFixture):
             self.run_stage()
         self.assertEqual(self.runner.call_count, 2)
 
+    def test_changed_plugin_ownership_blocks_migrations(self):
+        final = replace(
+            self.inventory, requirements_hash=hashlib.sha256(self.prepared.requirements).hexdigest(),
+            packages=(replace(self.packages[0], version='1.5.0', modules=()), *self.packages[1:]))
+        self.inventory_reader.side_effect = [self.inventory, final]
+        with self.assertRaisesRegex(UpgradeExecutionError, 'differ from approved pins'):
+            self.run_stage()
+        self.assertEqual(self.runner.call_count, 2)
+
     def test_active_writer_blocks_pin_update(self):
         self.systemd.status.return_value[0].active = 'active'
         with self.assertRaises(UpgradeExecutionError):
