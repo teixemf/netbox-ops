@@ -129,7 +129,7 @@ class RestartSafetyTests(unittest.TestCase):
         keys = [*(ord(ch) for ch in 'RESTART'), 10]
         screen = FakeScreen(keys)
         self.assertTrue(CursesMenu(screen, Translator('pt'))._confirm(['netbox']))
-        self.assertFalse(CursesMenu(FakeScreen([*(ord(ch) for ch in 'restart'), 10]),
+        self.assertFalse(CursesMenu(FakeScreen([*(ord(ch) for ch in 'restart'), 10, 27]),
                                      Translator('pt'))._confirm(['netbox']))
         self.assertFalse(CursesMenu(FakeScreen([27]), Translator('pt'))._confirm(['netbox']))
 
@@ -250,7 +250,7 @@ class NewServiceTuiTests(unittest.TestCase):
         text = 'RESTART postgresql'
         menu = CursesMenu(FakeScreen([*(ord(c) for c in text), 10]), Translator('en'))
         self.assertTrue(menu._confirm_action('restart', ['postgresql']))
-        menu = CursesMenu(FakeScreen([*(ord(c) for c in 'RESTART'), 10]), Translator('en'))
+        menu = CursesMenu(FakeScreen([*(ord(c) for c in 'RESTART'), 10, 27]), Translator('en'))
         self.assertFalse(menu._confirm_action('restart', ['postgresql']))
 
     def test_action_disabled_for_active_or_inactive(self):
