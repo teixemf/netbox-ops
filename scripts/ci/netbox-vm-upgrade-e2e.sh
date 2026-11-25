@@ -55,6 +55,15 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
 else
   printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
 fi
+# Keep an ordinary local declaration that matches a core pin at the target.
+case "$scenario" in
+  plugins) overlap_pin='Django==6.1.1' ;;
+  netbox|combined) overlap_pin='pymdown-extensions==12.1' ;;
+  *) overlap_pin='' ;;
+esac
+if [[ -n "$overlap_pin" ]]; then
+  printf '# preserve local intent\n%s\n' "$overlap_pin" >> "$root/local_requirements.txt"
+fi
 install -m 0644 "$root/contrib/gunicorn.py" "$root/gunicorn.py"
 sed -i 's/^workers = 5$/workers = 2/' "$root/gunicorn.py"
 install -m 0644 "$root/contrib/netbox.service" /etc/systemd/system/netbox.service
@@ -125,6 +134,12 @@ case "$scenario" in
   *) args=(upgrade netbox --version "$target") ;;
 esac
 "${cli[@]}" "${args[@]}" --details | tee "$scratch/plan"
+if [[ -n "$overlap_pin" ]]; then
+  grep -F 'Redundant identical pin; retained, not edited.' "$scratch/plan" | grep -Fq "$overlap_pin"
+  grep -Fxq "$overlap_pin" "$root/local_requirements.txt"
+  grep -Fxq '# preserve local intent' "$root/local_requirements.txt"
+  echo 'PASS: redundant core/local pin reviewed without modification'
+fi
 fingerprint=$(sed -n 's/^Plan fingerprint: //p' "$scratch/plan")
 [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]]
 # Prove stale approval is rejected without downtime or recovery writes.
@@ -201,6 +216,12 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   "$root/venv/bin/python" -c 'import importlib.metadata as m; assert m.version("tomli-w")=="1.2.0"'
   "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]' "$plugin" "$new_plugin"
   curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
+fi
+if [[ -n "$overlap_pin" ]]; then
+  grep -Fxq "$overlap_pin" "$root/local_requirements.txt"
+  grep -Fxq '# preserve local intent' "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import importlib.metadata as m, sys; n, v = sys.argv[1].split("=="); assert m.version(n) == v' "$overlap_pin"
+  echo 'PASS: redundant local pin and installed version preserved'
 fi
 for unit in nginx redis-server postgresql@16-main; do
   systemctl is-active --quiet "$unit"
