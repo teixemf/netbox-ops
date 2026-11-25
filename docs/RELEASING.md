@@ -14,12 +14,13 @@ The tag, `netbox_ops/__init__.py` version, and release notes must agree.
 
 ## Publish a release
 
-1. Make sure the intended changes are in `dev` and CI passes.
+1. Make sure the intended changes are in `dev`, all release blockers are resolved, and CI passes.
 2. Update `netbox_ops/__init__.py`, current-version documentation, and `CHANGELOG.md` in a PR to `dev`.
 3. Open a PR from `dev` to `main`. Review the changes and merge using **Merge Commit**.
 4. Open **Actions → Build Release → Run workflow**, select `main`, and enter the planned stable tag (for example, `v0.6.0`). Leave **Publish after validation** unchecked to build and inspect a candidate without publishing.
-5. When ready to publish, run the same workflow on `main` with **Publish after validation** checked. The required CI tests and candidate validation must pass on the selected commit first. The publication job uses the artifacts from that run, creates the annotated tag and a draft GitHub Release, uploads the archive, SHA-256 and compatibility manifest, verifies their digests, and publishes the draft. The generated release notes become the release description.
-6. Check the workflow result and the published release. Published release-pair testing is tracked in #132.
+5. Before publication, manually run **VM E2E - NetBox upgrades** and **VM integration - netbox-ops self-upgrade** on the exact final candidate revision on `main`. Verify all jobs passed, including controlled failures and recovery. These are operator release gates; a passing Build Release workflow alone does not prove they ran. Record the commit and run links. If code changes, repeat the required validations.
+6. When ready to publish, run the same workflow on `main` with **Publish after validation** checked. The required CI tests and candidate validation must pass on the selected commit first. The publication job uses the artifacts from that run, creates the annotated tag and a draft GitHub Release, uploads the archive, SHA-256 and compatibility manifest, verifies their digests, and publishes the draft. The generated release notes become the release description.
+7. Check the workflow result and the published release. Published release-pair testing is tracked in #132.
 
 The workflow does not publish automatically on a merge. Publication runs are serialized across versions. If publication is interrupted, rerun it with the same tag and unchanged `main` commit: a matching annotated tag and draft can be reused, and only missing assets are uploaded. An already published matching release is verified without modification.
 
@@ -48,8 +49,13 @@ builder accepts the existing tag as its argument. Historical packages without
 the compatibility policy cannot be rebuilt with the new validator; their
 original published assets remain unchanged.
 
-The pre-release VM tests (#79) use these same build artifacts without creating
-tags or publishing releases.
+The pre-release self-upgrade VM tests use the official builder to produce
+unpublished fixture candidates without creating tags or publishing releases.
+The NetBox upgrade suite uses real upstream releases on disposable Ubuntu
+24.04 overlays. PostgreSQL integration on Ubuntu 22.04 and Rocky Linux 9 is
+separate evidence, not full upgrade validation on those platforms. The first
+manual upgrade from v0.5.0 is described in [self-upgrade recovery](SELF_UPGRADE_RECOVERY.md).
+Testing a pair of actual published self-upgrade-capable releases remains #132.
 
 Before releasing changes to restore, upgrade, installation, or other destructive operations, validate the affected paths in a disposable environment. Where RHEL/Debian behavior differs, test the relevant platform. State known limitations openly; defer a stable release if a critical safety path has not been validated.
 

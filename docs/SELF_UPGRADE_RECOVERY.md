@@ -1,7 +1,28 @@
 # Self-upgrade installation and recovery
 
 The upgrade helper performs one verified release step at a time. A prepared
-candidate is not an installed release.
+candidate is not an installed release. Self-upgrade requires the recognized
+root-owned archive layout at `/opt/netbox-ops`, the canonical launcher, a
+supported Python 3.12+ interpreter with venv support, and a Linux kernel that
+provides a working `pidfd_open` (introduced in Linux 5.3; availability can
+vary with backports and security policies). If the pidfd cannot be opened,
+the handoff fails closed. A Git development checkout is not eligible.
+
+## Initial upgrade from v0.5.0
+
+The published v0.5.0 does not provide the self-upgrade command. Once a new
+release is published, download and verify its official archive and checksum,
+inspect the archive, exit all netbox-ops sessions and confirm that no operation
+or recovery is pending. Back up the current installation, configuration and
+any local files. Move the old `/opt/netbox-ops` directory to a separate safe
+location and extract the trusted new archive as root at `/opt/netbox-ops`.
+Run `sudo /opt/netbox-ops/install.sh`, then check `sudo netbox-ops --version`
+and `sudo netbox-ops platform`. Review customized launchers and logrotate
+policies first. Do not extract over the old tree or remove the saved copy
+until the new installation has been verified. Configuration, logs and backups
+normally reside outside the application directory; keep them intact. This
+manual replacement is not a NetBox upgrade and is not the transactional
+self-upgrade mechanism.
 
 The initiating process calls `launch_prepared_release` and then exits. The
 helper runs using the verified base Python interpreter, from the private
@@ -59,4 +80,10 @@ a pending/unknown result or a completed intermediate step with more steps
 remaining. The status command needs the installed launcher; if it is missing,
 use the independent recovery command above.
 
-End-to-end validation on disposable Linux VMs is tracked in #79.
+The `VM integration - netbox-ops self-upgrade` suite exercises the production
+CLI/helper on disposable Ubuntu 24.04 VM overlays using unpublished candidate
+archives. It covers mandatory intermediate steps, rejection, rollback and
+interrupted transaction recovery. The transport and controlled failures are
+fixture-only. This is not evidence of a successful upgrade between two actual
+published releases or of full validation on every supported Linux family.
+Published-release pair validation remains tracked in #132.

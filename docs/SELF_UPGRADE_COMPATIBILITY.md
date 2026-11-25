@@ -3,7 +3,8 @@
 The consumer is implemented in `netbox_ops/self_upgrade_manifest.py`. Release
 tooling can use `encode_manifest(ReleaseRequirements(...))` to generate exactly
 the same format that the consumer validates. This document defines the
-interface; packaging and publishing are handled separately (#72).
+interface; packaging and publishing are implemented by the release builder.
+See [Release Policy](RELEASING.md) for publication and validation.
 
 For each stable release tag `vX.Y.Z`, publish these release assets:
 
