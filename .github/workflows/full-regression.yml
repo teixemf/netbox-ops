@@ -3,6 +3,8 @@ name: Full regression
 # Scheduled runs use the default branch (main). Select dev manually to test
 # the ongoing development revision without changing its normal PR checks.
 on:
+  push:
+    branches: ['ci/159-full-regression-validation']
   workflow_dispatch:
   schedule:
     - cron: '37 3 * * 0'
