@@ -22,6 +22,7 @@ class PluginInventoryTests(unittest.TestCase):
         (self.root / 'netbox/netbox/configuration.py').write_text("PLUGINS = ['sample_plugin']\n")
         self.requirements = self.root / 'local_requirements.txt'
         self.requirements.write_text('sample-plugin  # keep this comment\nother-package>=2\n')
+        self.requirements.chmod(0o640)
         self.add_package('sample-plugin', '2.4.1', 'sample_plugin')
         self.installation = GitNetBoxInstallation(self.root, '4.5.0', 'a' * 40,
                                                   'v4.5.0', 'HEAD',
@@ -139,8 +140,17 @@ class PluginInventoryTests(unittest.TestCase):
         self._apply(result)
         self.assertEqual(self.requirements.read_text(),
                          'sample-plugin==2.4.1  # keep this comment\nother-package>=2\n')
-        self.assertEqual(self.requirements.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.requirements.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.requirements.stat().st_uid, 0)
+
+    def test_unsafe_existing_permissions_are_not_rewritten(self):
+        self.requirements.chmod(0o666)
+        original = self.requirements.read_bytes()
+        result = self.inventory()
+        with self.assertRaisesRegex(PluginInventoryError, 'root-controlled'):
+            self._apply(result)
+        self.assertEqual(self.requirements.read_bytes(), original)
+        self.assertEqual(self.requirements.stat().st_mode & 0o777, 0o666)
 
     def test_approved_append_creates_pinned_file(self):
         self.requirements.unlink()

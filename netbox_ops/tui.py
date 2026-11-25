@@ -954,7 +954,7 @@ class CursesMenu:
 
     def _upgrade(self, operation: str) -> None:
         """Edit a shared plan and require explicit confirmation before execution."""
-        from .upgrade_ui import discover_context, make_plan, summary_lines, execute_plan
+        from .upgrade_ui import discover_context, make_plan, summary_lines, execute_plan, alternative_release_choices
         from .upgrade_execution import UpgradeExecutionError
 
         title = self.t({'netbox': 'menu_10', 'plugins': 'menu_11', 'stack': 'menu_12'}[operation])
@@ -981,6 +981,8 @@ class CursesMenu:
                 if plan is not None:
                     entries.extend(((self.t('upgrade_details'), ''), (self.t('upgrade_execute'), '')))
                     actions.extend(('details', 'execute'))
+                entries.append((self.t('upgrade_pins'), ''))
+                actions.append('pins')
                 choice = self._choose(title, entries, hint)
                 if not isinstance(choice, int):
                     return
@@ -990,6 +992,14 @@ class CursesMenu:
                     if isinstance(choice, int):
                         target = context.targets[choice]
                         plan = None
+                elif action == 'pins':
+                    if self._review_plugin_pins(title, context.inventory):
+                        plan = None
+                        context = self._upgrade_job(title, lambda _: discover_context(cfg, releases=operation != 'plugins'))
+                        if context is None:
+                            return
+                        selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
+                    continue
                 elif action == 'plugins':
                     while True:
                         packages = context.plugins
@@ -1008,7 +1018,8 @@ class CursesMenu:
                             name, _ = packages[choice - 2]
                             mode = self._choose(name, [(self.t('upgrade_latest'), ''),
                                                 (self.t('upgrade_explicit'), ''),
-                                                (self.t('upgrade_remove'), '')], hint)
+                                                (self.t('upgrade_remove'), ''),
+                                                (self.t('upgrade_alternatives'), '')], hint)
                             if mode == 0:
                                 selected[name] = None
                             elif mode == 1:
@@ -1017,6 +1028,15 @@ class CursesMenu:
                                     selected[name] = value.strip()
                             elif mode == 2:
                                 selected.pop(name, None)
+                            elif mode == 3:
+                                choices = self._upgrade_job(name, lambda _: alternative_release_choices(context, name))
+                                if choices:
+                                    candidates = self._choose(name, [
+                                        (f'{item.version} — {self.t("upgrade_python_" + item.status)}', '')
+                                        for item in choices
+                                    ], self.t('upgrade_alternative_hint'))
+                                    if isinstance(candidates, int):
+                                        selected[name] = choices[candidates].version
                         plan = None
                 elif action == 'preview':
                     plan = self._upgrade_job(title, lambda _: make_plan(context, operation, target, selected))
@@ -1054,6 +1074,53 @@ class CursesMenu:
             self._show_lines(title, [(self.t('upgrade_error', message=str(exc)), 'failure')])
         except Exception:
             self._show_lines(title, [(self.t('upgrade_discovery_error'), 'failure')])
+
+    def _review_plugin_pins(self, title, inventory) -> bool:
+        """Select, display and explicitly approve exact pin corrections."""
+        from .plugin_pin_ui import build_pin_review, pin_review_lines, apply_pin_review
+        from .plugin_inventory import PluginInventoryError, normalize_name
+
+        available = tuple(normalize_name(p.package) for p in inventory.proposals)
+        if not available:
+            review = build_pin_review(inventory, ())
+            self._show_lines(title, [(line, '') for line in pin_review_lines(review, self.t)],
+                             allow_quit=True)
+            return False
+        selected = set()
+        while True:
+            entries = [(self.t('upgrade_select_all'), ''), (self.t('upgrade_clear_all'), ''),
+                       (self.t('upgrade_pin_review', count=len(selected)), '')]
+            entries.extend((f'[{"x" if name in selected else " "}] {name}=={proposal.version}', '')
+                           for name, proposal in zip(available, inventory.proposals))
+            choice = self._choose(title, entries, self.t('tui_back_hint'))
+            if not isinstance(choice, int):
+                return False
+            if choice == 0:
+                selected = set(available)
+            elif choice == 1:
+                selected.clear()
+            elif choice == 2:
+                if not selected:
+                    continue
+                review = build_pin_review(inventory, tuple(name for name in available if name in selected))
+                self._show_lines(title, [(line, '') for line in pin_review_lines(review, self.t)],
+                                 allow_quit=True)
+                if not self._confirm_token(title, self.t('upgrade_pin_confirm'), 'PIN',
+                                           target_names=review.selected):
+                    return False
+                try:
+                    apply_pin_review(review, review.fingerprint)
+                except PluginInventoryError as exc:
+                    self._show_lines(title, [(self.t('upgrade_error', message=str(exc)), 'failure')])
+                    return False
+                self._show_lines(title, [(self.t('upgrade_pins_applied'), 'success')])
+                return True
+            else:
+                name = available[choice - 3]
+                if name in selected:
+                    selected.remove(name)
+                else:
+                    selected.add(name)
 
     def _upgrade_job(self, title: str, worker):
         """Keep curses in the UI thread and show actual backend stage progress."""
