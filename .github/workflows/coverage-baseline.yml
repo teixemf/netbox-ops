@@ -1,0 +1,59 @@
+name: Coverage baseline (issue 159)
+
+# Temporary, non-blocking experiment for the next release. Do not merge
+# this branch-specific trigger into dev.
+on:
+  push:
+    branches: ['ci/159-coverage-baseline']
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Python 3.12 / full unittest coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare report directory
+        run: mkdir -p "$RUNNER_TEMP/netbox-ops-coverage"
+      - name: Measure full Python unit and regression suite
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace" \
+            --volume "$RUNNER_TEMP/netbox-ops-coverage:/coverage" \
+            --workdir /workspace \
+            --env COVERAGE_FILE=/coverage/.coverage \
+            python:3.12-bookworm \
+            bash -ec 'set -o pipefail
+              git config --global --add safe.directory /workspace
+              python -m pip install --disable-pip-version-check coverage==7.10.7
+              bash -n install.sh upgrade.sh uninstall.sh
+              python -m coverage run --branch --source=netbox_ops -m unittest discover -s tests -p "test_*.py" -v
+              python -m coverage report -m | tee /coverage/coverage.txt
+              python -m coverage xml -o /coverage/coverage.xml
+              python -m coverage json -o /coverage/coverage.json
+              python -m coverage html -d /coverage/html'
+      - name: Publish coverage summary
+        if: success()
+        run: |
+          {
+            echo '### Python 3.12 unit and regression coverage'
+            echo 'No coverage threshold is enforced in this experiment.'
+            echo 'Integration and VM E2E coverage are not included.'
+            echo '~~~text'
+            cat "$RUNNER_TEMP/netbox-ops-coverage/coverage.txt"
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage reports
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-baseline-python-3.12
+          path: ${{ runner.temp }}/netbox-ops-coverage/
+          include-hidden-files: false
+          if-no-files-found: error
+          retention-days: 30
