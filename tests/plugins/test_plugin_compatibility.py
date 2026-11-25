@@ -163,6 +163,24 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 120)
         self.assertNotIn('PIP_INDEX_URL', kwargs['env'])
 
+    def test_core_only_report_exposes_safe_versions(self):
+        def run(command, **kwargs):
+            Path(command[command.index('--report') + 1]).write_text(json.dumps({'install': [
+                {'metadata': {'name': 'Django', 'version': '5.2'},
+                 'download_info': {'url': 'https://user:secret@example.org/file'}},
+                {'metadata': {'name': 'Asgiref', 'version': '3.9.1'}}]}))
+            return subprocess.CompletedProcess(command, 0, '', '')
+        result = isolated_dependency_preflight([], ['Django==5.2'], '3.12', runner=run)
+        self.assertEqual(result.packages, (('asgiref', '3.9.1'), ('django', '5.2')))
+        self.assertNotIn('secret', repr(result))
+
+    def test_incomplete_report_never_claims_resolution(self):
+        def run(command, **kwargs):
+            Path(command[command.index('--report') + 1]).write_text('{"install": []}')
+            return subprocess.CompletedProcess(command, 0, '', '')
+        result = isolated_dependency_preflight([], ['Django==5.2'], '3.12', runner=run)
+        self.assertEqual(result.status, 'unknown')
+
     def test_resolver_without_core_is_unknown(self):
         def run(command, **kwargs):
             Path(command[command.index('--report') + 1]).write_text(json.dumps({'install': [

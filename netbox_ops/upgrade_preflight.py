@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Configuration
-from .plugin_compatibility import DependencyPreflight, isolated_dependency_preflight
+from .plugin_compatibility import CompatibilityError, isolated_dependency_preflight
 from .plugin_inventory import normalize_name
 from .plugin_upgrade import prepare_plugin_upgrade
 from .upgrade_checkout import _run_git
@@ -97,7 +97,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
         # These helpers raise fixed local messages; never display arbitrary
         # subprocess output, URLs, or requirements content.
         blockers.append(str(exc))
-    except (OSError, ValueError, TypeError):
+    except (CompatibilityError, OSError, ValueError, TypeError):
         blockers.append('Cannot complete read-only dependency review')
     draft = replace(plan, dependency_reviews=tuple(reviews), warnings=tuple(dict.fromkeys(warnings)),
                     blockers=tuple(dict.fromkeys(blockers)),
