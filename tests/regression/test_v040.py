@@ -201,11 +201,14 @@ class Ui040Tests(unittest.TestCase):
                 'netbox_version':'4.4.1','netbox_version_source':'release.yaml',
                 'purpose':'manual', 'created_utc': '2026-11-20T13:00:00+00:00'}))
 
-    def test_wrong_confirmation_shows_error_then_goes_back(self):
+    def test_wrong_confirmation_shows_inline_error_until_cancelled(self):
         screen=FakeScreen([ord('W'),ord('R'),ord('O'),ord('N'),ord('G'),10,27])
         menu=CursesMenu(screen,Translator('pt'))
-        self.assertFalse(menu._confirm_token('Delete backup','Delete?', 'DELETE BACKUP'))
-        lines=' '.join(text for _,_,text,_ in screen.writes)
+        with patch.object(menu, '_show_lines') as popup:
+            self.assertFalse(menu._confirm_token('Delete backup','Delete?', 'DELETE BACKUP'))
+        popup.assert_not_called()
+        lines=' '.join(text for _,_,text,_ in screen.frames[-1])
+        self.assertIn('Delete backup', lines)
         self.assertIn('Confirmação incorrecta',lines)
         self.assertIn('Nenhuma operação foi iniciada',lines)
 

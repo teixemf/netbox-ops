@@ -69,6 +69,8 @@ In the TUI main menu, select `4` (Upgrade NetBox) to choose NetBox-only, plugin-
 
 In the TUI Backups screen, use the arrow keys to preview a backup, Space to mark it, and Tab to focus the operations. Press `I` to read the full filename and details on a narrow terminal without changing marks or executing an operation.
 
+TUI confirmations require the exact displayed token. An incorrect token clears the input and shows an inline error; type again to retry, or press Esc to cancel without running the operation.
+
 Review `config.example.json` and the configuration stored under `/etc/netbox-ops` before performing operations. Backups are stored under `/var/lib/netbox-ops/backups` by default.
 
 ## Uninstall

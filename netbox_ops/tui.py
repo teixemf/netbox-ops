@@ -583,11 +583,31 @@ class CursesMenu:
         finally:
             self.stdscr.timeout(-1)
 
+    def _confirmation_footer(self, h: int, w: int, token: str, typed: str,
+                             invalid: bool) -> int:
+        """Draw the exact challenge and inline error above the normal footer."""
+        width = w - 7
+        errors = []
+        if invalid:
+            for key in ('nbo_confirm_failed_title', 'nbo_confirm_failed_message'):
+                errors.extend(textwrap.wrap(self.t(key), width=width))
+        instruction = textwrap.wrap(self.t('tui_confirm_token', token=token), width=width)
+        input_y = h - 3 - len(errors)
+        token_y = input_y - len(instruction)
+        for y, line in enumerate(instruction, token_y):
+            self._put(y, 3, line, 'section')
+        prefix = self.t('tui_confirm_prompt')
+        self._put(input_y, 3, prefix + typed[-max(1, width - len(prefix)):], 'title')
+        for y, line in enumerate(errors, input_y + 1):
+            self._put(y, 3, line, 'failure')
+        return token_y
+
     def _confirm_action(self, action: str, names: Sequence[str],
                         skipped: Sequence[str] = ()) -> bool:
         """Use exact, strong challenge for PostgreSQL and Redis changes."""
         token = challenge(action, names)
         typed = ''
+        invalid = False
         while True:
             frame = self._frame(self.t('tui_confirm_title'), self.t('tui_confirm_hint'))
             if frame:
@@ -597,28 +617,33 @@ class CursesMenu:
                                 names=', '.join(names))]
                 if skipped:
                     lines.append(self.t('nbo_skipped', names=', '.join(skipped)))
-                lines.extend([self.t('tui_startup_only') if action in ('enable', 'disable')
-                         else self.t('tui_action_warning'),
-                         self.t('tui_confirm_token', token=token)])
+                lines.append(self.t('tui_startup_only') if action in ('enable', 'disable')
+                             else self.t('tui_action_warning'))
+                token_y = self._confirmation_footer(h, w, token, typed, invalid)
                 y = 3
                 for line in lines:
                     for part in textwrap.wrap(safe_text(line), width=width):
-                        if y >= h - 5:
+                        if y >= token_y:
                             break
-                        self._put(y, 3, part, 'section' if token in part else '')
+                        self._put(y, 3, part)
                         y += 1
-                self._put(min(y + 1, h - 3), 3,
-                          f'{self.t("tui_confirm_prompt")}{typed}', 'title')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return False
+            if not frame:
+                continue
             if key in (10, 13, curses.KEY_ENTER):
-                return typed == token
-            if key in (curses.KEY_BACKSPACE, 8, 127):
+                if typed == token:
+                    return True
+                typed = ''
+                invalid = True
+            elif key in (curses.KEY_BACKSPACE, 8, 127):
                 typed = typed[:-1]
+                invalid = False
             elif 32 <= key <= 126 and len(typed) < 48:
                 typed += chr(key)
+                invalid = False
 
     def _confirm(self, names: Sequence[str]) -> bool:
         return self._confirm_action('restart', names)
@@ -1513,33 +1538,37 @@ class CursesMenu:
     def _confirm_token(self, title: str, prompt: str, token: str,
                        *, target_names: Sequence[str] = ()) -> bool:
         typed = ''
+        invalid = False
         target_scroll = 0
         visible = 0
         while True:
             frame = self._frame(title, self.t('tui_confirm_hint'))
             if frame:
                 h, w = frame
-                prompt_lines = 2 if target_names else 5
+                token_y = self._confirmation_footer(h, w, token, typed, invalid)
+                target_y = min(6, token_y - 3)
+                prompt_lines = max(0, target_y - 4) if target_names else max(0, min(5, token_y - 4))
                 for i, line in enumerate(textwrap.wrap(safe_text(prompt), width=max(15, w - 10))[:prompt_lines]):
                     self._put(4 + i, 3, line, 'section')
                 if target_names:
-                    visible = max(1, min(7, h - 13))
-                    self._put(6, 3, f'{self.t("nbo_operation_targets")} ({len(target_names)}):',
+                    visible = max(1, min(7, h - 13, token_y - target_y - 2))
+                    target_scroll = min(target_scroll, max(0, len(target_names) - visible))
+                    self._put(target_y, 3, f'{self.t("nbo_operation_targets")} ({len(target_names)}):',
                               'section')
                     for i in range(target_scroll, min(len(target_names), target_scroll + visible)):
-                        self._put(7 + i - target_scroll, 4,
+                        self._put(target_y + 1 + i - target_scroll, 4,
                                   f'{i + 1}. {safe_text(target_names[i])}'[:max(10, w - 10)],
                                   'muted')
                     if len(target_names) > visible:
-                        self._put(7 + visible, 3,
+                        self._put(target_y + 1 + visible, 3,
                                   f'↑↓ {target_scroll + 1}-{min(len(target_names), target_scroll + visible)}'
                                   f'/{len(target_names)}', 'section')
-                token_y = min(11, h - 4) if not target_names else min(h - 4, 8 + visible)
-                self._put(token_y, 3, f'{self.t("nbo_type_token")} {token}: {typed}', 'title')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return False
+            if not frame:
+                continue
             if target_names and key in (curses.KEY_UP, curses.KEY_DOWN,
                                         curses.KEY_PPAGE, curses.KEY_NPAGE):
                 step = -1 if key in (curses.KEY_UP, curses.KEY_PPAGE) else 1
@@ -1551,14 +1580,14 @@ class CursesMenu:
             if key in (10, 13, curses.KEY_ENTER):
                 if typed == token:
                     return True
-                self._show_lines(self.t('nbo_confirm_failed_title'),
-                                 [(self.t('nbo_confirm_failed_message'), 'failure')],
-                                 self.t('nbo_confirm_failed_hint'))
-                return False
-            if key in (8, 127, curses.KEY_BACKSPACE):
+                typed = ''
+                invalid = True
+            elif key in (8, 127, curses.KEY_BACKSPACE):
                 typed = typed[:-1]
+                invalid = False
             elif 32 <= key <= 126 and len(typed) < 48:
                 typed += chr(key)
+                invalid = False
 
     def _run_backup_job(self, title: str, worker) -> bool:
         """Draw progress and keep the final tasks/results in that same panel.
