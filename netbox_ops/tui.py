@@ -294,7 +294,7 @@ class CursesMenu:
                 h, w = frame
                 start = 3
                 if overview:
-                    limit = min(6, max(3, (h - 7) // 3))
+                    limit = min(10, max(5, (h - 7) // 2))
                     shown = list(overview[:limit])
                     if len(overview) > limit:
                         shown[-1] = (self.t('upgrade_overview_more'), 'muted')
@@ -355,7 +355,7 @@ class CursesMenu:
 
     def _show_lines(self, title: str, lines: Sequence[tuple[str, str]],
                     hint: str | None = None, *, allow_quit: bool = False) -> bool:
-        """Results require acknowledgement; explicitly read-only views may quit."""
+        """Return True on Enter, False on cancellation; read-only views may quit."""
         hint = hint or self.t('tui_ack_hint')
         if allow_quit:
             hint = self._quit_hint(hint)
@@ -1304,7 +1304,7 @@ class CursesMenu:
                 eligible = False
                 overview.insert(2, (self.t('upgrade_status_not_checked'), 'muted'))
             if review is not None:
-                overview.insert(3, (self.t('self_upgrade_reviewed'), 'section'))
+                overview.insert(4, (self.t('self_upgrade_reviewed'), 'section'))
             if releases:
                 add('target', 'self_upgrade_select_target')
             else:
