@@ -13,8 +13,9 @@ approved. Downgrades are blocked. The reviewed prerequisite table covers
 NetBox 4.0 through 4.7; newer releases require additional manual review.
 
 - A recognized, root-controlled Git checkout of the official NetBox repository
-  at `/opt/netbox`, with a normal `.git` directory, a clean tagged release
-  checkout and the existing supported Python runtime. Archive, container,
+  at `/opt/netbox`, with a normal `.git` directory, no tracked changes and
+  the existing supported Python runtime. A matching stable release tag is
+  preferred; an untagged HEAD requires explicit review. Archive, container,
   linked-worktree and custom-path installations are not supported by this
   executor. The NetBox Python version must satisfy each target's requirements;
   the netbox-ops interpreter is separate. Python runtime changes are not part
