@@ -42,6 +42,7 @@ class InterfaceFixture(unittest.TestCase):
                                       ('v4.4.2', 'v4.4.1', 'v4.4.0'), '15.2', '7.2')
         self.cfg = Configuration(DEFAULT_UNITS)
         self.t = Translator('en')
+        self.enterContext(patch('netbox_ops.upgrade_ui.review_plan_dependencies', side_effect=lambda plan, cfg: plan))
 
     def reviewer(self, package, stages, python_versions, *, version, preflights):
         version = version or '2.0.0'

@@ -8,7 +8,7 @@ import re
 import stat
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -42,6 +42,7 @@ class PluginUpgrade:
     local_pins: tuple[str, ...]
     expected: tuple[tuple[str, str], ...]
     selected: tuple[tuple[str, str], ...]
+    wheelhouse: Path | None = None
 
 
 def _parse(raw: bytes) -> tuple[list[str], dict[str, tuple[int, re.Match]]]:
@@ -90,7 +91,7 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         installed[key] = package.version
     selection = dict(plan.selected_plugins)
     planned = {p.package: p for p in plan.plugins if p.selected}
-    if not selection or len(selection) != len(plan.selected_plugins) or set(selection) != set(planned):
+    if (not combined and not selection) or len(selection) != len(plan.selected_plugins) or set(selection) != set(planned):
         raise UpgradeExecutionError('Invalid selected plugin packages')
     selected = {}
     for name, requested in selection.items():
@@ -101,7 +102,7 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
                 or (requested is not None and requested != version)):
             raise UpgradeExecutionError('Selected plugin version is not verified')
         selected[name] = version
-    if all(installed[name] == version for name, version in selected.items()):
+    if selected and all(installed[name] == version for name, version in selected.items()):
         raise UpgradeExecutionError('No plugin version change was approved')
     stage = plan.stages[stage_index if combined else 0]
     if combined and stage_index != len(plan.stages) - 1:
@@ -165,8 +166,42 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
                          tuple(sorted(selected.items())))
 
 
+def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
+                               core: bytes, pins: PluginUpgrade) -> PluginUpgrade:
+    """Bind downloaded artifacts to the exact approved stage dependency report."""
+    if not plan.dependency_reviews:
+        return pins  # Internal callers still perform a full execution preflight.
+    review = plan.dependency_reviews[index]
+    if (review.version != plan.stages[index].netbox_version or review.commit != commit
+            or review.core_hash != hashlib.sha256(core).hexdigest()
+            or review.exact_pins != pins.expected):
+        raise UpgradeExecutionError('Target requirements changed after plan approval')
+    if review.resolution.status != 'passed' or not review.resolution.checked_core:
+        raise UpgradeExecutionError('Refresh the plan with verified dependencies before executing')
+    expected = dict(review.resolution.packages)
+    if any(expected.get(name) != version for name, version in pins.expected):
+        raise UpgradeExecutionError('Approved resolver report does not match exact requirements')
+    return replace(pins, expected=tuple(sorted(expected.items())))
+
+
+def verify_reviewed_resolution(plan: UpgradePlan, index: int, resolution) -> None:
+    if plan.dependency_reviews:
+        previous = plan.dependency_reviews[index].resolution
+        if (resolution.status, resolution.checked_core, resolution.packages) != (
+                previous.status, previous.checked_core, previous.packages):
+            raise UpgradeExecutionError('Dependency resolution changed after plan approval')
+
+
+def additional_dependency_pins(pins: PluginUpgrade) -> tuple[str, ...]:
+    explicit = {normalize_name(pin.split('==', 1)[0].split('[', 1)[0])
+                for pin in (*pins.core_pins, *pins.local_pins)}
+    return tuple(f'{name}=={version}' for name, version in pins.expected if name not in explicit)
+
+
 def preflight_plugin_upgrade(plan: UpgradePlan, approval: ExecutionApproval,
-                             *, resolver: Callable = isolated_dependency_preflight) -> PluginUpgrade:
+                             *, resolver: Callable = isolated_dependency_preflight,
+                             wheelhouse: Path | None = None,
+                             download: Callable | None = None) -> PluginUpgrade:
     """Resolve all proposed local pins together with the installed core pins."""
     installation = plan.source.installation
     root = installation.root
@@ -174,8 +209,18 @@ def preflight_plugin_upgrade(plan: UpgradePlan, approval: ExecutionApproval,
     if core is None:
         raise UpgradeExecutionError('NetBox core requirements are missing')
     prepared = prepare_plugin_upgrade(plan, _read_config(root, 'local_requirements.txt'), core)
+    prepared = bind_reviewed_dependencies(plan, 0, installation.commit, core, prepared)
+    if wheelhouse is not None:
+        if download is None:
+            raise UpgradeExecutionError('Plugin wheel preparation is unavailable')
+        download(prepared, installation, wheelhouse)
+        prepared = replace(prepared, wheelhouse=wheelhouse)
+    options = {'wheelhouse': wheelhouse} if wheelhouse is not None else {}
     result = resolver(prepared.local_pins, prepared.core_pins,
-                      installation.python_version, interpreter=installation.python)
+                      installation.python_version, interpreter=installation.python, **options)
+    verify_reviewed_resolution(plan, 0, result)
+    if wheelhouse is not None and (result.status != 'passed' or not result.checked_core):
+        raise UpgradeExecutionError('Cannot verify prepared plugin wheels before maintenance')
     if result.status == 'blocked':
         raise UpgradeExecutionError('Python dependency resolution confirmed a conflict')
     if result.status != 'passed' or not result.checked_core:
@@ -245,9 +290,12 @@ def run_plugin_stage(
     env.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR='1')
     python = str(installation.python)
     pip = [python, '-I', '-m', 'pip', '--isolated']
+    index = (['--no-index', '--find-links', str(prepared.wheelhouse)]
+             if prepared.wheelhouse is not None else ['--index-url', PYPI_INDEX])
     _command([*pip, 'install', '--no-input', '--no-cache-dir', '--disable-pip-version-check',
-              '--only-binary=:all:', '--index-url', PYPI_INDEX,
-              *prepared.core_pins, *prepared.local_pins], root, env, 'installation', runner, 3600)
+              '--only-binary=:all:', *index,
+              *prepared.core_pins, *prepared.local_pins, *additional_dependency_pins(prepared)],
+             root, env, 'installation', runner, 3600)
     require_quiesced_writers(systemd)
     _command([*pip, 'check'], root, env, 'dependency check', runner)
     final = inspector(root)

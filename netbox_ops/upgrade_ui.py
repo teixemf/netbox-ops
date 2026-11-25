@@ -20,6 +20,7 @@ from .upgrade_orchestration import (
     execute_combined_upgrade, execute_netbox_upgrade, execute_plugin_upgrade,
 )
 from .upgrade_plan import UpgradePlan, _configured_packages, build_upgrade_plan
+from .upgrade_preflight import review_plan_dependencies
 
 _TAG = re.compile(r'[0-9a-f]{40}\trefs/tags/(v\d+\.\d+\.\d+)')
 
@@ -52,6 +53,7 @@ class UpgradeContext:
     tags: tuple[str, ...]
     postgres: str | None
     redis: str | None
+    cfg: Configuration | None = None
 
     @property
     def plugins(self) -> tuple[tuple[str, str | None], ...]:
@@ -76,7 +78,7 @@ def discover_context(cfg: Configuration, *, releases: bool = True) -> UpgradeCon
     except UpgradeExecutionError:
         postgres = redis = None
     return UpgradeContext(installation, inventory, official_tags() if releases else (),
-                          postgres, redis)
+                          postgres, redis, cfg)
 
 
 def alternative_release_choices(context: UpgradeContext, package: str) -> tuple[ReleaseChoice, ...]:
@@ -120,11 +122,12 @@ def make_plan(context: UpgradeContext, operation: str, target: str | None,
         raise UpgradeExecutionError('Select a newer NetBox release')
     if set(selected) - set(dict(context.plugins)):
         raise UpgradeExecutionError('Select only installed configured or declared plugins')
-    return build_upgrade_plan(
+    plan = build_upgrade_plan(
         context.installation, context.inventory, target_netbox=target,
         selected_plugins=selected, available_tags=context.tags,
         postgres_version=context.postgres, redis_version=context.redis,
     )
+    return review_plan_dependencies(plan, context.cfg)
 
 
 def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) -> list[str]:
@@ -150,6 +153,16 @@ def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) ->
                     lines.append('    ' + t('upgrade_alternative_hint'))
                     lines.extend(f'      {version}' for version in check.alternatives)
             lines.extend('  ' + instruction for instruction in stage.instructions)
+    for review in plan.dependency_reviews:
+        lines.append(t('upgrade_dependency_status', version=review.version,
+                       status=t('upgrade_dependency_' + review.resolution.status)))
+        if review.ltree != 'not-required':
+            lines.append(t('upgrade_ltree_status', status=t('upgrade_ltree_' + review.ltree)))
+        for name, before, after in review.changes:
+            lines.append(f'  {name}: {before or "-"} -> {after}')
+        if details:
+            lines.append('  ' + review.resolution.detail)
+            lines.extend(f'  {name}=={version}' for name, version in review.exact_pins)
     lines.extend(t('upgrade_warning', message=warning) for warning in plan.warnings)
     lines.extend(t('upgrade_blocker', message=blocker) for blocker in plan.blockers)
     if details:
