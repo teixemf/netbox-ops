@@ -41,7 +41,7 @@ Before rebuilding an existing environment, `upgrade.sh` checks that the chosen i
 
 ## Getting started
 
-Download `netbox-ops-v0.6.0.tar.gz` and its matching `.sha256` asset from the official GitHub Release. Verify the checksum and inspect the archive before installing it on the NetBox server. The archive contains a top-level `netbox-ops/` directory:
+Download `netbox-ops-v0.6.0.tar.gz` and its matching `.sha256` asset from the official GitHub Release. Verify the checksum and inspect the archive before installing it on the NetBox server. Stop if verification fails. The archive contains a top-level `netbox-ops/` directory:
 
 ```bash
 sha256sum -c netbox-ops-v0.6.0.tar.gz.sha256
