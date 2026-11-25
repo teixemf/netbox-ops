@@ -306,6 +306,8 @@ def run_plugin_stage(
     actual = {normalize_name(p.name): p.version for p in inventory.packages}
     if (len(actual) != len(inventory.packages)
             or inventory.enabled != plan.source.inventory.enabled
+            or set(dict(configured_plugin_packages(inventory))) !=
+            set(dict(configured_plugin_packages(plan.source.inventory)))
             or inventory.requirements_hash != hashlib.sha256(prepared.requirements).hexdigest()
             or any(actual.get(name) != version for name, version in prepared.expected)):
         raise UpgradeExecutionError('Installed plugin or core versions differ from approved pins')
