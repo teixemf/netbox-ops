@@ -1,6 +1,9 @@
 """Verify differential coverage against real temporary Git repositories."""
 import importlib.util
+import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,7 +57,9 @@ class CoverageDiffTests(unittest.TestCase):
         self.assertIsNone(diff.report(self.root, self.base, self.coverage())['percent'])
         (self.root / 'netbox_ops/sample.py').unlink()
         self.commit()
-        self.assertIsNone(diff.report(self.root, self.base, {'files': {}})['percent'])
+        result = diff.report(self.root, self.base, {'files': {}})
+        self.assertIsNone(result['percent'])
+        self.assertTrue(result['review_required']['netbox_ops/sample.py']['deleted_file'])
 
     def test_missing_report_entry_fails_even_for_comment(self):
         self.write('netbox_ops/sample.py', 'a = 1\nb = 2\n# comment\n')
@@ -106,3 +111,44 @@ class CoverageDiffTests(unittest.TestCase):
         self.git('checkout', '-q', 'base')
         with self.assertRaises(subprocess.CalledProcessError):
             diff.report(self.root, other, self.coverage())
+
+    def test_continuation_line_requires_review(self):
+        self.write('netbox_ops/sample.py', 'a = (\n    1\n)\n')
+        base = self.commit()
+        self.write('netbox_ops/sample.py', 'a = (\n    2\n)\n')
+        self.commit()
+        result = diff.report(self.root, base, self.coverage(covered=[1], missed=[]))
+        self.assertIsNone(result['percent'])
+        self.assertEqual(result['review_required']['netbox_ops/sample.py'],
+                         {'unmapped_source_lines': [2], 'deletion_only_hunks': 0})
+
+    def test_partial_deletion_requires_review(self):
+        self.write('netbox_ops/sample.py', 'a = (\n    1 +\n    2\n)\n')
+        base = self.commit()
+        self.write('netbox_ops/sample.py', 'a = (\n    2\n)\n')
+        self.commit()
+        result = diff.report(self.root, base, self.coverage(covered=[1], missed=[]))
+        self.assertIsNone(result['percent'])
+        self.assertEqual(result['review_required']['netbox_ops/sample.py']['deletion_only_hunks'], 1)
+
+    @unittest.skipUnless(importlib.util.find_spec('coverage'), 'coverage.py required')
+    def test_real_coverage_json_with_multiline_change(self):
+        self.write('netbox_ops/__init__.py', '')
+        self.write('netbox_ops/sample.py', 'a = 1\ndef missed():\n    return (\n        2\n    )\n')
+        base = self.commit()
+        self.write('netbox_ops/sample.py', 'a = 10\ndef missed():\n    return (\n        20\n    )\n')
+        self.commit()
+        datafile = str(self.root / '.fixture-coverage')
+        reportfile = self.root / 'fixture.json'
+        for args in (
+            ['run', '--branch', '--source=netbox_ops', f'--data-file={datafile}',
+             '-m', 'netbox_ops.sample'],
+            ['json', f'--data-file={datafile}', '-o', str(reportfile)],
+        ):
+            subprocess.run([sys.executable, '-m', 'coverage', *args], cwd=self.root,
+                           check=True, capture_output=True,
+                           env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        report = json.loads(reportfile.read_text(encoding='utf-8'))
+        result = diff.report(self.root, base, report)
+        self.assertEqual(result['files']['netbox_ops/sample.py']['covered'], [1])
+        self.assertEqual(result['review_required']['netbox_ops/sample.py']['unmapped_source_lines'], [4])

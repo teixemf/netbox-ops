@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 SHA = re.compile(r'[0-9a-f]{40}')
@@ -32,16 +33,31 @@ def pr_base(root: Path, event: dict) -> str:
     return base
 
 
-def changed_lines(root: Path, base: str, path: str) -> set[int]:
+def changed_lines(root: Path, base: str, path: str) -> tuple[set[int], int]:
     patch = git(root, 'diff', '--no-renames', '--no-ext-diff', '--no-textconv',
-                '--unified=0', base, 'HEAD', '--', path)
+                '--text', '--unified=0', base, 'HEAD', '--', path)
     lines = set()
+    deletion_hunks = 0
     for row in patch.splitlines():
         match = HUNK.match(row)
         if match:
             start = int(match[1])
             count = int(match[2]) if match[2] is not None else 1
             lines.update(range(start, start + count))
+            if count == 0:
+                deletion_hunks += 1
+    return lines, deletion_hunks
+
+
+def significant_lines(path: Path) -> set[int]:
+    """Find source tokens, including continuation lines, not comments or whitespace."""
+    ignored = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+               tokenize.DEDENT, tokenize.ENDMARKER, tokenize.ENCODING}
+    lines = set()
+    with tokenize.open(path) as source:
+        for token in tokenize.generate_tokens(source.readline):
+            if token.type not in ignored:
+                lines.update(range(token.start[0], token.end[0] + 1))
     return lines
 
 
@@ -66,9 +82,13 @@ def report(root: Path, base: str, coverage: dict) -> dict:
     if fields.pop() != b'' or len(fields) % 2:
         raise ValueError('Invalid changed file list')
     result = {}
+    review = {}
     for status, path_bytes in zip(fields[::2], fields[1::2], strict=True):
         path = path_bytes.decode('utf-8')
-        if not path.endswith('.py') or status == b'D':
+        if not path.endswith('.py'):
+            continue
+        if status == b'D':
+            review[path] = {'deleted_file': True}
             continue
         if status not in {b'A', b'M'}:
             raise ValueError(f'Unsupported Python change: {path}')
@@ -82,8 +102,14 @@ def report(root: Path, base: str, coverage: dict) -> dict:
         missed = line_set(files[path]['missing_lines'])
         if covered & missed:
             raise ValueError(f'Conflicting coverage for {path}')
-        changed = changed_lines(root, base, path)
+        changed, deletion_hunks = changed_lines(root, base, path)
         relevant = changed & (covered | missed)
+        unmapped = (changed - relevant) & significant_lines(root / path)
+        if unmapped or deletion_hunks:
+            review[path] = {
+                'unmapped_source_lines': sorted(unmapped),
+                'deletion_only_hunks': deletion_hunks,
+            }
         if relevant:
             result[path] = {
                 'covered': sorted(relevant & covered),
@@ -100,6 +126,7 @@ def report(root: Path, base: str, coverage: dict) -> dict:
         'total': total,
         'percent': 100 * covered_count / total if total else None,
         'files': result,
+        'review_required': review,
     }
 
 
@@ -117,13 +144,22 @@ def main() -> None:
                     if args.pr_event else args.base)
         data = report(root, selected, json.loads(args.coverage.read_text(encoding='utf-8')))
         args.output.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, SyntaxError,
+            tokenize.TokenError, subprocess.SubprocessError) as exc:
         parser.exit(1, f'Cannot report differential coverage: {exc}\n')
     if data['percent'] is None:
-        print('Changed executable Python lines: N/A')
+        if data['review_required']:
+            print('Changed executable Python lines: not measurable (review required)')
+        else:
+            print('Changed executable Python lines: N/A')
     else:
         print(f"Changed executable Python lines: {data['covered']}/{data['total']} "
               f"({data['percent']:.2f}%)")
+    if data['review_required']:
+        print('Manual review required: changed source outside the measured line set, '
+              'deletion-only changes or removed modules.')
+        for path, details in data['review_required'].items():
+            print(f'  {path!r}: {details}')
 
 
 if __name__ == '__main__':
