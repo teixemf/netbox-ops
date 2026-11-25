@@ -18,6 +18,7 @@ from netbox_ops.self_upgrade_ui import detect_environment
 from netbox_ops.tui import CursesMenu
 from tests.helpers.fake_screen import FakeScreen
 from tests.test_self_upgrade_manifest import row
+from tests.tui.test_self_upgrade_tui import ImmediateExecutor
 
 
 class CompatibilityInterfaceTests(unittest.TestCase):
@@ -94,10 +95,12 @@ class CompatibilityInterfaceTests(unittest.TestCase):
               patch('netbox_ops.self_upgrade_releases.discover_releases', return_value=self.releases),
               patch('netbox_ops.self_upgrade_ui.detect_environment', return_value=self.environment),
               patch('netbox_ops.self_upgrade_ui.CompatibilityCatalogue', side_effect=self.catalogue),
-              patch.object(menu, '_choose', side_effect=[2, None, None]) as choose,
+              patch('netbox_ops.tui.concurrent.futures.ThreadPoolExecutor', ImmediateExecutor),
+              patch('netbox_ops.self_upgrade_ui.tui_recovery_state', return_value=(True, ['No result'])),
+              patch.object(menu, '_choose', side_effect=[0, 2, 1, None]) as choose,
               patch.object(menu, '_show_lines') as show):
             menu._self_upgrade()
-        self.assertIn('v0.7.0  Compatible', choose.call_args_list[0].args[1][2][0])
+        self.assertIn('v0.7.0  Compatible', choose.call_args_list[1].args[1][2][0])
         self.assertIn('Required upgrade path: v0.6.0 -> v0.7.0', str(show.call_args))
         self.assertEqual(self.requests.count('v0.7.0'), 1)
         self.assertEqual(self.requests.count('v0.6.0'), 1)
