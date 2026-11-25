@@ -1,5 +1,9 @@
 """Regression checks for selective CI coverage."""
+import io
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts.ci import test_scope as scope
@@ -57,6 +61,22 @@ class TestScope(unittest.TestCase):
             diff.assert_called_once_with('a' * 40)
             self.assertEqual(scope.event_scope('push', {'before': 'b' * 40}, 'refs/heads/dev'), set())
             diff.assert_called_with('b' * 40)
+
+    def test_unavailable_diff_runs_all_suites(self):
+        with tempfile.TemporaryDirectory() as temp:
+            event = Path(temp) / 'event.json'
+            event.write_text('{"pull_request":{"base":{"ref":"dev","sha":"invalid"}}}',
+                             encoding='utf-8')
+            output = Path(temp) / 'output'
+            with patch.dict(os.environ, {
+                'GITHUB_EVENT_PATH': str(event),
+                'GITHUB_EVENT_NAME': 'pull_request',
+                'GITHUB_REF': 'refs/pull/1/merge',
+                'GITHUB_OUTPUT': str(output),
+            }), patch('sys.stdout', new_callable=io.StringIO):
+                scope.main()
+            self.assertEqual(set(output.read_text().splitlines()),
+                             {f'{name}=true' for name in scope.ALL})
 
     def test_rename_and_unusual_path_classification(self):
         with patch.object(scope.subprocess, 'run'), patch.object(

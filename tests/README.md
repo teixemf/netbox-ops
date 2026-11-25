@@ -36,11 +36,11 @@ The separate `integration` CI job runs the same suite on Ubuntu 22.04 and Rocky 
 
 ## CI test selection
 
-Development PRs and pushes classify the complete Git diff against the event's base commit using `scripts/ci/test_scope.py`. Each workflow uses the same decision. Existing test job names stay unchanged; irrelevant jobs are skipped instead of leaving a required check pending.
+Development PRs and pushes classify the complete Git diff against the event's base commit using `scripts/ci/test_scope.py`. Each workflow uses the same decision. The standard matrix keeps its existing job names: irrelevant jobs report a lightweight no-op without starting a test container. The VM workflows ignore documentation-only PRs, and otherwise skip VM execution when the classifier selects a different domain.
 
 - Markdown-only changes: lightweight scope and release-version metadata checks.
 - Python, translations and unit tests: the Python matrix and Ruff.
-- Backup/restore and PostgreSQL changes: the real PostgreSQL matrix and affected NetBox VM suites.
+- Backup/restore implementation changes: the real PostgreSQL matrix and affected NetBox VM suites. Integration-test-only changes run the PostgreSQL matrix without VMs.
 - NetBox/plugin upgrades: NetBox upgrade VM suite.
 - Self-upgrade and package changes: relevant archive checks and self-upgrade VM suite.
 - Shared runtime, installation, CI routing, version changes or unknown paths: conservative broader coverage.

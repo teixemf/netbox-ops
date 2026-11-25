@@ -13,22 +13,33 @@ jobs:
 
   unittest:
     needs: scope
-    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.unit != 'false') }}
+    if: ${{ !cancelled() }}
     name: Python ${{ matrix.python }} / unittest
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python: ['3.12', '3.13', '3.14', '3.15']
-    # Tests validate root-owned backup paths (0700); keep UID 0 inside a disposable container.
-    container:
-      image: python:${{ matrix.python }}-bookworm
+    # Keep the matrix check names even when tests are irrelevant. Start the
+    # disposable root container only when the Python suite is selected.
     steps:
       - uses: actions/checkout@v5
-      - name: Check Bash syntax
-        run: bash -n install.sh upgrade.sh uninstall.sh
+        if: ${{ needs.scope.result != 'success' || needs.scope.outputs.unit != 'false' }}
+        with:
+          persist-credentials: false
       - name: Run unit and regression tests
-        run: python -m unittest discover -s tests -p 'test_*.py' -v
+        if: ${{ needs.scope.result != 'success' || needs.scope.outputs.unit != 'false' }}
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace" \
+            --workdir /workspace \
+            python:${{ matrix.python }}-bookworm \
+            bash -ec 'git config --global --add safe.directory /workspace
+              bash -n install.sh upgrade.sh uninstall.sh
+              python -m unittest discover -s tests -p "test_*.py" -v'
+      - name: No Python tests required
+        if: ${{ needs.scope.result == 'success' && needs.scope.outputs.unit == 'false' }}
+        run: echo 'No Python or regression test changes'
 
   lint:
     needs: scope
@@ -82,7 +93,7 @@ jobs:
 
   integration:
     needs: scope
-    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.postgres != 'false') }}
+    if: ${{ !cancelled() }}
     name: PostgreSQL integration / ${{ matrix.distro }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -96,7 +107,14 @@ jobs:
             image: rockylinux:9
     steps:
       - uses: actions/checkout@v5
+        if: ${{ needs.scope.result != 'success' || needs.scope.outputs.postgres != 'false' }}
+        with:
+          persist-credentials: false
+      - name: No PostgreSQL integration required
+        if: ${{ needs.scope.result == 'success' && needs.scope.outputs.postgres == 'false' }}
+        run: echo 'No PostgreSQL integration changes'
       - name: Run real backup and restore tests
+        if: ${{ needs.scope.result != 'success' || needs.scope.outputs.postgres != 'false' }}
         run: |
           docker run --rm \
             --volume "$PWD:/workspace:ro" \
