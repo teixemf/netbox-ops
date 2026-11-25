@@ -56,6 +56,16 @@ class PluginInventoryTests(unittest.TestCase):
         self.assertEqual(configured_plugin_packages(result), (('sample-plugin', '2.4.1'),))
         self.assertEqual(len(result.proposals), 1)
 
+    def test_record_data_and_dotted_filenames_do_not_prove_module_ownership(self):
+        directory = self.root / 'venv/lib/python3.12/site-packages/sample-plugin-2.4.1.dist-info'
+        (directory / 'top_level.txt').unlink()
+        (directory / 'RECORD').write_text(
+            'sample_plugin.data.py,,\nsample_plugin/data/example.py,,\n'
+            '../../../sample_plugin/__init__.py,,\n')
+        result = self.inventory()
+        self.assertEqual(configured_plugin_packages(result), ())
+        self.assertEqual(result.proposals, ())
+
     def test_matching_name_without_module_metadata_is_not_evidence(self):
         directory = self.root / 'venv/lib/python3.12/site-packages/sample-plugin-2.4.1.dist-info'
         (directory / 'top_level.txt').unlink()
