@@ -72,6 +72,14 @@ class UpgradeStage:
 
 
 @dataclass(frozen=True)
+class RequirementOverlap:
+    name: str
+    local_pin: str
+    core_pin: str
+    status: str  # redundant, conflict, ambiguous
+
+
+@dataclass(frozen=True)
 class StageDependencyReview:
     version: str
     commit: str
@@ -80,6 +88,7 @@ class StageDependencyReview:
     resolution: DependencyPreflight
     changes: tuple[tuple[str, str | None, str], ...]
     ltree: str
+    overlaps: tuple[RequirementOverlap, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -256,7 +265,9 @@ def _fingerprint(plan: UpgradePlan) -> str:
         'blockers': plan.blockers,
         'dependency_reviews': [(r.version, r.commit, r.core_hash, r.exact_pins,
                                 r.resolution.status, r.resolution.checked_core, r.resolution.packages,
-                                r.resolution.detail, r.changes, r.ltree) for r in plan.dependency_reviews],
+                                r.resolution.detail, r.changes, r.ltree,
+                                [(o.name, o.local_pin, o.core_pin, o.status) for o in r.overlaps])
+                               for r in plan.dependency_reviews],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()
 
