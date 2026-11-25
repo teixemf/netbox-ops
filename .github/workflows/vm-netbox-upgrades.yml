@@ -1,6 +1,12 @@
 name: VM E2E - NetBox upgrades
 
 on:
+  # Verify the integrated revision after workflow or release-version changes.
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/vm-netbox-upgrades.yml'
+      - 'netbox_ops/__init__.py'
   pull_request:
     branches: [dev]
     paths:

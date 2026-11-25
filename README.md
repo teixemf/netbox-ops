@@ -14,7 +14,7 @@ It brings common administration tasks into one terminal-based tool, designed for
 - Detect common RHEL- and Debian-family service configurations.
 - Configure weekly audit log rotation (four archives) during installation and upgrades when the OS `logrotate` package is available. If it is missing, install it and rerun `upgrade.sh`; custom policies are preserved.
 
-**In development:** NetBox and plugin upgrade/update operations are not yet implemented.
+The development branch adds approved NetBox, plugin and combined upgrade plans, exact plugin pin review, and self-upgrade of archive installations. These features are intended for the next release, not the already published v0.5.0. See [NetBox upgrades](docs/NETBOX_UPGRADE.md) and [self-upgrade and recovery](docs/SELF_UPGRADE_RECOVERY.md) for requirements and limitations.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ It brings common administration tasks into one terminal-based tool, designed for
 - systemd and PostgreSQL client tools
 - A terminal with Python `curses` support
 
-The application uses a separate Python virtual environment and does not modify NetBox's Python environment.
+netbox-ops itself uses a separate Python virtual environment. Service and backup operations do not install packages into NetBox's environment; an explicitly approved NetBox or plugin upgrade does modify that environment.
 
 Install Python from your distribution's official repositories when a compatible version and any required matching `venv` package are available. On older releases, including Ubuntu 22.04 (which ships Python 3.10 by default), the official repositories may not provide Python 3.12 or newer. In that case, consider upgrading the operating system or installing a separate Python from a trusted source. Do not replace the system's default Python.
 
@@ -68,7 +68,9 @@ Run `sudo /opt/netbox-ops/uninstall.sh` from an interactive terminal. Exit other
 
 **Current version: 0.5.0 — early development.**
 
-CI includes real PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9. Disposable NetBox VM smoke tests cover service restart and database backup verification, but **full end-to-end NetBox restore and recovery testing remains outstanding**. Do not use restore functionality on production systems until you have tested recovery in a disposable environment with appropriate snapshots or non-production data.
+CI includes real PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9. The development branch also has disposable Ubuntu 24.04 VM suites for NetBox upgrades and netbox-ops self-upgrade. The latter uses unpublished candidate archives and controlled failure scenarios; testing two published releases is tracked in #132. PostgreSQL integration on Rocky Linux does not establish full upgrade support on that distribution.
+
+Full end-to-end NetBox restore and manual recovery testing remains outstanding. Test recovery in a disposable environment with appropriate snapshots or non-production data before using these operations in production. NetBox upgrades have no automatic database rollback (#63).
 
 ## Contributing
 
