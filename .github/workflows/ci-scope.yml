@@ -1,0 +1,40 @@
+name: CI scope
+
+on:
+  workflow_call:
+    outputs:
+      unit:
+        value: ${{ jobs.scope.outputs.unit }}
+      postgres:
+        value: ${{ jobs.scope.outputs.postgres }}
+      package:
+        value: ${{ jobs.scope.outputs.package }}
+      netbox:
+        value: ${{ jobs.scope.outputs.netbox }}
+      self_upgrade:
+        value: ${{ jobs.scope.outputs.self_upgrade }}
+      baseline:
+        value: ${{ jobs.scope.outputs.baseline }}
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    name: Select relevant tests
+    runs-on: ubuntu-latest
+    outputs:
+      unit: ${{ steps.select.outputs.unit }}
+      postgres: ${{ steps.select.outputs.postgres }}
+      package: ${{ steps.select.outputs.package }}
+      netbox: ${{ steps.select.outputs.netbox }}
+      self_upgrade: ${{ steps.select.outputs.self_upgrade }}
+      baseline: ${{ steps.select.outputs.baseline }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed files
+        id: select
+        run: python3 scripts/ci/test_scope.py

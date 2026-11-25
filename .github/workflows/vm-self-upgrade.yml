@@ -7,22 +7,10 @@ on:
     paths:
       - '.github/workflows/vm-self-upgrade.yml'
       - 'netbox_ops/__init__.py'
+      - '.github/workflows/ci-scope.yml'
+      - 'scripts/ci/test_scope.py'
   pull_request:
     branches: [dev]
-    paths:
-      - '.github/workflows/vm-self-upgrade.yml'
-      - 'netbox_ops/self_upgrade_*.py'
-      - 'netbox_ops/release_requirements.json'
-      - 'scripts/build-release.sh'
-      - 'scripts/release-candidate.py'
-      - 'netbox_ops/cli.py'
-      - 'netbox_ops/tui.py'
-      - 'scripts/ci/netbox-vm-self-upgrade.py'
-      - 'install.sh'
-      - 'upgrade.sh'
-      - 'scripts/ci/netbox-vm-host.sh'
-      - 'scripts/ci/netbox-vm-guest.sh'
-      - 'scripts/ci/netbox-vm-baseline.env'
   workflow_dispatch:
     inputs:
       official_from:
@@ -34,11 +22,20 @@ on:
         type: string
         required: false
 
+concurrency:
+  group: self_upgrade-vm-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   verify:
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.self_upgrade != 'false') }}
     name: Production self-upgrade and rollback
     runs-on: ubuntu-24.04
     timeout-minutes: 25
