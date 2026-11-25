@@ -85,6 +85,43 @@ class DependencyReviewTests(unittest.TestCase):
         self.ltree.assert_called_once_with(self.cfg, self.live)
         self.assertFalse(self.download.called)
 
+    def test_new_core_package_with_identical_local_pin_is_resolved_and_retained(self):
+        self.read.return_value += b'\nDisabled_Plugin==1.0'
+        plan = self.review(self.build())
+        self.assertTrue(plan.can_execute)
+        review = plan.dependency_reviews[0]
+        self.assertEqual(review.overlaps[0].status, 'redundant')
+        self.assertIn('disabled-plugin==1.0', self.resolver.call_args.args[0])
+        self.assertIn('Disabled_Plugin==1.0', self.resolver.call_args.args[1])
+        self.assertIn('Redundant identical pin', '\n'.join(summary_lines(plan, Translator('en'))))
+        self.assertIn('Pin redundante', '\n'.join(summary_lines(plan, Translator('pt'))))
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), self.local)
+        # Approval binds the overlapping evidence, not just a package version.
+        pins = prepare_plugin_upgrade(plan, self.local, self.read.return_value, stage_index=0)
+        with self.assertRaisesRegex(UpgradeExecutionError, 'changed after plan approval'):
+            bind_reviewed_dependencies(plan, 0, 'b' * 40, self.read.return_value,
+                                       replace(pins, overlaps=()))
+        # A redundant pin does not waive the complete dependency resolver.
+        self.resolver.return_value = DependencyPreflight('blocked', 'conflict', True)
+        self.assertFalse(self.review(self.build()).can_execute)
+
+    def test_conflict_blocks_resolver_but_reports_independent_ltree(self):
+        self.read.return_value += b'\nDisabled_Plugin==2.0'
+        self.ltree.return_value = 'permission'
+        plan = self.review(self.build())
+        self.assertFalse(plan.can_execute)
+        review = plan.dependency_reviews[0]
+        self.assertEqual(review.overlaps[0].status, 'conflict')
+        self.assertEqual(review.resolution.status, 'not-run')
+        self.assertEqual(review.ltree, 'permission')
+        self.resolver.assert_not_called()
+        self.download.assert_not_called()
+        self.ltree.assert_called_once()
+        summary = '\n'.join(summary_lines(plan, Translator('en')))
+        self.assertIn('local disabled-plugin==1.0; core Disabled_Plugin==2.0', summary)
+        self.assertIn('not run', summary)
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), self.local)
+
     def test_unpinned_disabled_requirement_blocks_before_resolver(self):
         (self.root / 'local_requirements.txt').write_bytes(b'disabled-plugin\n')
         plan = self.review(self.build())
@@ -96,6 +133,9 @@ class DependencyReviewTests(unittest.TestCase):
         local = self.local + b'configured-plugin==1.0\n'
         (self.root / 'local_requirements.txt').write_bytes(local)
         packages = self.installed + (InstalledPackage('configured-plugin', '1.0', ('configured_plugin',)),)
+        # Same local package is redundantly pinned in both current and target core.
+        (self.root / 'requirements.txt').write_bytes(self.core + b'\ndisabled-plugin==1.0')
+        self.read.return_value += b'\ndisabled-plugin==1.0'
         for target, django in ((None, '5.2.1'), ('4.7.3', '6.1.0')):
             with self.subTest(target=target):
                 self.resolver.return_value = DependencyPreflight(
@@ -107,6 +147,7 @@ class DependencyReviewTests(unittest.TestCase):
                 self.assertTrue(plan.can_execute)
                 review = plan.dependency_reviews[0]
                 self.assertIn(('configured-plugin', '1.0', '2.0'), review.changes)
+                self.assertEqual(review.overlaps[0].status, 'redundant')
                 self.assertEqual(dict(review.exact_pins)['disabled-plugin'], '1.0')
                 self.assertIn('disabled-plugin==1.0', self.resolver.call_args.args[0])
                 self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)

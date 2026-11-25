@@ -18,7 +18,7 @@ from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
 from .upgrade_diagnostics import run_checked
 from .upgrade_process import run_managed
-from .upgrade_plan import UpgradePlan
+from .upgrade_plan import RequirementOverlap, UpgradePlan
 from .upgrade_recovery import _read_config
 from .upgrade_runtime import upgrade_environment
 from .upgrade_services import require_quiesced_writers
@@ -43,6 +43,18 @@ class PluginUpgrade:
     expected: tuple[tuple[str, str], ...]
     selected: tuple[tuple[str, str], ...]
     wheelhouse: Path | None = None
+    overlaps: tuple[RequirementOverlap, ...] = ()
+
+
+class RequirementOverlapError(UpgradeExecutionError):
+    """An overlap requires manual review before any resolver or live change."""
+
+    def __init__(self, overlaps: tuple[RequirementOverlap, ...]):
+        self.overlaps = overlaps
+        details = '; '.join(f'{o.name}: local {o.local_pin}, core {o.core_pin} ({o.status})'
+                            for o in overlaps if o.status != 'redundant')
+        super().__init__('Local/core requirement overlap: ' + details +
+                         '. Review local purpose and pins or choose another target; no files changed.')
 
 
 def _parse(raw: bytes) -> tuple[list[str], dict[str, tuple[int, re.Match]]]:
@@ -130,8 +142,26 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         expected[name] = match[4]
 
     lines, entries = _parse(local or b'')
-    if set(entries) & set(core_entries):
-        raise UpgradeExecutionError('Local requirements overlap NetBox core dependencies')
+    # A simple, identical local pin adds no requirement beyond the core pin.
+    # Retain the original declaration and resolve both pins together. Never
+    # infer permission to edit the file or to drop extras or configured plugins.
+    configured = set(dict(configured_plugin_packages(inventory)))
+    overlaps = []
+    for name in sorted(set(entries) & set(core_entries)):
+        local_match = entries[name][1]
+        core_match = core_entries[name][1]
+        local_pin = f'{local_match[2]}{local_match[3] or ""}' + (
+            f'=={local_match[4]}' if local_match[4] else '')
+        core_pin = f'{core_match[2]}{core_match[3] or ""}=={core_match[4]}'
+        if not local_match[4] or local_match[3] or name in configured:
+            status = 'ambiguous'
+        elif local_match[4] != core_match[4]:
+            status = 'conflict'
+        else:
+            status = 'redundant'
+        overlaps.append(RequirementOverlap(name, local_pin, core_pin, status))
+    if any(overlap.status != 'redundant' for overlap in overlaps):
+        raise RequirementOverlapError(tuple(overlaps))
     for module in inventory.enabled:
         package = resolve_plugin_package(inventory.packages, module)
         if package is None:
@@ -163,7 +193,7 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         raise UpgradeExecutionError('Prepared pins differ from the approved plugin versions')
     return PluginUpgrade(digest, ''.join(lines).encode('utf-8'), tuple(core_pins),
                          tuple(local_pins), tuple(sorted(expected.items())),
-                         tuple(sorted(selected.items())))
+                         tuple(sorted(selected.items())), overlaps=tuple(overlaps))
 
 
 def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
@@ -174,7 +204,7 @@ def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
     review = plan.dependency_reviews[index]
     if (review.version != plan.stages[index].netbox_version or review.commit != commit
             or review.core_hash != hashlib.sha256(core).hexdigest()
-            or review.exact_pins != pins.expected):
+            or review.exact_pins != pins.expected or review.overlaps != pins.overlaps):
         raise UpgradeExecutionError('Target requirements changed after plan approval')
     if review.resolution.status != 'passed' or not review.resolution.checked_core:
         raise UpgradeExecutionError('Refresh the plan with verified dependencies before executing')

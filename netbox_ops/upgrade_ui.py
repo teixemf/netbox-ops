@@ -164,6 +164,9 @@ def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) ->
                        status=t('upgrade_dependency_' + review.resolution.status)))
         if review.ltree != 'not-required':
             lines.append(t('upgrade_ltree_status', status=t('upgrade_ltree_' + review.ltree)))
+        for overlap in review.overlaps:
+            lines.append(t('upgrade_overlap_' + overlap.status, name=overlap.name,
+                           local=overlap.local_pin, core=overlap.core_pin))
         for name, before, after in review.changes:
             lines.append(f'  {name}: {before or "-"} -> {after}')
         if details:

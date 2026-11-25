@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Configuration
-from .plugin_compatibility import CompatibilityError, isolated_dependency_preflight
+from .plugin_compatibility import CompatibilityError, DependencyPreflight, isolated_dependency_preflight
 from .plugin_inventory import normalize_name
-from .plugin_upgrade import prepare_plugin_upgrade
+from .plugin_upgrade import RequirementOverlapError, prepare_plugin_upgrade
 from .upgrade_checkout import _run_git
 from .upgrade_combined import download_stage_wheels
 from .upgrade_execution import UpgradeExecutionError
@@ -61,8 +61,25 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                         else _read_config(live.root, 'requirements.txt'))
                 if core is None:
                     raise UpgradeExecutionError('NetBox core requirements are missing')
-                pins = prepare_plugin_upgrade(plan, local, core,
-                                              stage_index=index if stage.kind == 'netbox' else None)
+                ltree = 'not-required'
+                if tuple(map(int, stage.netbox_version.split('.')[:2])) >= (4, 7):
+                    ltree = ltree_probe(cfg, live) if cfg is not None else 'unknown'
+                    if ltree not in ('installed', 'available'):
+                        blockers.append(prefix + 'PostgreSQL ltree availability or permissions not verified')
+                # A blocked requirements stage must not hide independent
+                # prerequisite checks or the remaining targets' evidence.
+                try:
+                    pins = prepare_plugin_upgrade(plan, local, core,
+                                                  stage_index=index if stage.kind == 'netbox' else None)
+                except UpgradeExecutionError as exc:
+                    blockers.append(prefix + str(exc))
+                    overlaps = exc.overlaps if isinstance(exc, RequirementOverlapError) else ()
+                    reviews.append(StageDependencyReview(
+                        stage.netbox_version, pinned.commit, hashlib.sha256(core).hexdigest(), (),
+                        DependencyPreflight('not-run', 'Requirements could not be safely prepared'),
+                        (), ltree, overlaps,
+                    ))
+                    continue
                 result = resolver(pins.local_pins, pins.core_pins, live.python_version,
                                   interpreter=live.python)
                 if result.status == 'unknown':
@@ -74,11 +91,6 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                     else:
                         result = resolver(pins.local_pins, pins.core_pins, live.python_version,
                                           interpreter=live.python, wheelhouse=wheelhouse)
-                ltree = 'not-required'
-                if tuple(map(int, stage.netbox_version.split('.')[:2])) >= (4, 7):
-                    ltree = ltree_probe(cfg, live) if cfg is not None else 'unknown'
-                    if ltree not in ('installed', 'available'):
-                        blockers.append(prefix + 'PostgreSQL ltree availability or permissions not verified')
                 if result.status == 'blocked':
                     blockers.append(prefix + 'Python dependency resolution confirmed a conflict')
                 elif result.status != 'passed' or not result.checked_core:
@@ -91,7 +103,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                                        for name, version in expected.items() if previous.get(name) != version))
                 reviews.append(StageDependencyReview(stage.netbox_version, pinned.commit,
                                                      hashlib.sha256(core).hexdigest(), pins.expected,
-                                                     result, changes, ltree))
+                                                     result, changes, ltree, pins.overlaps))
                 previous.update(expected)
     except UpgradeExecutionError as exc:
         # These helpers raise fixed local messages; never display arbitrary

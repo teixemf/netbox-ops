@@ -213,6 +213,18 @@ pin selection, exact before/after review and a literal `PIN` confirmation.
 Pin review alone never writes a file; a stale review is rejected under the
 operation lock. Recalculate the upgrade plan after applying pins.
 
+If a local requirement also appears in the core requirements of a target
+release, the plan shows the exact local and core pins for that stage.
+An identical, simple local pin for a non-plugin package may be retained
+only when full dependency resolution succeeds. No declaration or comment
+is removed automatically. Review whether that local declaration is still
+needed before a later upgrade changes the core version. Differing pins,
+local extras, unpinned declarations and configured-plugin overlaps block
+execution until reviewed manually or a compatible target is chosen.
+Independent prerequisite checks (including PostgreSQL ltree) still run
+when the resolver cannot safely run; the plan explicitly reports skipped
+dependency resolution. Every stage must pass before approval.
+
 To execute, repeat the same preview command with `--execute`,
 `--approve-plan <fingerprint>` (copy the complete displayed fingerprint)
 and `--health-url https://netbox.example/api/status/`. Add
