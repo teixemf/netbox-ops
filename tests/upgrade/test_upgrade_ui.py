@@ -1,6 +1,7 @@
 """Offline tests for the shared upgrade interface."""
 from __future__ import annotations
 
+import curses
 import io
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -11,13 +12,14 @@ from unittest.mock import Mock, patch
 
 from netbox_ops.cli import build_parser, dispatch
 from netbox_ops.config import Configuration, DEFAULT_UNITS
-from netbox_ops.i18n import Translator
+from netbox_ops.i18n import LANGUAGES, Translator
 from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview, ReleaseChoice
 from netbox_ops.plugin_inventory import DeclaredRequirement, InstalledPackage, PinProposal, PluginInventory
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_plan import build_upgrade_plan
+from netbox_ops.upgrade_tui import netbox_overview
 from netbox_ops.upgrade_ui import (
     UpgradeContext, alternative_release_choices, execute_plan, make_plan, official_tags, parse_plugins, summary_lines,
 )
@@ -284,6 +286,110 @@ class UpgradeTuiTests(InterfaceFixture):
         ), patch.object(menu, '_show_lines'):
             menu._upgrade('plugins')
         self.assertEqual(build.call_args.args[3], {'example-plugin': '1.8.0'})
+
+    def test_overview_uses_actual_versions_and_explicit_unverified_states(self):
+        for language in LANGUAGES:
+            t = Translator(language)
+            for key in ('upgrade_status_not_checked', 'upgrade_overview_counts',
+                        'upgrade_overview_more', 'upgrade_overview_hint',
+                        'upgrade_overview_details', 'upgrade_refresh', 'upgrade_review_hint'):
+                self.assertIn(key, t.messages)
+            for operation, target, selected in (
+                ('netbox', '4.4.2', {}),
+                ('plugins', None, {'example-plugin': '2.0.0'}),
+                ('stack', '4.4.2', {'example-plugin': '2.0.0'}),
+            ):
+                with self.subTest(language=language, operation=operation):
+                    rows = netbox_overview(self.context, target, selected, None, t, operation=operation)
+                    lines = [line for line, _ in rows]
+                    self.assertIn(t('upgrade_plan_status', status=t('upgrade_status_not_checked')), lines)
+                    self.assertIn('4.4.0', lines[0])
+                    self.assertIn('example-plugin: 1.0.0', ' '.join(lines))
+                    self.assertNotIn('django:', ' '.join(lines))
+                    self.assertNotIn('success', [style for _, style in rows])
+                    plan = self.build(operation, target, selected)
+                    checked = netbox_overview(self.context, target, selected, plan, t, operation=operation)
+                    self.assertIn(t('upgrade_dependency_not-run'), ' '.join(line for line, _ in checked))
+                    self.assertIn(t('upgrade_stage', index=1, total=len(plan.stages),
+                                    version=plan.stages[0].netbox_version), [line for line, _ in checked])
+
+    def test_blocked_plan_never_offers_execute(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        plan = replace(self.build(), blockers=('incompatible dependency',))
+        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
+            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
+        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan), patch.object(
+            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
+        ), patch.object(menu, '_choose', side_effect=[1, 2, None]) as choose, patch.object(
+            menu, '_show_lines',
+        ) as show, patch('netbox_ops.upgrade_ui.execute_plan') as execute:
+            menu._upgrade('netbox')
+        self.assertNotIn(self.t('upgrade_execute'), [label for label, _ in choose.call_args_list[1].args[1]])
+        self.assertIn(self.t('upgrade_status_blocked'), str(choose.call_args_list[1].kwargs['overview']))
+        self.assertIn('incompatible dependency', str(show.call_args_list))
+        execute.assert_not_called()
+
+    def test_refresh_invalidates_review_and_unavailable_target(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        fresh = replace(self.context, tags=('v4.4.1',))
+        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
+            'netbox_ops.upgrade_ui.discover_context', side_effect=[self.context, fresh],
+        ) as discover, patch('netbox_ops.upgrade_ui.make_plan', return_value=self.build()), patch.object(
+            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
+        ), patch.object(menu, '_choose', side_effect=[1, 5, None]) as choose, patch(
+            'netbox_ops.upgrade_ui.execute_plan',
+        ) as execute:
+            menu._upgrade('netbox')
+        self.assertEqual(discover.call_count, 2)
+        self.assertIn(self.t('upgrade_target', target='?'), [label for label, _ in choose.call_args.args[1]])
+        self.assertNotIn(self.t('upgrade_execute'), [label for label, _ in choose.call_args.args[1]])
+        execute.assert_not_called()
+
+    def test_failed_recalculation_does_not_reuse_previous_review(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
+            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
+        ), patch('netbox_ops.upgrade_ui.make_plan', side_effect=[self.build(), None]), patch.object(
+            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
+        ), patch.object(menu, '_choose', side_effect=[1, 1, None]) as choose, patch(
+            'netbox_ops.upgrade_ui.execute_plan',
+        ) as execute:
+            menu._upgrade('netbox')
+        self.assertNotIn(self.t('upgrade_execute'), [label for label, _ in choose.call_args.args[1]])
+        execute.assert_not_called()
+
+    def test_escape_from_full_review_never_requests_token_or_url(self):
+        menu = CursesMenu(FakeScreen(), self.t)
+        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
+            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
+        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=self.build()), patch.object(
+            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
+        ), patch.object(menu, '_choose', side_effect=[1, 3, None]), patch.object(
+            menu, '_show_lines', return_value=False,
+        ) as show, patch.object(menu, '_upgrade_input') as prompt, patch.object(
+            menu, '_confirm_token',
+        ) as confirm, patch('netbox_ops.upgrade_ui.execute_plan') as execute:
+            menu._upgrade('netbox')
+        self.assertIn('manual recovery', str(show.call_args_list))
+        prompt.assert_not_called()
+        confirm.assert_not_called()
+        execute.assert_not_called()
+
+    def test_minimum_terminal_overview_remains_visible_while_actions_scroll(self):
+        for language in LANGUAGES:
+            t = Translator(language)
+            screen = FakeScreen([curses.KEY_DOWN, curses.KEY_END, 10], dimensions=(16, 50))
+            menu = CursesMenu(screen, t)
+            overview = netbox_overview(self.context, '4.4.2', {}, self.build(), t, operation='netbox')
+            entries = [(f'Action {i}', '') for i in range(12)]
+            self.assertEqual(menu._choose('Upgrade', entries, t('upgrade_overview_hint'),
+                                          overview=overview), 11)
+            for frame in screen.frames:
+                self.assertTrue(any('4.4.0' in line and '4.4.2' in line for _, _, line, _ in frame))
+                self.assertTrue(any(t('upgrade_plan_status', status='').strip() in line
+                                    for _, _, line, _ in frame))
+            self.assertTrue(any('Action 11' in line and attr == curses.A_REVERSE
+                                for _, _, line, attr in screen.frames[-1]))
 
     def test_pin_review_cancel_does_not_write(self):
         menu = CursesMenu(FakeScreen(), self.t)
