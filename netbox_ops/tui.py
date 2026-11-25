@@ -2104,7 +2104,7 @@ class CursesMenu:
                             cursor = len(entries)-1 if key in (curses.KEY_UP,ord('k')) else 0
                         else:
                             cursor = move_selection(cursor,key,len(entries))
-                elif key in (10,13,curses.KEY_ENTER) and focus != 'actions' and props:
+                elif key in (ord('i'), ord('I')) and focus != 'actions' and props:
                     # A long filename can always be read in full, even when the
                     # compact bottom panel has only one preview row.
                     self.stdscr.timeout(-1)
@@ -2216,8 +2216,8 @@ class CursesMenu:
                                             lambda cb, selected=targets: self._verify_job_many(manager, selected, cb)):
                         verified.update(fingerprint(e) for e in targets)
                     self.stdscr.timeout(120)
-                # Enter on the file list no longer opens a separate detail
-                # screen. The right-hand panel is the only preview.
+                # Enter on the file list remains a no-op; I opens the full
+                # read-only details without changing marks or action focus.
         finally:
             self.stdscr.timeout(-1)
             pool.shutdown(wait=False, cancel_futures=True)
