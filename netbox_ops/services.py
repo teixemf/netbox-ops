@@ -19,6 +19,8 @@ from .platform import pg_binary, PlatformError
 LOCK_PATH = Path('/run/lock/netbox-ops.lock')
 LOG_DIR = Path('/var/log/netbox-ops')
 LOG_PATH = LOG_DIR / 'operations.log'
+UPGRADE_PENDING_PATH = Path('/var/lib/netbox-ops/upgrade.pending')
+NETBOX_WRITERS = frozenset({'netbox', 'netbox-rq'})
 
 
 class ServiceError(Exception):
@@ -223,6 +225,42 @@ class ExclusiveLock:
             self.fd = None
 
 
+def upgrade_recovery_pending() -> bool:
+    """Inspect the persistent marker without following links or changing state.
+
+    Any marker entry, even a broken symlink, blocks writers. An inaccessible
+    or unsafe state directory must never be interpreted as a clear marker.
+    Call under the operation lock when authorizing a mutation.
+    """
+    path = UPGRADE_PENDING_PATH
+    try:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise ServiceError('Cannot verify NetBox upgrade recovery state') from None
+    try:
+        info = os.fstat(directory)
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ServiceError('Unsafe NetBox upgrade recovery directory')
+        try:
+            os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+    except OSError:
+        raise ServiceError('Cannot verify NetBox upgrade recovery state') from None
+    finally:
+        os.close(directory)
+
+
+def require_service_action_allowed(action: str, names: Sequence[str]) -> None:
+    """Guard operator service changes under the shared operation lock."""
+    if action in ('start', 'restart') and NETBOX_WRITERS.intersection(names):
+        if upgrade_recovery_pending():
+            raise ServiceError('NetBox upgrade recovery is pending; inspect recovery before starting writers')
+
+
 CRITICAL_SERVICES = frozenset({'postgresql', 'redis'})
 
 
@@ -270,6 +308,11 @@ def perform_service_batch(systemd: SystemdServices, action: str,
     who = f'uid={os.getuid()} sudo_user={os.environ.get("SUDO_USER", "unknown")}'
     with ExclusiveLock():
         write_audit(f'{action.upper()} batch requested services={",".join(ordered)} {who}')
+        try:
+            require_service_action_allowed(action, ordered)
+        except ServiceError as exc:
+            write_audit(f'{action.upper()} batch blocked error={exc}')
+            raise
         for name in ordered:
             if on_progress:
                 on_progress('running', len(results), total, name, '')

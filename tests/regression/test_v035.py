@@ -13,7 +13,7 @@ from netbox_ops import __version__
 from netbox_ops.backups import BackupManager
 from netbox_ops.config import DEFAULT_UNITS, Configuration
 from netbox_ops.i18n import Translator
-from netbox_ops.journal import JournalPanel
+from netbox_ops.journal import JournalPanel, JournalViewport
 from netbox_ops.services import ServiceState
 from netbox_ops.tui import CursesMenu
 from tests.helpers.fake_screen import FakeScreen
@@ -120,7 +120,7 @@ class JournalUiTests(unittest.TestCase):
         systemd.logs.assert_called_once_with('netbox',50)
 
     def test_disabled_service_action_has_visible_focus(self):
-        screen = FakeScreen([9, 27, 27], dimensions=(24, 80))
+        screen = FakeScreen([9, 27, 27, 27], dimensions=(24, 80))
         menu = CursesMenu(screen, Translator('en'))
         systemd = MagicMock()
         systemd.status.return_value = self.states
@@ -130,8 +130,8 @@ class JournalUiTests(unittest.TestCase):
             menu._manage()
         focused = screen.frames[1]
         self.assertTrue(any(text == '›' for _, _, text, _ in focused))
-        self.assertIn('Marked targets: none',
-                      ' '.join(text for _, _, text, _ in focused))
+        self.assertIn('Selected: 0', ' '.join(text for _, _, text, _ in focused))
+        self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
 
     def test_service_marked_target_remains_clear_when_preview_moves(self):
         screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_DOWN, 27, 27, 27],
@@ -144,12 +144,15 @@ class JournalUiTests(unittest.TestCase):
              patch('netbox_ops.tui.load_config'):
             menu._manage()
         focused = screen.frames[3]
-        summaries = [text for _, _, text, _ in focused if 'Marked targets:' in text]
-        self.assertEqual(summaries, ['Marked targets: netbox'])
+        rows = [text for _, _, text, _ in focused if text.startswith('[x] ')]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('netbox', rows[0])
+        self.assertNotIn('netbox-rq', rows[0])
+        self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
         self.assertIn('netbox-rq.service',
                       ' '.join(text for _, _, text, _ in focused))
 
-    def test_enter_from_manage_opens_expanded_log_view(self):
+    def test_enter_from_manage_focuses_integrated_log_view(self):
         screen=FakeScreen([curses.KEY_DOWN, 10, 27, 27, 27],dimensions=(44,145))
         menu=CursesMenu(screen,Translator('pt'))
         systemd=MagicMock()
@@ -161,6 +164,56 @@ class JournalUiTests(unittest.TestCase):
         shown=' '.join(v for _,_,v,_ in screen.writes)
         self.assertIn('LIVE LOG',shown.upper())
         self.assertIn('netbox.service',shown)
+        self.assertTrue(any('Últimos logs' in value for _, _, value, _ in screen.frames[2]))
+        self.assertTrue(any('OPERAÇÕES SOBRE SERVIÇOS' in value for _, _, value, _ in screen.frames[2]))
+
+    def test_tab_reverse_tab_and_escape_keep_services_screen(self):
+        screen = FakeScreen([curses.KEY_DOWN, 9, 9, curses.KEY_BTAB, 27, 27, 27],
+                            dimensions=(40, 130))
+        menu = CursesMenu(screen, Translator('en'))
+        systemd = MagicMock()
+        systemd.status.return_value = self.states
+        systemd.logs.return_value = ['line']
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'):
+            menu._manage()
+        self.assertTrue(any('At newest logs' in value for _, _, value, _ in screen.frames[3]))
+        self.assertTrue(any('Enter Run' in value or value == 'Run'
+                            for _, _, value, _ in screen.frames[4]))
+        systemd.start.assert_not_called()
+
+    def test_short_terminal_keeps_journal_accessible(self):
+        screen = FakeScreen([curses.KEY_DOWN, 10, 27, 27, 27], dimensions=(16, 60))
+        menu = CursesMenu(screen, Translator('en'))
+        systemd = MagicMock()
+        systemd.status.return_value = self.states
+        systemd.logs.return_value = ['line']
+        with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+             patch('netbox_ops.tui.load_config'):
+            menu._manage()
+        self.assertTrue(any('At newest logs' in value for _, _, value, _ in screen.frames[2]))
+        self.assertTrue(any('netbox' in value for _, _, value, _ in screen.frames[2]))
+
+    def test_viewport_preserves_reading_position_when_live_buffer_advances(self):
+        from collections import deque
+        panel = MagicMock()
+        panel.lines = deque((str(i) for i in range(10)), maxlen=10)
+        panel.sequence = 10
+        viewport = JournalViewport()
+        self.assertEqual(viewport.bounds(panel, 3), (7, 10))
+        viewport.move(panel, 3, -3)
+        self.assertEqual(list(panel.lines)[slice(*viewport.bounds(panel, 3))], ['4', '5', '6'])
+        panel.lines.append('10')
+        panel.sequence += 1
+        self.assertEqual(list(panel.lines)[slice(*viewport.bounds(panel, 3))], ['4', '5', '6'])
+        viewport.end = None
+        self.assertEqual(list(panel.lines)[slice(*viewport.bounds(panel, 3))], ['8', '9', '10'])
+        panel.lines.append('a long line')
+        panel.sequence += 1
+        viewport.horizontal(panel, 4, 8)
+        self.assertEqual(viewport.column, 7)
+        viewport.horizontal(panel, 4, -8)
+        self.assertEqual(viewport.column, 0)
 
     def test_live_follower_nonblocking_reads_and_closes(self):
         read_fd,write_fd=os.pipe()

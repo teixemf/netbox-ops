@@ -3,20 +3,23 @@ name: VM integration - NetBox services and reusable baseline
 on:
   pull_request:
     branches: [dev]
-    paths:
-      - '.github/workflows/vm-netbox-integration.yml'
-      - 'scripts/ci/netbox-vm-host.sh'
-      - 'scripts/ci/netbox-vm-guest.sh'
-      - 'scripts/ci/netbox-vm-e2e.sh'
-      - 'scripts/ci/netbox-vm-baseline.env'
   workflow_dispatch:
+
+concurrency:
+  group: baseline-vm-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   verify:
-    name: Boot NetBox twice from published baseline
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.baseline != 'false') }}
+    name: E2E checks and two isolated NetBox boots
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -63,5 +66,5 @@ jobs:
 
       - name: Verify two isolated NetBox boots
         env:
-          NETBOX_VM_E2E: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          NETBOX_VM_E2E: '1'
         run: bash scripts/ci/netbox-vm-host.sh verify

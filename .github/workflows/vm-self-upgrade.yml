@@ -1,0 +1,104 @@
+name: VM integration - netbox-ops self-upgrade
+
+on:
+  # Verify the integrated revision after workflow or release-version changes.
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/vm-self-upgrade.yml'
+      - 'netbox_ops/__init__.py'
+      - '.github/workflows/ci-scope.yml'
+      - 'scripts/ci/test_scope.py'
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      official_from:
+        description: 'Optional published source release tag (requires self-upgrade support)'
+        type: string
+        required: false
+      official_target:
+        description: 'Optional published target release tag'
+        type: string
+        required: false
+
+concurrency:
+  group: self_upgrade-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
+  verify:
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.self_upgrade != 'false') }}
+    name: Production self-upgrade and rollback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate shell scripts and baseline version
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh
+          python3 -m py_compile scripts/ci/netbox-vm-self-upgrade.py
+          source scripts/ci/netbox-vm-baseline.env
+          if [[ ! "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]; then
+            echo '::error::Invalid baseline tag'
+            exit 1
+          fi
+          echo "Pinned baseline: $BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build unpublished release candidates
+        if: ${{ inputs.official_from == '' && inputs.official_target == '' }}
+        run: python3 -I -B scripts/ci/netbox-vm-self-upgrade.py --build-candidates "$GITHUB_WORKSPACE/.ci-self-upgrade-assets"
+
+      - name: Upload unpublished candidate evidence
+        if: ${{ inputs.official_from == '' && inputs.official_target == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpublished-self-upgrade-candidates
+          path: .ci-self-upgrade-assets/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Install virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+
+      - name: Download versioned baseline from GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/netbox-vm-baseline.env
+          mkdir -p "$RUNNER_TEMP/netbox-ci"
+          start=$SECONDS
+          gh release download "$BASELINE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/netbox-ci" \
+            --pattern netbox-ubuntu24.qcow2 \
+            --pattern SHA256SUMS.txt
+          cd "$RUNNER_TEMP/netbox-ci"
+          test -s netbox-ubuntu24.qcow2
+          test -s SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          echo "Baseline download + verification: $((SECONDS-start)) s"
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run production self-upgrade in disposable second boot
+        env:
+          NETBOX_VM_SELF_UPGRADE_E2E: '1'
+          NETBOX_VM_SELF_UPGRADE_FROM: ${{ inputs.official_from }}
+          NETBOX_VM_SELF_UPGRADE_TARGET: ${{ inputs.official_target }}
+        run: bash scripts/ci/netbox-vm-host.sh verify

@@ -1,0 +1,82 @@
+name: VM E2E - NetBox upgrades
+
+on:
+  # Verify the integrated revision after workflow or release-version changes.
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/vm-netbox-upgrades.yml'
+      - 'netbox_ops/__init__.py'
+      - '.github/workflows/ci-scope.yml'
+      - 'scripts/ci/test_scope.py'
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: netbox-upgrade-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
+  verify:
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.netbox != 'false') }}
+    name: Upgrade / ${{ matrix.scenario }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [netbox, plugins, combined, cross-minor, failure]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate shell scripts and baseline version
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh scripts/ci/netbox-vm-upgrade-e2e.sh
+          source scripts/ci/netbox-vm-baseline.env
+          if [[ ! "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]; then
+            echo '::error::Invalid baseline tag'
+            exit 1
+          fi
+          echo "Pinned baseline: $BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+
+      - name: Download versioned baseline from GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/netbox-vm-baseline.env
+          mkdir -p "$RUNNER_TEMP/netbox-ci"
+          start=$SECONDS
+          gh release download "$BASELINE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/netbox-ci" \
+            --pattern netbox-ubuntu24.qcow2 \
+            --pattern SHA256SUMS.txt
+          cd "$RUNNER_TEMP/netbox-ci"
+          test -s netbox-ubuntu24.qcow2
+          test -s SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          echo "Baseline download + verification: $((SECONDS-start)) s"
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Execute upgrade in a disposable overlay
+        env:
+          NETBOX_VM_UPGRADE_SCENARIO: ${{ matrix.scenario }}
+        run: bash scripts/ci/netbox-vm-host.sh verify

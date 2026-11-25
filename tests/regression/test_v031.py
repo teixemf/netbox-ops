@@ -183,7 +183,7 @@ class ServiceVersionTests(unittest.TestCase):
         others = [ServiceState(name,name+'.service','loaded','active','running','enabled')
                   for name in ('nginx','postgresql','redis')]
         screen = FakeScreen([curses.KEY_DOWN,32,curses.KEY_DOWN,32,
-                             9,10,27,27,27],dimensions=(30,130))
+                             9,10,27,27,27,27],dimensions=(30,130))
         menu = CursesMenu(screen,Translator('pt'))
         service_api=MagicMock()
         service_api.status.return_value=[running,stopped,*others]

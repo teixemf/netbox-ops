@@ -113,4 +113,8 @@ rm -rf -- "${VENV}"
 "${PYTHON}" -m venv --without-pip "${VENV}"
 "${VENV}/bin/python" -m compileall -q "${ROOT}/netbox_ops" "${ROOT}/netbox_ops.py"
 "${VENV}/bin/python" "${ROOT}/netbox_ops.py" --version
+if [[ "${ROOT}" == '/opt/netbox-ops' ]]; then
+    # The initial installer also invokes this shared upgrade path.
+    "${VENV}/bin/python" -I -B "${ROOT}/netbox_ops/logrotate_policy.py" || true
+fi
 printf 'Virtual environment rebuilt successfully.\n'

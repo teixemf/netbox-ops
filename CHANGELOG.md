@@ -2,6 +2,23 @@
 
 Notable changes to netbox-ops are listed below. The project is currently in early development.
 
+## [0.6.0] — Upgrade management and recoverability
+
+- Added editable CLI and TUI plans for NetBox-only, plugin-only and combined upgrades, with exact target versions, compatibility warnings and explicit approval.
+- Added plugin inventory, alternative version selection and safe local requirement pin review.
+- Hardened upgrade execution with dependency preflight and prepared offline artifacts, verified database/media backups, persistent recovery records, service and health checks, and safe interruption handling.
+- Added netbox-ops self-upgrade for supported archive installations, including official release browsing, compatibility and checksum validation, mandatory intermediate steps, transactional installation, rollback and independent recovery.
+- Added a safe interactive uninstaller and weekly audit log rotation that preserves customized policies.
+- Improved TUI navigation, service logs, global quit and automatic English/PT-PT locale selection.
+- Added release compatibility manifests, validated release packaging and manual GitHub Release publication with safe retries.
+- Expanded disposable VM coverage for database and media restores, NetBox and plugin upgrades, and self-upgrade. CI selects relevant suites for development changes and retains full release validation.
+
+**Upgrade from v0.5.0:** Download and verify the official archive and checksum, then follow the manual replacement procedure in [self-upgrade and recovery](https://github.com/teixemf/netbox-ops/blob/v0.6.0/docs/SELF_UPGRADE_RECOVERY.md#initial-upgrade-from-v050). Do not extract over the existing installation. Python 3.12+ with venv support is required; transactional self-upgrade also requires the recognized archive layout and working Linux `pidfd_open`.
+
+**NetBox upgrade requirements:** The executor supports reviewed NetBox 4.x releases in a recognized Git installation at `/opt/netbox`, with compatible existing Python, exact local package pins and an explicit API status URL. Archive, container and custom-path NetBox installations are not supported by the executor. Review [NetBox upgrades](https://github.com/teixemf/netbox-ops/blob/v0.6.0/docs/NETBOX_UPGRADE.md) before use.
+
+**Validation scope and limitations:** The Ubuntu 24.04 VM suites cover core, plugin, combined and cross-minor upgrades, controlled failure, database/media restores and self-upgrade recovery with unpublished candidates. Real PostgreSQL integration also covers Ubuntu 22.04 and Rocky Linux 9, not full upgrade E2E on those platforms. Mandatory intermediate NetBox stages are covered by unit tests using hypothetical reviewed boundaries; no real major-version transition is currently approved. Automatic NetBox upgrade rollback is not implemented (#63), published-release self-upgrade pair testing remains outstanding (#132), and broader maintenance coordination is deferred (#99).
+
 ## [0.5.0] — Reliability, security and development foundations
 
 - Hardened configuration file permissions and improved PostgreSQL restore staging and migration checks.

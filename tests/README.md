@@ -32,7 +32,22 @@ python -m unittest tests.tui.test_tui -v
 
 ## PostgreSQL integration tests
 
-The separate `integration` CI job runs the same suite on Ubuntu 22.04 and Rocky Linux 9. It runs independently from unit tests and Ruff. See [integration/README.md](integration/README.md) for the local Docker commands and what is simulated.
+The separate `integration` CI job runs the same suite on Ubuntu 22.04 and Rocky Linux 9 when database, backup/restore, shared runtime or integration-test changes need it. It runs independently from unit tests and Ruff. See [integration/README.md](integration/README.md) for the local Docker commands and what is simulated.
+
+## CI test selection
+
+Development PRs and pushes classify the complete Git diff against the event's base commit using `scripts/ci/test_scope.py`. Each workflow uses the same decision. The standard matrix keeps its existing job names: irrelevant jobs report a lightweight no-op without starting a test container. VM workflows run only the lightweight scope check when their suite is not selected; the VM jobs do not start. The complete Git diff avoids GitHub's native pull-request path-filter file limit.
+
+- Markdown-only changes: lightweight scope and release-version metadata checks.
+- Python, translations and unit tests: the Python matrix and Ruff.
+- Backup/restore implementation changes: the real PostgreSQL matrix and affected NetBox VM suites. Integration-test-only changes run the PostgreSQL matrix without VMs.
+- NetBox/plugin upgrades: NetBox upgrade VM suite.
+- Self-upgrade and package changes: relevant archive checks and self-upgrade VM suite.
+- Shared runtime, installation, CI routing, version changes or unknown paths: conservative broader coverage.
+
+The classifier combines all affected suites. Renames are treated as deletion plus addition. A missing comparison, classifier failure, manual run, release workflow call or PR/push to main uses full coverage. The upgrade VM suites run on relevant development PRs, and on integrated pushes that change the version, workflow or routing policy. Manual VM runs always execute the full selected workflow. Release validation on the exact candidate remains mandatory.
+
+When adding or moving application modules or test fixtures, review the scope rules and update `tests/test_ci_scope.py` if needed. Do not narrow a shared dependency without checking its callers.
 
 ## Directory layout
 
