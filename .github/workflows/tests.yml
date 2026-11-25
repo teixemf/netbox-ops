@@ -26,9 +26,10 @@ jobs:
       - uses: actions/checkout@v5
         if: ${{ needs.scope.result != 'success' || needs.scope.outputs.unit != 'false' }}
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Run unit and regression tests
-        if: ${{ needs.scope.result != 'success' || needs.scope.outputs.unit != 'false' }}
+        if: ${{ matrix.python != '3.12' && (needs.scope.result != 'success' || needs.scope.outputs.unit != 'false') }}
         run: |
           docker run --rm \
             --volume "$PWD:/workspace" \
@@ -37,6 +38,58 @@ jobs:
             bash -ec 'git config --global --add safe.directory /workspace
               bash -n install.sh upgrade.sh uninstall.sh
               python -m unittest discover -s tests -p "test_*.py" -v'
+      - name: Run unit and regression tests with coverage
+        if: ${{ matrix.python == '3.12' && (needs.scope.result != 'success' || needs.scope.outputs.unit != 'false') }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/netbox-ops-coverage"
+          mkdir -p "$report"
+          docker run --rm \
+            --volume "$PWD:/workspace" \
+            --volume "$report:/coverage" \
+            --workdir /workspace \
+            --env COVERAGE_FILE=/coverage/.coverage \
+            python:3.12-bookworm \
+            bash -ec 'git config --global --add safe.directory /workspace
+              python -m pip install --disable-pip-version-check coverage==7.10.7
+              bash -n install.sh upgrade.sh uninstall.sh
+              python -m coverage run --branch --source=netbox_ops -m unittest discover -s tests -p "test_*.py" -v
+              python -m coverage report -m
+              python -m coverage json -o /coverage/coverage.json
+              python -m coverage xml -o /coverage/coverage.xml'
+          {
+            echo '### Full unit/regression coverage (Python 3.12)'
+            python3 - "$report/coverage.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding='utf-8') as f:
+              totals = json.load(f)['totals']
+          for label, covered, total in (
+              ('Statements', totals['covered_lines'], totals['num_statements']),
+              ('Branches', totals['covered_branches'], totals['num_branches']),
+          ):
+              print(f'- {label}: {covered}/{total} ({100 * covered / total:.2f}%)')
+          print(f"- Combined: {totals['percent_covered']:.2f}%")
+          PY
+            echo 'Reporting only: no minimum percentage enforced.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Report changed executable Python lines
+        if: ${{ matrix.python == '3.12' && github.event_name == 'pull_request' && (needs.scope.result != 'success' || needs.scope.outputs.unit != 'false') }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/netbox-ops-coverage"
+          python3 scripts/ci/coverage_diff.py \
+            --pr-event "$GITHUB_EVENT_PATH" \
+            --coverage "$report/coverage.json" \
+            --output "$report/diff-coverage.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload unit coverage
+        if: ${{ matrix.python == '3.12' && (needs.scope.result != 'success' || needs.scope.outputs.unit != 'false') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage-python-3.12
+          path: ${{ runner.temp }}/netbox-ops-coverage/
+          if-no-files-found: error
+          retention-days: 30
       - name: No Python tests required
         if: ${{ needs.scope.result == 'success' && needs.scope.outputs.unit == 'false' }}
         run: echo 'No Python or regression test changes'

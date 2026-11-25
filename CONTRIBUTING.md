@@ -35,7 +35,7 @@ python -m pip install ruff==0.17.6
 ruff check .
 ```
 
-Run the complete suite in an isolated development environment when elevated permissions are required. CI should pass before merging.
+Run the complete suite in an isolated development environment when elevated permissions are required. CI should pass before merging. See the [CI coverage policy](docs/CI_COVERAGE_POLICY.md) for coverage reporting and review.
 
 Changes involving backups, restores, upgrades, installation, permissions, or services deserve extra care. Test destructive operations only in disposable, non-production environments. Clearly document any important testing limitation; do not claim untested restore or upgrade paths are production-ready.
 
