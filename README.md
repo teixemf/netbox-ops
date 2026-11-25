@@ -14,7 +14,10 @@ It brings common administration tasks into one terminal-based tool, designed for
 - Detect common RHEL- and Debian-family service configurations.
 - Configure weekly audit log rotation (four archives) during installation and upgrades when the OS `logrotate` package is available. If it is missing, install it and rerun `upgrade.sh`; custom policies are preserved.
 
-The development branch adds approved NetBox, plugin and combined upgrade plans, exact plugin pin review, and self-upgrade of archive installations. These features are intended for the next release, not the already published v0.5.0. See [NetBox upgrades](docs/NETBOX_UPGRADE.md) and [self-upgrade and recovery](docs/SELF_UPGRADE_RECOVERY.md) for requirements and limitations.
+- Review and execute guarded NetBox, plugin-only and combined upgrade plans, including dependency preflight, exact plugin pins and verified recovery backups.
+- Browse official netbox-ops releases, review compatibility and install verified self-upgrade steps with transactional recovery.
+
+See [NetBox upgrades](docs/NETBOX_UPGRADE.md) and [self-upgrade and recovery](docs/SELF_UPGRADE_RECOVERY.md) for requirements and limitations. These guides are available in the GitHub repository.
 
 ## Requirements
 
@@ -38,13 +41,17 @@ Before rebuilding an existing environment, `upgrade.sh` checks that the chosen i
 
 ## Getting started
 
-Download the `netbox-ops-v0.5.0.tar.gz` asset from the GitHub Release, then install it on the NetBox server. The archive contains a top-level `netbox-ops/` directory:
+Download `netbox-ops-v0.6.0.tar.gz` and its matching `.sha256` asset from the official GitHub Release. Verify the checksum and inspect the archive before installing it on the NetBox server. The archive contains a top-level `netbox-ops/` directory:
 
 ```bash
-sudo tar -xzf netbox-ops-v0.5.0.tar.gz -C /opt
+sha256sum -c netbox-ops-v0.6.0.tar.gz.sha256
+tar -tzf netbox-ops-v0.6.0.tar.gz
+sudo tar -xzf netbox-ops-v0.6.0.tar.gz -C /opt
 sudo /opt/netbox-ops/install.sh
 sudo netbox-ops
 ```
+
+These commands are for a fresh installation. Do not extract over an existing installation. Upgrading from v0.5.0 requires [manual replacement](docs/SELF_UPGRADE_RECOVERY.md#initial-upgrade-from-v050); the transactional self-upgrade mechanism is available from v0.6.0 onwards for supported archive installations.
 
 Some useful CLI commands:
 
@@ -66,11 +73,11 @@ Run `sudo /opt/netbox-ops/uninstall.sh` from an interactive terminal. Exit other
 
 ## Project status
 
-**Current version: 0.5.0 — early development.**
+**Current version: 0.6.0 — early development.**
 
-CI includes real PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9. The development branch also has disposable Ubuntu 24.04 VM suites for NetBox upgrades and netbox-ops self-upgrade. The latter uses unpublished candidate archives and controlled failure scenarios; testing two published releases is tracked in #132. PostgreSQL integration on Rocky Linux does not establish full upgrade support on that distribution.
+CI includes real PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9, plus disposable Ubuntu 24.04 VM suites for NetBox services, database and media restores, NetBox and plugin upgrades, and netbox-ops self-upgrade. Restore coverage includes combined and selective restores, corrupt archive rejection and rollback after an injected failure. Self-upgrade coverage uses unpublished candidate archives and controlled failure scenarios; testing two published releases is tracked in #132. PostgreSQL integration on Rocky Linux does not establish full upgrade support on that distribution.
 
-Full end-to-end NetBox restore and manual recovery testing remains outstanding. Test recovery in a disposable environment with appropriate snapshots or non-production data before using these operations in production. NetBox upgrades have no automatic database rollback (#63).
+NetBox upgrades require a supported Git installation at `/opt/netbox` and manual recovery if an upgrade fails after migrations may have run; automatic NetBox upgrade rollback is not implemented (#63). The self-upgrade mechanism requires a supported archive layout and working Linux `pidfd_open`. Test backup, restore and recovery in a disposable environment with appropriate snapshots or non-production data before using these operations in production.
 
 ## Contributing
 

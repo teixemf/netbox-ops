@@ -1,8 +1,8 @@
 # NetBox and plugin upgrades
 
 The CLI and TUI share an editable upgrade plan and a guarded executor for
-NetBox-only, plugin-only and combined upgrades. This guide describes the
-development branch intended for v0.6.0, not the published v0.5.0.
+NetBox-only, plugin-only and combined upgrades. This guide describes v0.6.0;
+these upgrade workflows are not available in v0.5.0.
 
 ## Supported setup
 
@@ -247,7 +247,8 @@ stopped writers, a pending marker and a recovery diagnostic. Failure injection
 is confined to the test process; no production failure switch exists.
 
 The workflow runs on relevant pull requests to `dev`, on pushes to `dev`
-that change its definition or the package version, or through manual dispatch
+that change its definition, the package version or the CI routing policy,
+or through manual dispatch
 once the workflow exists on the default branch.
 Never run the guest fixture on an ordinary host. The script requires the
 explicit CI marker and QEMU/KVM virtualization, and the host harness checks
