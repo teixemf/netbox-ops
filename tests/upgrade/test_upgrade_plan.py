@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ from netbox_ops.plugin_compatibility import (
     CompatibilityError, CompatibilityEvidence, DependencyPreflight, PluginCompatibility, PluginReview,
     ReleaseCatalog,
 )
-from netbox_ops.plugin_inventory import InstalledPackage, PluginInventory
+from netbox_ops.plugin_inventory import DeclaredRequirement, InstalledPackage, PluginInventory
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 from netbox_ops.upgrade_plan import (
     UpgradePlanError, build_upgrade_plan, edit_upgrade_plan, required_netbox_path,
@@ -82,10 +83,33 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.selected_plugins, (('sample-plugin', '1.8.2'),))
 
     def test_only_selected_plugin_is_changed(self):
+        self.inventory = replace(self.inventory, enabled=('sample_plugin', 'unused_addon'))
         plan = self.build(selected_plugins={'unused-addon': '9.0.0'})
         versions = {p.package: (p.installed_version, p.proposed_version) for p in plan.plugins}
         self.assertEqual(versions['unused-addon'], ('8.0.0', '9.0.0'))
         self.assertEqual(versions['sample-plugin'], ('1.0.0', '1.0.0'))
+
+    def test_declared_non_plugin_is_rejected_before_review(self):
+        self.inventory = replace(self.inventory, requirements=(
+            DeclaredRequirement(1, 'unused-addon', 'pinned', '8.0.0'),))
+        for target in (None, '4.6.2'):
+            with self.subTest(target=target), self.assertRaisesRegex(UpgradePlanError, 'configured plugins'):
+                self.build(target_netbox=target, selected_plugins={'unused-addon': '9.0.0'})
+        self.assertEqual(self.calls, [])
+
+    def test_unverifiable_plugin_selection_is_rejected(self):
+        original = self.inventory
+        for enabled, packages in (
+            (None, original.packages),
+            ((), original.packages),
+            (original.enabled, original.packages + (
+                InstalledPackage('ambiguous', '1.0.0', ('sample_plugin',)),)),
+        ):
+            with self.subTest(enabled=enabled, packages=packages):
+                self.inventory = replace(original, enabled=enabled, packages=packages)
+                with self.assertRaisesRegex(UpgradePlanError, 'configured plugins'):
+                    self.build(selected_plugins={'sample-plugin': None})
+        self.assertEqual(self.calls, [])
 
     def test_missing_target_tag_fails_before_network(self):
         with self.assertRaisesRegex(UpgradePlanError, 'verified Git'):
