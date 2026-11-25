@@ -1281,6 +1281,8 @@ class CursesMenu:
         review = None
         while True:
             recovery_clear, recovery = tui_recovery_state(self.t)
+            if not recovery_clear:
+                review = None
             releases, catalogue, lines = snapshot if snapshot is not None else ([], None, [])
             overview = [
                 (self.t('self_upgrade_installed', version=str(installed)), 'section'),
@@ -1294,7 +1296,8 @@ class CursesMenu:
                 actions.append(action)
                 entries.append((self.t(label), style))
 
-            decision = catalogue.decision_for(selected.version) if selected and catalogue is not None else None
+            decision = (review.decision if review is not None else
+                        catalogue.decision_for(selected.version) if selected and catalogue is not None else None)
             if decision is not None:
                 status = release_status(selected, installed, decision)
                 eligible = (selected.version > installed and decision.status == 'compatible')
@@ -1349,7 +1352,8 @@ class CursesMenu:
                     accepted = self._show_lines(title, [(line, '') for line in review_lines(candidate, self.t)],
                                                 self.t('upgrade_review_hint'), allow_quit=True)
                     if (accepted is not False and candidate.decision.status == 'compatible'
-                            and candidate.decision.steps and candidate.target == selected.version):
+                            and candidate.decision.steps and candidate.target == selected.version
+                            and candidate.installed.version == installed):
                         review = candidate
             elif action == 'review_details':
                 self._show_lines(title, [(line, '') for line in review_lines(review, self.t)],
