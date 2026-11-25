@@ -108,3 +108,16 @@ A conservative JSON-based differential reporter is now proposed alongside diff-c
 The two-statement difference from run 45619516786 is isolated to upgrade_process.py lines 90–91, the handler for a disappearing /proc entry. Real process enumeration can encounter this race nondeterministically. New mock-based tests exercise the disappearing-entry and unreadable-entry cases directly without replacing the existing real process-group tests. Validate repeatability before enforcing a no-regression threshold.
 
 The branch-only coverage workflow now also proposes separate PostgreSQL coverage jobs for the same Ubuntu 22.04 and Rocky Linux 9 disposable containers used by the existing CI. They reuse tests/integration/run_postgres.sh and the distribution Python, installing coverage.py 7.10.7 only in the disposable container. Record the interpreter version and keep each report separate: these runs use different Python versions from the unit baseline and their percentages cannot be added or compared directly. They still mock some systemd, audit and Django behavior and do not measure NetBox VM E2E or uninstrumented subprocesses. Validation is pending.
+
+## Follow-up: PostgreSQL results and VM pilot
+
+[Run 45621132425](https://github.com/teixemf/netbox-ops/actions/runs/45621132425) passed all three jobs. Unit run: 823 tests, one skipped, 23.151s, 7,536/9,022 statements (83.53%), 2,704/3,682 branches (73.44%), 80.60% combined. All three new deterministic process scan tests passed; upgrade_process.py reached 86% combined.
+
+| Integration environment | Python | PostgreSQL | Tests | Combined package | backups.py | restore_environment.py |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Ubuntu 22.04 | 3.10.12 | 14.24 | 19 | 7% | 58% | 11% |
+| Rocky Linux 9 | 3.9.25 | 13.23 | 19 | 7% | 58% | 11% |
+
+Both integration jobs passed. Their global package coverage is intentionally low because the tests target backup/restore; do not add the percentages. The distro interpreters are older than the supported application runtime. These results do not prove application compatibility with those interpreters.
+
+A separate branch-only VM pilot measures the installed CLI during the existing baseline services, backup and restore E2E suite. It installs pinned coverage.py in a separate temporary tool venv, adds an opt-in startup hook only to the disposable application's private venv, and exports reports before VM shutdown. The launcher and application source remain unchanged. Reports exclude direct system-Python calls, uninstrumented subprocesses and self-upgrade; instrumentation may affect timing or behavior, so existing uninstrumented E2E remains authoritative. The pilot is deliberately not used with self-upgrade or upgrade scenarios. Its execution is pending. Do not merge temporary branch triggers into the release.

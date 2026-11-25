@@ -153,6 +153,12 @@ elif [[ "$mode" == verify ]]; then
     --exclude=venv --exclude=__pycache__ -czf source.tar.gz .
   attempts=(1 2)
   scenario="${NETBOX_VM_UPGRADE_SCENARIO:-}"
+  if [[ "${NETBOX_VM_COVERAGE:-0}" == 1 ]]; then
+    [[ "${NETBOX_VM_E2E:-0}" == 1 && -z "$scenario" && "${NETBOX_VM_SELF_UPGRADE_E2E:-0}" != 1 ]] || {
+      echo 'Coverage pilot requires the baseline E2E scenario only' >&2
+      exit 2
+    }
+  fi
   if [[ -n "$scenario" ]]; then
     case "$scenario" in
       netbox|plugins|combined|cross-minor|failure) attempts=(1) ;;
@@ -174,7 +180,17 @@ elif [[ "$mode" == verify ]]; then
     elif (( attempt == 1 )); then
       if [[ "${NETBOX_VM_E2E:-0}" == 1 ]]; then
         ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
+        if [[ "${NETBOX_VM_COVERAGE:-0}" == 1 ]]; then
+          ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-coverage.sh setup'
+        fi
         ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-e2e.sh'
+        if [[ "${NETBOX_VM_COVERAGE:-0}" == 1 ]]; then
+          ssh_guest 'sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-coverage.sh collect'
+          mkdir -p "$workdir/coverage-e2e"
+          scp -i "./key-$attempt" -P 2222 -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=./known-$attempt" \
+            'ubuntu@127.0.0.1:/run/netbox-ops-coverage-export/*' "$workdir/coverage-e2e/"
+        fi
       fi
       ssh_guest 'sudo touch /var/tmp/ci-isolation-marker'
     else
