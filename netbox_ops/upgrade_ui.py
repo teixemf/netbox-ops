@@ -173,6 +173,7 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
     """Read-only by default; execution requires the exact displayed fingerprint."""
     import getpass
     import sys
+    from .upgrade_process import UpgradeInterrupted
     try:
         context = discover_context(cfg, releases=args.action != 'plugins')
         if args.action == 'inspect':
@@ -221,7 +222,7 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
         return 0
     except UpgradeExecutionError as exc:
         print(t('upgrade_error', message=str(exc)), file=sys.stderr)
-    except (KeyboardInterrupt, EOFError):
+    except (KeyboardInterrupt, EOFError, UpgradeInterrupted):
         print(t('upgrade_cancelled'), file=sys.stderr)
     except Exception:
         print(t('upgrade_discovery_error'), file=sys.stderr)

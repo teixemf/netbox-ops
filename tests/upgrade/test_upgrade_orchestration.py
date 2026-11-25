@@ -99,6 +99,22 @@ class OrchestrationTests(unittest.TestCase):
                 self.assertNotIn('secret token', str(error.exception))
         self.calls.start_upgrade_writers.assert_not_called()
 
+    def test_interruption_during_stage_retains_recovery(self):
+        self.calls.run_stage.side_effect = KeyboardInterrupt
+        with self.assertRaisesRegex(UpgradeExecutionError, 'interruption requested') as error:
+            self.execute()
+        self.assertIn('pre-upgrade-test', str(error.exception))
+        self.calls.start_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
+
+    def test_interruption_during_health_stops_both_writers(self):
+        self.calls.wait_for_netbox_health.side_effect = KeyboardInterrupt
+        with self.assertRaisesRegex(UpgradeExecutionError, 'writers stopped'):
+            self.execute()
+        self.assertEqual(self.calls.SystemdServices.return_value.stop.call_args_list,
+                         [call(['netbox-rq']), call(['netbox'])])
+        self.calls.finish_maintenance.assert_not_called()
+
     def test_health_failure_reports_recovery_without_secrets(self):
         self.calls.wait_for_netbox_health.side_effect = RuntimeError('secret password')
         with self.assertRaisesRegex(UpgradeExecutionError, 'functional health check') as error:
