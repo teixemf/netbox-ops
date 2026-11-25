@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from netbox_ops.i18n import Translator
 from netbox_ops.tui import (CursesMenu, SECTIONS, make_main_items,
-                            move_selection, safe_text, action_enabled)
+                            move_selection, safe_text, action_enabled, move_action_focus)
 from netbox_ops.services import ServiceState
 
 
@@ -287,6 +287,44 @@ class NewServiceTuiTests(unittest.TestCase):
             menu._manage()
         self.assertFalse(any(e[-1] == curses.A_REVERSE for e in screen.frames[0]))
         systemd.start.assert_not_called()
+
+    def test_service_action_groups_fit_and_preserve_focus(self):
+        for language in ('en', 'pt'):
+            labels = [Translator(language)('action_' + action) for action in
+                      ('start', 'stop', 'restart', 'enable', 'disable')]
+            for width in (40, 54, 90):
+                with self.subTest(language=language, width=width):
+                    positions = CursesMenu._backup_action_positions(
+                        labels, width, separator_before=3)
+                    self.assertEqual(len(positions), len(labels))
+                    for (x, row), label in zip(positions, labels):
+                        self.assertLessEqual(x + len(label) + 2, width)
+                        self.assertGreaterEqual(row, 0)
+                    previous_x, previous_row = positions[2]
+                    startup_x, startup_row = positions[3]
+                    if startup_row == previous_row:
+                        self.assertEqual(startup_x - previous_x - len(labels[2]) - 2, 4)
+                        self.assertEqual(move_action_focus(2, curses.KEY_RIGHT, positions), 3)
+                    else:
+                        self.assertGreater(startup_row, previous_row)
+                    if width == 90:
+                        self.assertEqual(startup_row, previous_row)
+                        self.assertEqual(move_action_focus(3, curses.KEY_LEFT, positions), 2)
+
+    def test_manage_renders_non_selectable_service_separator(self):
+        for language in ('en', 'pt'):
+            with self.subTest(language=language):
+                screen = FakeScreen([27])
+                menu = CursesMenu(screen, Translator(language))
+                systemd = MagicMock()
+                systemd.status.return_value = [self._state('netbox')]
+                with patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
+                     patch('netbox_ops.tui.load_config'):
+                    menu._manage()
+                separators = [entry for entry in screen.frames[0] if entry[2] == '│']
+                self.assertEqual(len(separators), 1)
+                self.assertNotEqual(separators[0][-1], curses.A_REVERSE)
+                systemd.start.assert_not_called()
 
     def test_manage_multi_select_and_action(self):
         # Two service checkboxes and A to choose a single action.

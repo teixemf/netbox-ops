@@ -1306,7 +1306,7 @@ class CursesMenu:
                     h, w = frame
                     split = max(31, min(44, w // 3))
                     labels = [self.t('action_' + action) for action in operations]
-                    positions = self._backup_action_positions(labels, w - 10)
+                    positions = self._backup_action_positions(labels, w - 10, separator_before=3)
                     action_rows = max(row for _, row in positions) + 1
                     # Reserve the service list and operation bar first. On
                     # short terminals the journal preview disappears entirely.
@@ -1359,6 +1359,9 @@ class CursesMenu:
                         self._put(actions_y - 1, 3, '─' * (w - 7), 'muted')
                         self._put(actions_y, 3, self.t('nbo_actions_label'), 'section')
                         targets = [s for s in states if s.name in chosen]
+                        startup_x, startup_row = positions[3]
+                        if startup_row == positions[2][1]:
+                            self._put(actions_y + 1 + startup_row, 2 + startup_x, '│', 'muted')
                         for i, action in enumerate(operations):
                             ax, row = positions[i]
                             enabled = any(action_enabled(action, state) for state in targets)
@@ -1655,12 +1658,22 @@ class CursesMenu:
         return (prefix + summary)[:width]
 
     @staticmethod
-    def _backup_action_positions(labels: Sequence[str], width: int) -> list[tuple[int, int]]:
-        """Lay out one horizontal operation bar, wrapping for narrow SSH terminals."""
+    def _backup_action_positions(labels: Sequence[str], width: int, *,
+                                 separator_before: int | None = None) -> list[tuple[int, int]]:
+        """Lay out actions, reserving a non-selectable gap between groups."""
         positions: list[tuple[int, int]] = []
         x = row = 0
-        for label in labels:
+        for i, label in enumerate(labels):
             length = len(label) + 2
+            if i == separator_before and x > 0:
+                group_width = sum(len(item) + 4 for item in labels[i:]) - 2
+                if x + 2 + length > width or (
+                    group_width <= width and x + 2 + group_width > width
+                ):
+                    row += 1
+                    x = 0
+                else:
+                    x += 2
             if x > 0 and x + length > width:
                 row += 1
                 x = 0
