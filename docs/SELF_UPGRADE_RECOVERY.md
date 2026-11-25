@@ -10,8 +10,8 @@ the handoff fails closed. A Git development checkout is not eligible.
 
 ## Initial upgrade from v0.5.0
 
-The published v0.5.0 does not provide the self-upgrade command. Once a new
-release is published, download and verify its official archive and checksum,
+v0.5.0 does not provide the self-upgrade command. To upgrade to v0.6.0,
+download and verify its official archive and checksum,
 inspect the archive, exit all netbox-ops sessions and confirm that no operation
 or recovery is pending. Back up the current installation, configuration and
 any local files. Move the old `/opt/netbox-ops` directory to a separate safe
