@@ -18,22 +18,22 @@ class MenuNavigationTests(unittest.TestCase):
     def test_all_actions_plus_language_and_exit(self):
         pt = make_main_items(Translator('pt'))
         en = make_main_items(Translator('en'))
-        self.assertEqual(len(pt), 9)
-        self.assertEqual(len(en), 9)
+        self.assertEqual(len(pt), 7)
+        self.assertEqual(len(en), 7)
         self.assertEqual(pt[0][2], ('services', 'manage'))
-        self.assertEqual(pt[6][2], ('self-upgrade', ''))
+        self.assertEqual(pt[3][2], ('upgrade', 'menu'))
+        self.assertEqual(pt[4][2], ('self-upgrade', ''))
         self.assertEqual(pt[-1][1], 'exit')
         self.assertEqual(SECTIONS, {0: 'menu_services', 1: 'menu_backups',
-                                    2: 'menu_updates', 6: 'menu_maintenance'})
+                                    2: 'menu_updates', 4: 'menu_maintenance'})
         self.assertIn('Manage services', en[0][0])
         for items in (pt, en):
             self.assertEqual([item[0].split()[0] for item in items],
-                             ['1', '2', '3', '4', '5', '6', '7', 'L', 'Q'])
+                             ['1', '2', '3', '4', '5', 'L', 'Q'])
 
     def test_numeric_shortcuts_open_main_menu_actions(self):
         for key, method, args in (('1', '_manage', ()), ('2', '_backups', ()),
-                                  ('4', '_upgrade', ('netbox',)), ('5', '_upgrade', ('plugins',)),
-                                  ('6', '_upgrade', ('stack',)), ('7', '_self_upgrade', ())):
+                                  ('4', '_upgrade_menu', ()), ('5', '_self_upgrade', ())):
             with self.subTest(key=key):
                 screen = FakeScreen([ord(key), ord('q')], dimensions=(16, 60))
                 menu = CursesMenu(screen, Translator('en'))

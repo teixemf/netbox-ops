@@ -65,6 +65,8 @@ sudo netbox-ops backup combined
 
 New `combined` backups contain the PostgreSQL database and NetBox media files, not the entire NetBox installation. The CLI also supports separate `db` and `media` backups. Older `full` archives remain listed, verifiable, and restorable without conversion; new combined archives use the `.combined.tar.gz` extension and `kind=combined` metadata. Historical archives keep their original `.full.tar.gz` filename and `kind=full` metadata. Use `backup verify --kind full --file PATH` or `restore full --file PATH` for an older archive. Both `restore full` and `restore combined` support `--only db`, `--only media`, or `--only all`. Restores still require the existing safety checks and explicit confirmations.
 
+In the TUI main menu, select `4` (Upgrade NetBox) to choose NetBox-only, plugin-only or combined upgrades. Use `1`–`3` or the arrow keys and Enter in the submenu; Esc returns to the main menu. Select `5` for netbox-ops self-upgrade. The CLI commands and text-mode menu are unchanged.
+
 In the TUI Backups screen, use the arrow keys to preview a backup, Space to mark it, and Tab to focus the operations. Press `I` to read the full filename and details on a narrow terminal without changing marks or executing an operation.
 
 Review `config.example.json` and the configuration stored under `/etc/netbox-ops` before performing operations. Backups are stored under `/var/lib/netbox-ops/backups` by default.
