@@ -18,12 +18,12 @@ from . import __version__
 from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
 from .journal import JournalPanel, JournalViewport
-from .menu import MENU_ACTIONS
+from .menu import TUI_MENU_ACTIONS, UPGRADE_ACTIONS
 from .services import (ServiceError, ServiceState, SystemdServices, ServiceVersionCache,
                        challenge, order_services, perform_service_batch)
 
 SECTIONS = {0: 'menu_services', 1: 'menu_backups', 2: 'menu_updates',
-            6: 'menu_maintenance'}
+            4: 'menu_maintenance'}
 LOG_COUNTS = (10, 20, 50, 100, 200, 500)
 ACTIONS = ('start', 'stop', 'restart', 'enable', 'disable')
 
@@ -31,7 +31,7 @@ ACTIONS = ('start', 'stop', 'restart', 'enable', 'disable')
 def make_main_items(t: Translator) -> list[tuple[str, str, tuple[str, ...]]]:
     """One source of truth for the menu labels and CLI commands."""
     items = [(f'{number}  {t(key)}', 'action', (group, action))
-             for number, group, action, key in MENU_ACTIONS]
+             for number, group, action, key in TUI_MENU_ACTIONS]
     items.append((f'L   {t("tui_language")}', 'language', ()))
     items.append((f'Q  {t("tui_exit")}', 'exit', ()))
     return items
@@ -269,7 +269,8 @@ class CursesMenu:
 
     def _choose(self, title: str, entries: Sequence[tuple[str, str]],
                 hint: str, index: int = 0, headings: dict[int, str] | None = None,
-                allow_language_key: bool = False, main_menu: bool = False) -> int | None | str:
+                allow_language_key: bool = False, main_menu: bool = False,
+                numeric_shortcuts: bool = False, escape_clears_selection: bool = True) -> int | None | str:
         """No initial highlight; Esc disarms selection before leaving submenu."""
         headings = headings or {}
         if not entries:
@@ -308,7 +309,7 @@ class CursesMenu:
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key == 27:
-                if armed:
+                if armed and escape_clears_selection:
                     armed = False
                     continue
                 if not main_menu:
@@ -324,6 +325,10 @@ class CursesMenu:
                 return 'language'
             if not frame:
                 continue
+            if numeric_shortcuts and ord('1') <= key <= ord('9'):
+                choice = key - ord('1')
+                if choice < len(entries):
+                    return choice
             if key in (10, 13, curses.KEY_ENTER):
                 if armed:
                     return index
@@ -823,7 +828,7 @@ class CursesMenu:
                     for idx, (text, _, _) in enumerate(items):
                         row = 4 + idx
                         if h >= 20:
-                            row += 1 + (1 if idx >= 2 else 0) + (2 if idx >= 6 else 0)
+                            row += 1 + (1 if idx >= 2 else 0) + (2 if idx >= 4 else 0)
                         if cursor == idx:
                             self._put(row, 3, ' ' * (split - 5), 'selected')
                         self._put(row, 4, text[:split-7], 'selected' if cursor == idx else '')
@@ -894,9 +899,9 @@ class CursesMenu:
                         cursor = len(items)-1 if key in (curses.KEY_UP, ord('k')) else 0
                     else:
                         cursor = move_selection(cursor, key, len(items))
-                elif (ord('1') <= key <= ord('7') or
+                elif (ord('1') <= key < ord('1') + len(TUI_MENU_ACTIONS) or
                       (key in (10, 13, curses.KEY_ENTER) and cursor is not None)):
-                    if ord('1') <= key <= ord('7'):
+                    if ord('1') <= key < ord('1') + len(TUI_MENU_ACTIONS):
                         cursor = key - ord('1')
                     _, kind, data = items[cursor]
                     if kind == 'exit':
@@ -911,9 +916,9 @@ class CursesMenu:
                         result = self._self_upgrade()
                         if result is not None:
                             return result
-                    elif data[0] == 'upgrade':
+                    elif data == ('upgrade', 'menu'):
                         self.stdscr.timeout(-1)
-                        self._upgrade(data[1])
+                        self._upgrade_menu()
                     elif data == ('backup', 'manage'):
                         self.stdscr.timeout(-1)
                         self._backups()
@@ -927,6 +932,19 @@ class CursesMenu:
                     cursor = None
         finally:
             self.stdscr.timeout(-1)
+
+    def _upgrade_menu(self) -> None:
+        """Group NetBox upgrade modes without changing their execution paths."""
+        entries = [(f'{i}  {self.t(label)}', '')
+                   for i, (_, label) in enumerate(UPGRADE_ACTIONS, 1)]
+        while True:
+            choice = self._choose(
+                self.t('menu_10'), entries, self.t('upgrade_submenu_hint'),
+                numeric_shortcuts=True, escape_clears_selection=False,
+            )
+            if not isinstance(choice, int):
+                return
+            self._upgrade(UPGRADE_ACTIONS[choice][0])
 
     def _upgrade_input(self, title: str, prompt: str, *, initial: str = '',
                        secret: bool = False) -> str | None:
