@@ -81,6 +81,7 @@ class DependencyPreflight:
     status: str  # passed, blocked, unknown
     detail: str
     checked_core: bool = False
+    packages: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -415,14 +416,15 @@ def assess_upgrade_stages(package: str, version: str, netbox_steps: Sequence[str
 
 def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequence[str],
                                   python_version: str, *, runner: Callable = subprocess.run,
-                                  interpreter: Path | None = None) -> DependencyPreflight:
+                                  interpreter: Path | None = None,
+                                  wheelhouse: Path | None = None) -> DependencyPreflight:
     """Use pip's dry-run wheel-only resolver; no installation or builds.
 
     A caller must supply vetted target NetBox core pins and every plugin pin
     for a meaningful full conflict check; missing core pins never confirms it.
     """
     pins = tuple(plugin_pins) + tuple(core_pins)
-    if not plugin_pins or not all(isinstance(p, str) and _PIN.fullmatch(p) for p in pins):
+    if not pins or not all(isinstance(p, str) and _PIN.fullmatch(p) for p in pins):
         raise CompatibilityError('Resolver accepts only exact safe package pins')
     match = re.fullmatch(r'(\d+)\.(\d+)(?:\.\d+)?', python_version)
     if match is None:
@@ -433,10 +435,11 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
     env.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR='1', PYTHONNOUSERSITE='1')
     with tempfile.TemporaryDirectory(prefix='netbox-ops-resolver-') as temp:
         report = Path(temp) / 'report.json'
+        index = ['--no-index', '--find-links', str(wheelhouse)] if wheelhouse is not None else ['--index-url', PYPI_INDEX]
         command = [executable, '-I', '-m', 'pip', '--isolated', 'install', '--dry-run',
                    '--ignore-installed', '--only-binary=:all:', '--no-input',
                    '--no-cache-dir', '--disable-pip-version-check', '--quiet',
-                   '--timeout', '8', '--retries', '0', '--index-url', PYPI_INDEX,
+                   '--timeout', '8', '--retries', '0', *index,
                    '--python-version', python_version,
                    '--report', str(report), *pins]
         try:
@@ -450,14 +453,33 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
                 return DependencyPreflight('blocked', 'pip confirmed conflicting Python dependencies', bool(core_pins))
             return DependencyPreflight('unknown', 'pip could not complete a wheel-only dependency check')
         try:
-            parsed = json.loads(report.read_text(encoding='utf-8'))
+            with report.open('rb') as stream:
+                raw = stream.read(_MAX_JSON_BYTES + 1)
+            if len(raw) > _MAX_JSON_BYTES:
+                raise ValueError
+            parsed = json.loads(raw)
             if not isinstance(parsed, dict) or not isinstance(parsed.get('install'), list):
-                raise ValueError('Invalid resolver report')
-        except (OSError, UnicodeError, ValueError):
+                raise ValueError
+            packages = {}
+            for entry in parsed['install']:
+                metadata = entry['metadata']
+                name, version = metadata['name'], metadata['version']
+                if not isinstance(name, str) or not isinstance(version, str) or not _PIN.fullmatch(f'{name}=={version}'):
+                    raise ValueError
+                key = normalize_name(name)
+                if key in packages:
+                    raise ValueError
+                packages[key] = version
+            for pin in pins:
+                name, version = pin.split('==', 1)
+                if packages.get(normalize_name(name.split('[', 1)[0])) != version:
+                    raise ValueError
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
             return DependencyPreflight('unknown', 'No valid isolated resolver report')
         if not core_pins:
             return DependencyPreflight('unknown', 'Resolver ran without NetBox core dependency pins')
-        return DependencyPreflight('passed', 'Wheel-only dependency resolution completed', checked_core=True)
+        return DependencyPreflight('passed', 'Wheel-only dependency resolution completed',
+                                   checked_core=True, packages=tuple(sorted(packages.items())))
 
 
 def parse_compatibility_document(markdown: str, plugin_version: str, source: str,

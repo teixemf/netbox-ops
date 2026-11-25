@@ -19,6 +19,7 @@ from .plugin_compatibility import (
 from .plugin_inventory import inventory_plugins, normalize_name
 from .plugin_upgrade import (
     PluginUpgrade, _apply_requirements, _command, prepare_plugin_upgrade, read_plugin_registry,
+    additional_dependency_pins, bind_reviewed_dependencies, verify_reviewed_resolution,
 )
 from .restore_environment import netbox_runtime
 from .services import SystemdServices
@@ -28,7 +29,7 @@ from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
 from .upgrade_git import PinnedStage
 from .upgrade_plan import UpgradePlan, UpgradeStage
 from .upgrade_recovery import _read_config
-from .upgrade_runtime import upgrade_environment
+from .upgrade_runtime import upgrade_environment, probe_ltree
 from .upgrade_services import require_quiesced_writers
 from .upgrade_stage import run_stage
 
@@ -111,9 +112,10 @@ def _check_servers(cfg: Configuration, live: GitNetBoxInstallation, planned: Upg
 
 
 def _resolve(pins: PluginUpgrade, live: GitNetBoxInstallation,
-             approval: ExecutionApproval, resolver: Callable) -> DependencyPreflight:
+             approval: ExecutionApproval, resolver: Callable, *, wheelhouse: Path | None = None) -> DependencyPreflight:
+    options = {'wheelhouse': wheelhouse} if wheelhouse is not None else {}
     result = resolver(pins.local_pins, pins.core_pins, live.python_version,
-                      interpreter=live.python)
+                      interpreter=live.python, **options)
     if result.status == 'blocked':
         raise UpgradeExecutionError('Combined stage has conflicting Python dependencies')
     if (result.status != 'passed' or not result.checked_core) and not approval.approved_unknowns:
@@ -146,7 +148,7 @@ def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
         '--only-binary=:all:', *source_options, '--no-input', '--disable-pip-version-check',
         '--no-cache-dir', '--index-url', PYPI_INDEX, '--wheel-dir', str(directory),
         '--timeout', '20', '--retries', '2',
-        'pip', 'wheel', *pins.core_pins, *pins.local_pins,
+        'pip', 'wheel', *pins.core_pins, *pins.local_pins, *additional_dependency_pins(pins),
     ]
     try:
         result = runner(command, cwd=directory, env=env, stdin=subprocess.DEVNULL,
@@ -178,15 +180,27 @@ def prepare_combined_stages(
         fetch(live.root, pinned)
         core = git(live.root, ['show', pinned.commit + ':requirements.txt']).encode('utf-8')
         pins = prepare_plugin_upgrade(plan, local, core, stage_index=index)
-        resolved = _resolve(pins, live, approval, resolver)
+        pins = bind_reviewed_dependencies(plan, index, pinned.commit, core, pins)
+        wheelhouse = wheel_root / f'stage-{index + 1}'
+        if plan.dependency_reviews:
+            if tuple(map(int, planned.netbox_version.split('.')[:2])) >= (4, 7):
+                if probe_ltree(cfg, live) != plan.dependency_reviews[index].ltree:
+                    raise UpgradeExecutionError('PostgreSQL ltree prerequisites changed after approval')
+            download(pins, live, wheelhouse)
+            resolved = _resolve(pins, live, approval, resolver, wheelhouse=wheelhouse)
+            verify_reviewed_resolution(plan, index, resolved)
+            if resolved.status != 'passed' or not resolved.checked_core:
+                raise UpgradeExecutionError('Cannot verify prepared upgrade wheels before maintenance')
+        else:
+            # Lower-level callers retain the full preflight before wheel preparation.
+            resolved = _resolve(pins, live, approval, resolver)
+            download(pins, live, wheelhouse)
         prior_passed = any(
             stage_version == planned.netbox_version and item.status == 'passed' and item.checked_core
             for _, stage_version, item in plan.source.preflights
         )
         if prior_passed and (resolved.status != 'passed' or not resolved.checked_core):
             raise UpgradeExecutionError('Approved combined dependency verification became uncertain')
-        wheelhouse = wheel_root / f'stage-{index + 1}'
-        download(pins, live, wheelhouse)
         prepared.append(CombinedStage(pinned, core, pins, resolved, wheelhouse))
     return tuple(prepared)
 
@@ -199,7 +213,9 @@ def recheck_combined_stage(
 ) -> None:
     """Reject new conflicts or uncertainty immediately before each checkout."""
     _check_servers(cfg, live, planned, approval, probe=probe)
-    result = _resolve(prepared.pins, live, approval, resolver)
+    result = _resolve(prepared.pins, live, approval, resolver, wheelhouse=prepared.wheelhouse)
+    if prepared.resolution.packages and result.packages != prepared.resolution.packages:
+        raise UpgradeExecutionError('Prepared stage dependency versions changed')
     if (prepared.resolution.status == 'passed' and prepared.resolution.checked_core
             and (result.status != 'passed' or not result.checked_core)):
         raise UpgradeExecutionError('Combined stage dependency verification became uncertain')

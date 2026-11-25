@@ -146,7 +146,8 @@ class CompatibilityTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append((command, kwargs))
             report = Path(command[command.index('--report') + 1])
-            report.write_text(json.dumps({'install': []}))
+            report.write_text(json.dumps({'install': [{'metadata': {'name': name, 'version': version}}
+                for name, version in [('netbox-plugin-demo', '2.0.0'), ('django', '5.2.1'), ('psycopg', '3.2.10')]]}))
             return subprocess.CompletedProcess(command, 0, '', '')
 
         result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'],
@@ -164,7 +165,8 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_resolver_without_core_is_unknown(self):
         def run(command, **kwargs):
-            Path(command[command.index('--report') + 1]).write_text('{"install": []}')
+            Path(command[command.index('--report') + 1]).write_text(json.dumps({'install': [
+                {'metadata': {'name': 'netbox-plugin-demo', 'version': '2.0.0'}}]}))
             return subprocess.CompletedProcess(command, 0, '', '')
         result = isolated_dependency_preflight(['netbox-plugin-demo==2.0.0'], [], '3.12', runner=run)
         self.assertEqual(result.status, 'unknown')

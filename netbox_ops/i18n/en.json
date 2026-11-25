@@ -359,5 +359,15 @@
   "self_upgrade_submitted": "Upgrade submitted. Run sudo netbox-ops self-upgrade status to check the result. If interrupted, use sudo /opt/.netbox-ops-handoff/recover.",
   "self_upgrade_text_help": "Enter show VERSION, plan VERSION, install VERSION, status, or press Enter to return.",
   "self_upgrade_status_menu": "Last self-upgrade result",
-  "self_upgrade_install_menu": "Review and install this release"
+  "self_upgrade_install_menu": "Review and install this release",
+  "upgrade_dependency_status": "NetBox {version} dependencies: {status}",
+  "upgrade_dependency_passed": "resolved",
+  "upgrade_dependency_blocked": "conflict",
+  "upgrade_dependency_unknown": "uncertain",
+  "upgrade_ltree_status": "PostgreSQL ltree: {status}",
+  "upgrade_ltree_installed": "installed and usable",
+  "upgrade_ltree_available": "available with CREATE privileges",
+  "upgrade_ltree_missing": "extension unavailable",
+  "upgrade_ltree_permission": "insufficient privileges",
+  "upgrade_ltree_unknown": "unverified"
 }
