@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from netbox_ops.plugin_inventory import (
-    PluginInventoryError, apply_approved_pins, inventory_plugins,
+    PluginInventoryError, apply_approved_pins, configured_plugin_packages, inventory_plugins,
 )
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
 
@@ -46,6 +46,30 @@ class PluginInventoryTests(unittest.TestCase):
         self.assertEqual(result.requirements[1].kind, 'ambiguous')
         self.assertEqual(len(result.proposals), 1)
         self.assertEqual(result.proposals[0].after, 'sample-plugin==2.4.1  # keep this comment\n')
+
+    def test_wheel_record_identifies_plugin_without_top_level_metadata(self):
+        directory = self.root / 'venv/lib/python3.12/site-packages/sample-plugin-2.4.1.dist-info'
+        (directory / 'top_level.txt').unlink()
+        (directory / 'RECORD').write_text(
+            'sample_plugin/__init__.py,,\n../../../bin/sample_plugin,,\n')
+        result = self.inventory()
+        self.assertEqual(configured_plugin_packages(result), (('sample-plugin', '2.4.1'),))
+        self.assertEqual(len(result.proposals), 1)
+
+    def test_matching_name_without_module_metadata_is_not_evidence(self):
+        directory = self.root / 'venv/lib/python3.12/site-packages/sample-plugin-2.4.1.dist-info'
+        (directory / 'top_level.txt').unlink()
+        result = self.inventory()
+        self.assertEqual(configured_plugin_packages(result), ())
+        self.assertEqual(result.proposals, ())
+        self.assertTrue(result.warnings)
+
+    def test_ambiguous_module_ownership_is_not_eligible(self):
+        self.add_package('another-package', '1.0.0', 'sample_plugin')
+        result = self.inventory()
+        self.assertEqual(configured_plugin_packages(result), ())
+        self.assertEqual(result.proposals, ())
+        self.assertTrue(result.warnings)
 
     def test_comments_options_and_others_are_unchanged(self):
         text = '# header\n--extra-index-url https://example.invalid/simple\n-r extra.txt\nsample-plugin # plugin\nother>=2\n'
