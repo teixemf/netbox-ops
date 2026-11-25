@@ -27,6 +27,10 @@ class ManagedProcessError(Exception):
     """A command left live descendants after its leader exited."""
 
 
+class ManagedOutputError(Exception):
+    """Captured output exceeded the safety limit; no output is exposed."""
+
+
 @dataclass
 class Cancellation:
     requested: bool = False
@@ -36,6 +40,7 @@ _cancellation: ContextVar[Cancellation | None] = ContextVar('upgrade_cancellatio
 _POLL = 0.05
 _TERM_GRACE = 2.0
 _KILL_GRACE = 3.0
+_MAX_CAPTURE_BYTES = 4 * 1024 * 1024
 
 
 @contextmanager
@@ -153,12 +158,16 @@ def run_managed(command, *, timeout, check=False, capture_output=False,
             deadline = time.monotonic() + timeout
             while True:
                 check_cancelled()
+                if any(os.fstat(stream.fileno()).st_size > _MAX_CAPTURE_BYTES for stream in captures.values()):
+                    raise ManagedOutputError('Upgrade command output exceeds safety limit')
                 # WNOWAIT reserves the leader PID/PGID until cleanup finishes.
                 if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
                     break
                 if time.monotonic() >= deadline:
                     raise subprocess.TimeoutExpired(command, timeout)
                 time.sleep(_POLL)
+            if any(os.fstat(stream.fileno()).st_size > _MAX_CAPTURE_BYTES for stream in captures.values()):
+                raise ManagedOutputError('Upgrade command output exceeds safety limit')
             if _group_active(process.pid):
                 raise ManagedProcessError('Upgrade command left active descendants')
             # Close the scan/fork race even on successful leader exit.
@@ -176,7 +185,9 @@ def run_managed(command, *, timeout, check=False, capture_output=False,
         output = {}
         for name, stream in captures.items():
             stream.seek(0)
-            value = stream.read()
+            value = stream.read(_MAX_CAPTURE_BYTES + 1)
+            if len(value) > _MAX_CAPTURE_BYTES:
+                raise ManagedOutputError('Upgrade command output exceeds safety limit')
             if text or encoding or errors:
                 value = value.decode(encoding or locale.getpreferredencoding(False), errors or 'strict')
                 value = value.replace('\r\n', '\n').replace('\r', '\n')

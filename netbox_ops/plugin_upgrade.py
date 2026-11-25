@@ -16,6 +16,7 @@ from .plugin_compatibility import PYPI_INDEX, isolated_dependency_preflight
 from .plugin_inventory import inventory_plugins, normalize_name
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
+from .upgrade_diagnostics import run_checked
 from .upgrade_process import run_managed
 from .upgrade_plan import UpgradePlan
 from .upgrade_recovery import _read_config
@@ -261,14 +262,10 @@ def _apply_requirements(root: Path, prepared: PluginUpgrade) -> None:
 
 def _command(command: list[str], root: Path, env: dict[str, str], label: str,
              runner: Callable, timeout: int = 600, *, output: bool = False) -> str:
-    try:
-        result = runner(command, cwd=root, env=env, stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE if output else subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL, text=True, check=False, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        raise UpgradeExecutionError(f'Plugin {label} unavailable or timed out') from None
-    if result.returncode:
-        raise UpgradeExecutionError(f'Plugin {label} failed') from None
+    result = run_checked('plugin.' + label, command, runner=runner, timeout=timeout,
+                         cwd=root, env=env, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE if output else subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, text=True)
     return result.stdout if output else ''
 
 
