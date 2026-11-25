@@ -206,9 +206,18 @@ def _record_modules(path: Path) -> tuple[str, ...]:
             parts = row[0].split('/')
             if not all(parts) or any(part in ('.', '..') for part in parts):
                 continue
-            if not parts[-1].endswith(('.py', '.so')):
+            # A directory containing arbitrary Python data is not proof of
+            # importable ownership. Require a package initializer or a module.
+            if len(parts) == 2 and parts[1] == '__init__.py':
+                top = parts[0]
+            elif len(parts) == 1 and parts[0].endswith('.py'):
+                top = parts[0][:-3]
+            elif len(parts) == 1 and re.fullmatch(
+                r'[A-Za-z_][A-Za-z0-9_]*(?:\.(?:cpython-[A-Za-z0-9_-]+|abi3))?\.so', parts[0]
+            ):
+                top = parts[0].split('.')[0]
+            else:
                 continue
-            top = parts[0] if len(parts) > 1 else parts[0].split('.')[0]
             if top.isidentifier():
                 modules.add(top)
         return tuple(sorted(modules))
