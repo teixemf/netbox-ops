@@ -270,7 +270,8 @@ class CursesMenu:
     def _choose(self, title: str, entries: Sequence[tuple[str, str]],
                 hint: str, index: int = 0, headings: dict[int, str] | None = None,
                 allow_language_key: bool = False, main_menu: bool = False,
-                numeric_shortcuts: bool = False, escape_clears_selection: bool = True) -> int | None | str:
+                numeric_shortcuts: bool = False, escape_clears_selection: bool = True,
+                overview: Sequence[tuple[str, str]] = ()) -> int | None | str:
         """No initial highlight; Esc disarms selection before leaving submenu."""
         headings = headings or {}
         if not entries:
@@ -290,14 +291,26 @@ class CursesMenu:
         while True:
             frame = self._frame(title, self._quit_hint(hint))
             if frame:
-                h, _ = frame
-                rows_visible = h - 6
+                h, w = frame
+                start = 3
+                if overview:
+                    limit = min(6, max(3, (h - 7) // 3))
+                    shown = list(overview[:limit])
+                    if len(overview) > limit:
+                        shown[-1] = (self.t('upgrade_overview_more'), 'muted')
+                    for y, (label, style) in enumerate(shown, start):
+                        self._put(y, 3, safe_text(label)[:w - 6], style)
+                    start += len(shown)
+                    self._put(start, 3, '─' * (w - 7), 'muted')
+                    start += 1
+                rows_visible = max(1, h - start - 3)
+                scroll = min(scroll, max(0, len(lines) - rows_visible))
                 target = select_to_row[index] if armed else 0
                 if target < scroll:
                     scroll = target
                 elif target >= scroll + rows_visible:
                     scroll = target - rows_visible + 1
-                for y, (item_idx, label, style) in enumerate(lines[scroll:scroll + rows_visible], 3):
+                for y, (item_idx, label, style) in enumerate(lines[scroll:scroll + rows_visible], start):
                     if armed and item_idx == index:
                         self._put(y, 3, '  ' + label + '  ', 'selected')
                     elif item_idx is None:
@@ -999,9 +1012,10 @@ class CursesMenu:
         """Edit a shared plan and require explicit confirmation before execution."""
         from .upgrade_ui import discover_context, make_plan, summary_lines, execute_plan, alternative_release_choices
         from .upgrade_execution import UpgradeExecutionError
+        from .upgrade_tui import netbox_overview
 
         title = self.t({'netbox': 'menu_10', 'plugins': 'menu_11', 'stack': 'menu_12'}[operation])
-        hint = self.t('tui_back_hint')
+        hint = self.t('upgrade_overview_hint')
         try:
             cfg = load_config(self.config_path)
             context = self._upgrade_job(title, lambda _: discover_context(cfg, releases=operation != 'plugins'))
@@ -1022,11 +1036,21 @@ class CursesMenu:
                 entries.append((self.t('upgrade_preview'), ''))
                 actions.append('preview')
                 if plan is not None:
-                    entries.extend(((self.t('upgrade_details'), ''), (self.t('upgrade_execute'), '')))
-                    actions.extend(('details', 'execute'))
+                    entries.append((self.t('upgrade_details'), ''))
+                    actions.append('details')
+                    if plan.can_execute:
+                        entries.append((self.t('upgrade_execute'), 'warning'))
+                        actions.append('execute')
                 entries.append((self.t('upgrade_pins'), ''))
                 actions.append('pins')
-                choice = self._choose(title, entries, hint)
+                if plan is None:
+                    entries.append((self.t('upgrade_overview_details'), ''))
+                    actions.append('details')
+                entries.append((self.t('upgrade_refresh'), ''))
+                actions.append('refresh')
+                overview = netbox_overview(context, target, selected, plan, self.t, operation=operation)
+                choice = self._choose(title, entries, hint, overview=overview,
+                                      escape_clears_selection=False)
                 if not isinstance(choice, int):
                     return
                 action = actions[choice]
@@ -1035,6 +1059,17 @@ class CursesMenu:
                     if isinstance(choice, int):
                         target = context.targets[choice]
                         plan = None
+                elif action == 'refresh':
+                    plan = None
+                    refreshed = self._upgrade_job(title, lambda _: discover_context(
+                        cfg, releases=operation != 'plugins'))
+                    if refreshed is None:
+                        # Do not keep a stale catalogue or executable review.
+                        return
+                    context = refreshed
+                    if target not in context.targets:
+                        target = None
+                    selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
                 elif action == 'pins':
                     if self._review_plugin_pins(title, context.inventory):
                         plan = None
@@ -1042,6 +1077,8 @@ class CursesMenu:
                         if context is None:
                             return
                         selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
+                        if target not in context.targets:
+                            target = None
                     continue
                 elif action == 'plugins':
                     if context.plugin_selection_incomplete:
@@ -1087,17 +1124,22 @@ class CursesMenu:
                                         selected[name] = choices[candidates].version
                         plan = None
                 elif action == 'preview':
+                    plan = None
                     plan = self._upgrade_job(title, lambda _: make_plan(context, operation, target, selected))
-                    if plan is not None:
-                        self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)], allow_quit=True)
                 elif action == 'details':
-                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t, details=True)], allow_quit=True)
+                    details = overview if plan is None else [
+                        *overview, (self.t('upgrade_details'), 'section'),
+                        *((line, '') for line in summary_lines(plan, self.t, details=True)),
+                    ]
+                    self._show_lines(title, details, allow_quit=True)
                 elif action == 'execute':
                     if not plan.can_execute:
                         self._show_lines(title, [(self.t('upgrade_blocked'), 'failure')])
                         continue
-                    # Display the exact plan again immediately before approval.
-                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)], allow_quit=True)
+                    # Display the full exact plan, including recovery safeguards,
+                    # again immediately before approval.
+                    self._show_lines(title, [(line, '') for line in summary_lines(
+                        plan, self.t, details=True)], allow_quit=True)
                     url = self._upgrade_input(title, self.t('upgrade_url_prompt'))
                     if not url:
                         continue
