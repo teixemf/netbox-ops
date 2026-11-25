@@ -7,14 +7,10 @@ on:
     paths:
       - '.github/workflows/vm-netbox-upgrades.yml'
       - 'netbox_ops/__init__.py'
+      - '.github/workflows/ci-scope.yml'
+      - 'scripts/ci/test_scope.py'
   pull_request:
     branches: [dev]
-    paths:
-      - '.github/workflows/vm-netbox-upgrades.yml'
-      - 'scripts/ci/netbox-vm-*.sh'
-      - 'scripts/ci/netbox-vm-baseline.env'
-      - 'netbox_ops/**'
-      - 'install.sh'
   workflow_dispatch:
 
 concurrency:
@@ -25,7 +21,12 @@ permissions:
   contents: read
 
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   verify:
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.netbox != 'false') }}
     name: Upgrade / ${{ matrix.scenario }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
