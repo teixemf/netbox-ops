@@ -134,6 +134,27 @@ class PluginUpgradeTests(_PluginFixture):
         self.assertIn('tomli-w==1.2.0', prepared.local_pins)
         self.assertEqual(dict(prepared.expected)['tomli-w'], '1.2.0')
 
+    def test_identical_core_pin_is_retained_in_plugin_only_upgrade(self):
+        raw = LOCAL + b'dJango==5.2.6 # local reason\r\n'
+        inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest())
+        plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+        pins = self.prepare(plan, local=raw)
+        self.assertTrue(pins.requirements.endswith(b'dJango==5.2.6 # local reason\r\n'))
+        self.assertIn('dJango==5.2.6', pins.local_pins)
+        self.assertEqual(dict(pins.expected)['django'], '5.2.6')
+        self.assertEqual(pins.overlaps[0].status, 'redundant')
+
+    def test_conflicting_or_ambiguous_core_pin_never_prepares(self):
+        for pin, status in ((b'django==5.2.5', 'conflict'),
+                            (b'django[extra]==5.2.6', 'ambiguous'),
+                            (b'django', 'ambiguous')):
+            with self.subTest(pin=pin):
+                raw = LOCAL + pin + b'\r\n'
+                inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest())
+                plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+                with self.assertRaisesRegex(UpgradeExecutionError, 'django: local .*core Django==5.2.6.*' + status):
+                    self.prepare(plan, local=raw)
+
     def test_core_versions_must_match_installed_release(self):
         with self.assertRaises(UpgradeExecutionError):
             self.prepare(core=b'Django==5.2.7\n')
