@@ -88,3 +88,24 @@ class TestScope(unittest.TestCase):
             self.assertIn('--no-renames', git.call_args.args[0])
         with self.assertRaises(ValueError):
             scope.changed_paths('0' * 40)
+
+    def test_new_modules_with_known_prefixes_default_to_full(self):
+        for path in ('netbox_ops/upgrade_new.py', 'netbox_ops/plugin_new.py',
+                     'netbox_ops/self_upgrade_new.py'):
+            with self.subTest(path=path):
+                self.assertEqual(scope.file_scope(path), scope.ALL)
+
+    def test_shared_english_translation_runtime_runs_vm_suites(self):
+        for path in ('netbox_ops/i18n.py', 'netbox_ops/i18n/en.json'):
+            with self.subTest(path=path):
+                self.assertEqual(scope.file_scope(path), scope.VMS | {'unit'})
+        self.assertEqual(scope.file_scope('netbox_ops/i18n/pt.json'), {'unit'})
+
+    def test_explanation_includes_each_changed_path(self):
+        paths = ['docs/NETBOX_UPGRADE.md', 'netbox_ops/upgrade_plan.py']
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            self.assertEqual(scope.explain_selection(paths), {'unit', 'netbox'})
+        self.assertIn("Changed path 'docs/NETBOX_UPGRADE.md': lightweight checks only",
+                      output.getvalue())
+        self.assertIn("Changed path 'netbox_ops/upgrade_plan.py': netbox, unit",
+                      output.getvalue())

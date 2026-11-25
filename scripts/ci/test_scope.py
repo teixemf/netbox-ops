@@ -26,6 +26,25 @@ SHARED_VM = frozenset({
     'scripts/ci/netbox-vm-baseline.env',
 })
 
+# Enumerate reviewed modules rather than trusting prefixes for future modules.
+# Shared modules are classified separately below. New modules default to ALL.
+SELF_UPGRADE_MODULES = frozenset({
+    'self_upgrade_archive', 'self_upgrade_catalogue', 'self_upgrade_compatibility',
+    'self_upgrade_download', 'self_upgrade_handoff', 'self_upgrade_helper',
+    'self_upgrade_installation', 'self_upgrade_manifest', 'self_upgrade_prepare',
+    'self_upgrade_releases', 'self_upgrade_result', 'self_upgrade_runtime',
+    'self_upgrade_stage', 'self_upgrade_transaction', 'self_upgrade_ui',
+})
+NETBOX_UPGRADE_MODULES = frozenset({
+    'plugin_compatibility', 'plugin_inventory', 'plugin_pin_ui', 'plugin_upgrade',
+    'upgrade_checkout', 'upgrade_combined', 'upgrade_diagnostics',
+    'upgrade_discovery', 'upgrade_execution', 'upgrade_git', 'upgrade_health',
+    'upgrade_orchestration', 'upgrade_plan', 'upgrade_preflight', 'upgrade_process',
+    'upgrade_runtime', 'upgrade_services', 'upgrade_stage', 'upgrade_ui',
+})
+SELF_UPGRADE_PATHS = frozenset(f'netbox_ops/{name}.py' for name in SELF_UPGRADE_MODULES)
+NETBOX_UPGRADE_PATHS = frozenset(f'netbox_ops/{name}.py' for name in NETBOX_UPGRADE_MODULES)
+
 
 def file_scope(path: str) -> frozenset[str]:
     if path in {'README.md', 'CONTRIBUTING.md'} or (
@@ -60,19 +79,21 @@ def file_scope(path: str) -> frozenset[str]:
     if path in {'scripts/build-release.sh', 'scripts/release-candidate.py',
                 'netbox_ops/release_requirements.json', 'upgrade.sh', 'uninstall.sh',
                 'netbox_ops/uninstall.py'} or (
-        path.startswith('netbox_ops/self_upgrade_') and path.endswith('.py')
+        path in SELF_UPGRADE_PATHS
     ):
         return frozenset({'unit', 'package', 'self_upgrade'})
     if path == 'netbox_ops/logrotate_policy.py':
         return VMS | {'unit', 'package'}
     if path in {'netbox_ops/backups.py', 'netbox_ops/restore_environment.py'}:
         return frozenset({'unit', 'postgres', 'netbox', 'baseline'})
-    if path.startswith(('netbox_ops/upgrade_', 'netbox_ops/plugin_')) and path.endswith('.py'):
+    if path in NETBOX_UPGRADE_PATHS:
         return frozenset({'unit', 'netbox'})
     if path in {'netbox_ops/cli.py', 'netbox_ops/tui.py', 'netbox_ops/menu.py'}:
         return VMS | {'unit'}
-    if path in {'netbox_ops/i18n.py', 'netbox_ops/journal.py',
-                'netbox_ops/i18n/en.json', 'netbox_ops/i18n/pt.json'}:
+    # The English CLI and translation runtime are exercised by all VM suites.
+    if path in {'netbox_ops/i18n.py', 'netbox_ops/i18n/en.json'}:
+        return VMS | {'unit'}
+    if path in {'netbox_ops/journal.py', 'netbox_ops/i18n/pt.json'}:
         return frozenset({'unit'})
     # New or unclassified files must never silently reduce coverage.
     return ALL
@@ -80,6 +101,16 @@ def file_scope(path: str) -> frozenset[str]:
 
 def select(paths: list[str]) -> frozenset[str]:
     return frozenset().union(*(file_scope(path) for path in paths))
+
+
+def explain_selection(paths: list[str]) -> frozenset[str]:
+    for path in sorted(set(paths)):
+        selected = file_scope(path)
+        suites = ', '.join(sorted(selected)) or 'lightweight checks only'
+        print(f'Changed path {path!r}: {suites}')
+    if not paths:
+        print('No changed paths found')
+    return select(paths)
 
 
 def changed_paths(base: str) -> list[str]:
@@ -100,11 +131,13 @@ def event_scope(event: str, payload: dict, ref: str) -> frozenset[str]:
     if event == 'pull_request':
         base = payload['pull_request']['base']
         if base['ref'] != 'dev':
+            print('Full scope: pull request does not target dev')
             return ALL
-        return select(changed_paths(base['sha']))
+        return explain_selection(changed_paths(base['sha']))
     if event == 'push' and ref == 'refs/heads/dev':
-        return select(changed_paths(payload['before']))
+        return explain_selection(changed_paths(payload['before']))
     # Main, release workflow calls, manual runs and unknown events are full.
+    print(f'Full scope: event {event!r} on {ref!r}')
     return ALL
 
 
@@ -119,6 +152,9 @@ def main() -> None:
         for name in sorted(ALL):
             print(f'{name}={str(name in scope).lower()}', file=output)
     print('Selected suites: ' + (', '.join(sorted(scope)) or 'lightweight checks only'))
+    print('Skipped suites: ' + (', '.join(sorted(ALL - scope)) or 'none'))
+    if scope != ALL:
+        print('Skipped suites have no mapped impact from the changed paths above.')
 
 
 if __name__ == '__main__':
