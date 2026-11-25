@@ -246,7 +246,7 @@ def tui_recovery_state(t: Translator) -> tuple[bool, list[str]]:
         handoff = _handoff(ACTIVE)
         pending = _pending(ACTIVE) or handoff.exists() or handoff.is_symlink()
     except (SwapError, OSError):
-        return False, [t('self_upgrade_status_unavailable')]
+        return False, [t('self_upgrade_recovery_unverified'), t('self_upgrade_status_unavailable')]
     _, lines = _result_lines(result, t)
     if pending or (result is not None and result['phase'] in
                    ('submitted', 'applying', 'recovery_required')):
