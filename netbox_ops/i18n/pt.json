@@ -307,6 +307,7 @@
   "self_upgrade_reviewed": "Revisto — requer aprovação separada",
   "self_upgrade_install_reviewed": "Instalar próxima etapa revista",
   "self_upgrade_recovery_pending": "Recuperação ou instalação pendente — bloqueado",
+  "self_upgrade_recovery_unverified": "Instalação bloqueada: recuperação por verificar",
   "upgrade_status_blocked": "Bloqueado",
   "upgrade_status_needs_confirmation": "Requer confirmação adicional",
   "upgrade_unchanged": "sem alteração",
