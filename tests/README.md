@@ -36,7 +36,7 @@ The separate `integration` CI job runs the same suite on Ubuntu 22.04 and Rocky 
 
 ## CI test selection
 
-Development PRs and pushes classify the complete Git diff against the event's base commit using `scripts/ci/test_scope.py`. Each workflow uses the same decision. The standard matrix keeps its existing job names: irrelevant jobs report a lightweight no-op without starting a test container. The VM workflows ignore documentation-only PRs, and otherwise skip VM execution when the classifier selects a different domain.
+Development PRs and pushes classify the complete Git diff against the event's base commit using `scripts/ci/test_scope.py`. Each workflow uses the same decision. The standard matrix keeps its existing job names: irrelevant jobs report a lightweight no-op without starting a test container. VM workflows run only the lightweight scope check when their suite is not selected; the VM jobs do not start. The complete Git diff avoids GitHub's native pull-request path-filter file limit.
 
 - Markdown-only changes: lightweight scope and release-version metadata checks.
 - Python, translations and unit tests: the Python matrix and Ruff.

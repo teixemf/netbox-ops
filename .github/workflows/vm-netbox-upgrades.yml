@@ -11,12 +11,6 @@ on:
       - 'scripts/ci/test_scope.py'
   pull_request:
     branches: [dev]
-    paths-ignore:
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'docs/**/*.md'
-      - 'tests/**/*.md'
-      - '.github/**/*.md'
   workflow_dispatch:
 
 concurrency:
