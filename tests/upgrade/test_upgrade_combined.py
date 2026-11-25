@@ -253,6 +253,22 @@ class CombinedStageTests(unittest.TestCase):
                                systemd=systemd, stage_runner=stage_runner, inventory_reader=reader)
         stage_runner.assert_not_called()
 
+    def test_changed_plugin_ownership_before_stage_blocks_checkout(self):
+        prepared = self.prepare()[0]
+        systemd = Mock()
+        systemd.status.return_value = [
+            SimpleNamespace(name=name, loaded='loaded', active='inactive')
+            for name in ('netbox', 'netbox-rq')
+        ]
+        reader = Mock(return_value=replace(
+            self.inventory, packages=(replace(self.packages[0], modules=()), self.packages[1]),
+        ))
+        stage_runner = Mock()
+        with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugins changed'):
+            run_combined_stage(self.install, self.plan, prepared, Path('/usr/bin/python3.12'),
+                               systemd=systemd, stage_runner=stage_runner, inventory_reader=reader)
+        stage_runner.assert_not_called()
+
     def test_probe_uses_lowest_redis_version_and_nonroot_user(self):
         runtime = SimpleNamespace(python=self.install.python,
                                   working_directory=self.root / 'netbox',
