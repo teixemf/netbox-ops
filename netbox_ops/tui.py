@@ -1780,6 +1780,25 @@ class CursesMenu:
 
         refresh_storage()
         refreshed = time.monotonic()
+        labels = [self.t('nbo_act_' + action) for action in backup_actions]
+        headers = [self.t('nbo_' + key) for key in ('type', 'date', 'size', 'tag_header', 'name')]
+
+        def table_values(item):
+            tag = self.t('nbo_pre_restore_short' if item.purpose == 'pre_restore'
+                         else 'nbo_manual_short')
+            return ('combined' if item.kind == 'full' else item.kind,
+                    self._pretty_date(item.created), self._human_size(item.size),
+                    tag, item.path.name)
+
+        def measure_columns():
+            # Stable widths while scrolling; recalculate only on inventory refresh.
+            widths = [len(label) for label in headers[:-1]]
+            for item in entries:
+                widths = [max(width, len(value)) for width, value in
+                          zip(widths, table_values(item))]
+            return [min(width, limit) for width, limit in zip(widths, (8, 16, 12, 12))]
+
+        column_widths = measure_columns()
 
         def fingerprint(entry):
             # A replaced file or modified sidecar must not inherit stale detail.
@@ -1793,10 +1812,11 @@ class CursesMenu:
                 return (str(entry.path), 'missing')
 
         def reload_inventory():
-            nonlocal entries, cursor, scroll, refreshed
+            nonlocal entries, cursor, scroll, refreshed, column_widths
             selected = entries[cursor].path if cursor is not None and cursor < len(entries) else None
             marked_fingerprints = {e.path: fingerprint(e) for e in entries if e.path in chosen}
             entries = manager.quick_list()
+            column_widths = measure_columns()
             refresh_storage()
             cursor = next((i for i, e in enumerate(entries) if e.path == selected), None)
             chosen.intersection_update(e.path for e in entries)
@@ -1861,93 +1881,91 @@ class CursesMenu:
                                not incompatible)
                 # Legacy archives may be verified read-only, but never restored.
                 can_verify = bool(action_targets)
+                props = []
+                if preview is not None:
+                    purpose = (self.t('nbo_pre_restore') if detail.purpose == 'pre_restore'
+                               else self.t('nbo_manual'))
+                    props = [
+                        (self.t('nbo_name') + ': ' + preview.path.name, 'title'),
+                        (self.t('nbo_type') + ': ' + self.t('nbo_kind_' + preview.kind) + '   ' +
+                         self.t('nbo_purpose') + ': ' + purpose, 'muted'),
+                        (self.t('nbo_date') + ': ' + self._pretty_date(detail.created) + ' UTC', 'muted'),
+                        (self.t('nbo_size') + ': ' + self._human_size(preview.size), 'muted'),
+                        (self.t('nbo_version') + ': ' + (detail.version or '—')
+                         if ready else self.t('nbo_metadata_loading'), 'muted'),
+                        (self.t('nbo_legacy_blocked') if ready and detail.legacy else
+                         (self.t('nbo_integrity_ok') if entry_key in verified else
+                          self.t('nbo_integrity_not_checked')),
+                         'failure' if ready and detail.legacy else 'muted'),
+                        (self.t('nbo_contents') + ': ' + self.t('nbo_kind_contents_' + preview.kind), 'muted'),
+                    ]
+
                 hint_key = 'nbo_backup_actions_hint' if focus == 'actions' else 'nbo_backup_hint_034'
+                positions = self._backup_action_positions(
+                    labels, max(1, self.stdscr.getmaxyx()[1] - 8), separator_before=4)
                 frame = self._frame(self.t('nbo_backup_title'), self._quit_hint(self.t(hint_key)))
                 if frame:
                     h, w = frame
                     pane = w >= 104
                     split = max(56, min(92, w * 55 // 100)) if pane else w - 3
-                    labels = [self.t('nbo_act_' + action) for action in backup_actions]
-                    positions = self._backup_action_positions(labels, w - 8)
                     action_rows = max(row for _, row in positions) + 1
-                    # Preserve the top details and middle actions. The list
-                    # gets the remaining width and vertical space.
-                    action_y = min(max(6, h // 3), h - action_rows - 7)
-                    list_title_y = action_y + action_rows + 2
-                    self._paint(3, 2, w - 4, max(1, action_y - 4))
-                    self._put(3, 3, self.t('nbo_detail_label'), 'section')
-                    detail_width = max(12, split - 8)
-                    if preview is None:
-                        if action_y > 6:
-                            self._put(5, 4, self.t('nbo_backup_select_preview'), 'muted')
-                    else:
-                        kind_label = self.t('nbo_kind_' + preview.kind)
-                        # Prioritize identifying and safety metadata on short
-                        # terminals; combine type and purpose on one row.
-                        purpose = (self.t('nbo_pre_restore') if detail.purpose == 'pre_restore'
-                                   else self.t('nbo_manual'))
-                        props = [
-                            self.t('nbo_name') + ': ' + preview.path.name,
-                            (self.t('nbo_type') + ': ' + kind_label + '   ' +
-                             self.t('nbo_purpose') + ': ' + purpose),
-                            self.t('nbo_date') + ': ' + self._pretty_date(detail.created) + ' UTC',
-                            self.t('nbo_size') + ': ' + self._human_size(preview.size),
-                            (self.t('nbo_version') + ': ' + (detail.version or '—')
-                             if ready else self.t('nbo_metadata_loading')),
-                            (self.t('nbo_legacy_blocked') if ready and detail.legacy else
-                             (self.t('nbo_integrity_ok') if entry_key in verified else
-                              self.t('nbo_integrity_not_checked'))),
-                            self.t('nbo_contents') + ': ' +
-                            self.t('nbo_kind_contents_' + preview.kind),
-                        ]
-                        y = 5
-                        for j, value in enumerate(props):
-                            for line in textwrap.wrap(safe_text(value), detail_width,
-                                                      break_long_words=True)[:2] or ['']:
-                                if y >= action_y - 1:
-                                    break
-                                self._put(y, 4, line,
-                                          'failure' if j == 5 and ready and detail.legacy
-                                          else ('title' if j == 0 else 'muted'))
-                                y += 1
+                    # The list owns the top and at least one visible item at the
+                    # minimum terminal size. Bottom panels use at most half the
+                    # space left after reserving the action bar.
+                    panel_height = min(12 if pane else 10,
+                                       max(3, (h - 5 - action_rows - 4) // 2))
+                    detail_y = h - 2 - panel_height
+                    action_y = detail_y - action_rows - 2
+                    list_title_y = 3
+                    self._paint(list_title_y, 2, w - 4, action_y - list_title_y - 1)
+                    heading = (f'{self.t("nbo_backup_table")}   '
+                               f'{self.t("nbo_backup_count")}: {len(entries)}   '
+                               f'{self.t("nbo_chosen")}: {len(chosen)}')
+                    self._put(list_title_y, 3, heading[:w - 6], 'section')
 
-                    if pane:
-                        x = split + 2
-                        self._put(3, x, self.t('nbo_storage_label'), 'section')
-                        show_ring = (disk_info is not None and action_y >= 15
-                                     and w >= 120)
-                        legend_x = x + 23 if show_ring else x
-                        if disk_info is not None:
-                            used, other, free, total, count = disk_info
-                            legends = ((self.t('nbo_storage_used'), used, 'disk_backup'),
-                                       (self.t('nbo_storage_other'), other, 'disk_other'),
-                                       (self.t('nbo_storage_free'), free, 'disk_free'))
-                            if show_ring:
-                                self._draw_storage_ring(x + 1, 5, disk_info)
-                            for j, (label, value, color) in enumerate(legends):
-                                self._put(5 + j, legend_x,
-                                          f'● {label}: {self._human_size(value)}', color)
-                            self._put(8, legend_x,
-                                      f'{self.t("nbo_storage_count")}: {count}', 'muted')
-                        elif disk_error and action_y >= 7:
-                            self._put(5, x, disk_error[:max(10, w - x - 3)], 'warning')
-                        if len(marked) >= 2 and action_y >= 11:
-                            sy = action_y - 4
-                            self._put(sy, legend_x, self.t('nbo_multi_title') +
-                                      f' ({len(marked)})', 'section')
-                            self._put(sy + 1, legend_x, f'{self.t("nbo_total_size")}: '
-                                      f'{self._human_size(sum(e.size for e in marked))}', 'muted')
-                            self._put(sy + 2, legend_x,
-                                      self.t('nbo_multi_restore_disabled'), 'warning')
-                    elif disk_info is not None and action_y >= 10:
-                        used, other, free, total, count = disk_info
-                        self._put(action_y - 2, 4,
-                                  f'{self.t("nbo_storage_label")}: '
-                                  f'{self._human_size(used)} / {self._human_size(total)}',
-                                  'muted')
+                    # Select the columns and one spacing policy for the entire
+                    # table. Name always takes the remaining width.
+                    table_width = w - 7
+                    show_tag = 4 + sum(column_widths) + 4 * 3 + 12 <= table_width
+                    indexes = [0, 1, 2, 3, 4] if show_tag else [0, 1, 2, 4]
+                    widths = [column_widths[i] for i in indexes[:-1]]
+                    # On the minimum 50-column terminal keep at least one
+                    # name cell even for unusually large disk sizes.
+                    if not show_tag:
+                        widths[2] = min(widths[2], table_width - 4 - sum(widths[:2]) - 4)
+                    gap = 3 if 4 + sum(widths) + len(widths) * 3 + 8 <= table_width else 1
+                    widths.append(max(1, table_width - 4 - sum(widths) - len(widths) * gap))
+
+                    def format_row(values, marker='    '):
+                        cells = [safe_text(values[i])[:width].ljust(width)
+                                 for i, width in zip(indexes, widths)]
+                        return marker + (' ' * gap).join(cells)
+
+                    self._put(list_title_y + 1, 4, format_row(headers), 'muted')
+                    visible = max(0, action_y - list_title_y - 3)
+                    scroll = min(scroll, max(0, len(entries) - visible))
+                    if cursor is not None and visible:
+                        if cursor < scroll:
+                            scroll = cursor
+                        elif cursor >= scroll + visible:
+                            scroll = cursor - visible + 1
+                    for i in range(scroll, min(len(entries), scroll + visible)):
+                        item = entries[i]
+                        row = list_title_y + 2 + i - scroll
+                        selected = i == cursor and focus != 'actions'
+                        if selected:
+                            self._put(row, 3, ' ' * (w - 6), 'selected')
+                        marker = f"[{'x' if item.path in chosen else ' '}] "
+                        self._put(row, 4, format_row(table_values(item), marker),
+                                  'selected' if selected else '')
+                    if not entries and visible:
+                        self._put(list_title_y + 2, 4, self.t('nbo_backup_empty'), 'muted')
 
                     self._put(action_y - 1, 3, '─' * (w - 7), 'muted')
                     self._put(action_y, 3, self.t('nbo_backup_actions_label'), 'section')
+                    all_x, all_row = positions[-1]
+                    if all_row == positions[-2][1]:
+                        self._put(action_y + 1 + all_row, 2 + all_x, '│', 'muted')
                     for i, action in enumerate(backup_actions):
                         ax, row = positions[i]
                         enabled = self._backup_action_enabled(
@@ -1960,46 +1978,89 @@ class CursesMenu:
                         self._put(action_y + 1 + row, 4 + ax, label, style)
                         if focus == 'actions' and action_index == i and not enabled:
                             self._put(action_y + 1 + row, 3 + ax, '›', 'section')
-                    self._put(list_title_y - 1, 3, '─' * (w - 7), 'muted')
+                    self._put(detail_y - 1, 3, '─' * (w - 7), 'muted')
 
-                    self._paint(list_title_y, 2, w - 4, h - 2 - list_title_y)
-                    self._put(list_title_y, 3, f'{self.t("nbo_backup_table")}   '
-                              f'{self.t("nbo_backup_count")}: {len(entries)}   '
-                              f'{self.t("nbo_chosen")}: {len(chosen)}', 'section')
-                    show_tag = w >= 95
-                    header = (f'{"":4}{self.t("nbo_type"):^8} {self.t("nbo_date"):^16} '
-                              f'{self.t("nbo_size"):^10} ')
-                    if show_tag:
-                        header += f'{self.t("nbo_tag_header"):^12} '
-                    remaining = max(8, w - 7 - len(header))
-                    header += f'{self.t("nbo_name"):^{remaining}}'
-                    self._put(list_title_y + 1, 4, header[:w - 7], 'muted')
-                    visible = max(0, h - list_title_y - 4)
-                    if cursor is not None and visible:
-                        if cursor < scroll:
-                            scroll = cursor
-                        elif cursor >= scroll + visible:
-                            scroll = cursor - visible + 1
-                    for i in range(scroll, min(len(entries), scroll + visible)):
-                        item = entries[i]
-                        row = list_title_y + 2 + i - scroll
-                        selected = i == cursor and focus != 'actions'
-                        if selected:
-                            self._put(row, 3, ' ' * (w - 6), 'selected')
-                        display_kind = 'combined' if item.kind == 'full' else item.kind
-                        content = (f"[{'x' if item.path in chosen else ' '}] {display_kind:<8} "
-                                   f'{self._pretty_date(item.created):<16} '
-                                   f'{self._human_size(item.size):>10} ')
-                        if show_tag:
-                            tag = (self.t('nbo_pre_restore_short')
-                                   if item.purpose == 'pre_restore'
-                                   else self.t('nbo_manual_short'))
-                            content += f'{tag:<12} '
-                        content += item.path.name
-                        self._put(row, 4, content[:w - 7],
-                                  'selected' if selected else '')
-                    if not entries and visible:
-                        self._put(list_title_y + 2, 4, self.t('nbo_backup_empty'), 'muted')
+                    # Match the separate service/detail panels. On narrow
+                    # terminals stack storage below the preview instead.
+                    storage_rows = 2 if panel_height >= 6 else 1
+                    storage_y = detail_y if pane else h - 2 - storage_rows
+                    detail_end = h - 2 if pane else storage_y - (1 if storage_rows == 2 else 0)
+                    self._paint(detail_y, 2, split - 3 if pane else w - 4,
+                                detail_end - detail_y)
+                    self._put(detail_y, 3, self.t('nbo_detail_label'), 'section')
+                    detail_width = split - 6 if pane else w - 8
+                    if not props:
+                        self._put(detail_y + 1, 4,
+                                  self.t('nbo_backup_select_preview')[:detail_width], 'muted')
+                    else:
+                        y = detail_y + 1
+                        for j, (value, style) in enumerate(props):
+                            parts = textwrap.wrap(safe_text(value), detail_width,
+                                                  break_long_words=True) or ['']
+                            if j:
+                                parts = parts[:2]
+                            for k, line in enumerate(parts):
+                                if y >= detail_end:
+                                    break
+                                if j == 0 and y == detail_end - 1 and k < len(parts) - 1:
+                                    line = line[:detail_width - 1] + '…'
+                                self._put(y, 4, line, style)
+                                y += 1
+                            if y >= detail_end:
+                                break
+
+                    if pane:
+                        x = split + 2
+                        panel_width = w - x - 3
+                        self._paint(detail_y, split + 1, w - split - 4, panel_height)
+                        self._put(detail_y, x, self.t('nbo_storage_label')[:panel_width], 'section')
+                        if disk_info is not None:
+                            used, other, free, total, count = disk_info
+                            show_ring = panel_height >= 10 and panel_width >= 46
+                            legend_x = x + 21 if show_ring else x
+                            legend_width = w - legend_x - 3
+                            if show_ring:
+                                self._draw_storage_ring(x, detail_y + 1, disk_info)
+                            if panel_height >= 5:
+                                legends = ((self.t('nbo_storage_used'), used, 'disk_backup'),
+                                           (self.t('nbo_storage_other'), other, 'disk_other'),
+                                           (self.t('nbo_storage_free'), free, 'disk_free'))
+                                for j, (label, value, color) in enumerate(legends):
+                                    self._put(detail_y + 1 + j, legend_x,
+                                              f'● {label}: {self._human_size(value)}'[:legend_width], color)
+                                self._put(detail_y + 4, legend_x,
+                                          f'{self.t("nbo_storage_count")}: {count}', 'muted')
+                            else:
+                                self._put(detail_y + 1, x,
+                                          f'{self._human_size(used)} / {self._human_size(total)}'[:panel_width],
+                                          'muted')
+                            if len(marked) >= 2 and panel_height >= 8:
+                                sy = detail_y + panel_height - 3
+                                self._put(sy, legend_x, (self.t('nbo_multi_title') +
+                                          f' ({len(marked)})')[:legend_width], 'section')
+                                self._put(sy + 1, legend_x, (f'{self.t("nbo_total_size")}: '
+                                          f'{self._human_size(sum(e.size for e in marked))}')[:legend_width], 'muted')
+                                self._put(sy + 2, legend_x,
+                                          self.t('nbo_multi_restore_disabled')[:legend_width], 'warning')
+                        else:
+                            self._put(detail_y + 1, x, (disk_error or '—')[:panel_width],
+                                      'warning' if disk_error else 'muted')
+                    else:
+                        self._paint(storage_y, 2, w - 4, storage_rows)
+                        label = self.t('nbo_storage_label')
+                        storage_text = disk_error or '—'
+                        if disk_info is not None:
+                            used, _, _, total, count = disk_info
+                            storage_text = f'{self._human_size(used)} / {self._human_size(total)}'
+                            if storage_rows == 2:
+                                storage_text += f'   {self.t("nbo_storage_count")}: {count}'
+                        if storage_rows == 1:
+                            self._put(storage_y, 3, f'{label}: {storage_text}'[:w - 6],
+                                      'warning' if disk_error else 'muted')
+                        else:
+                            self._put(storage_y, 3, label[:w - 6], 'section')
+                            self._put(storage_y + 1, 4, storage_text[:w - 8],
+                                      'warning' if disk_error else 'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
                 self._check_quit(key)
@@ -2043,6 +2104,15 @@ class CursesMenu:
                             cursor = len(entries)-1 if key in (curses.KEY_UP,ord('k')) else 0
                         else:
                             cursor = move_selection(cursor,key,len(entries))
+                elif key in (ord('i'), ord('I')) and focus != 'actions' and props:
+                    # A long filename can always be read in full, even when the
+                    # compact bottom panel has only one preview row.
+                    self.stdscr.timeout(-1)
+                    try:
+                        self._show_lines(self.t('nbo_detail_label'), props,
+                                         self.t('tui_back_hint'), allow_quit=True)
+                    finally:
+                        self.stdscr.timeout(120)
                 elif key in (10,13,curses.KEY_ENTER) and focus == 'actions':
                     action = backup_actions[action_index]
                     target_present = len(marked) == 1
@@ -2146,8 +2216,8 @@ class CursesMenu:
                                             lambda cb, selected=targets: self._verify_job_many(manager, selected, cb)):
                         verified.update(fingerprint(e) for e in targets)
                     self.stdscr.timeout(120)
-                # Enter on the file list no longer opens a separate detail
-                # screen. The right-hand panel is the only preview.
+                # Enter on the file list remains a no-op; I opens the full
+                # read-only details without changing marks or action focus.
         finally:
             self.stdscr.timeout(-1)
             pool.shutdown(wait=False, cancel_futures=True)

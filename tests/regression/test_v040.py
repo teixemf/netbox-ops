@@ -217,7 +217,7 @@ class Ui040Tests(unittest.TestCase):
             self.assertTrue(menu._confirm_token('create','confirm','CREATE'))
         alert.assert_not_called()
 
-    def test_backup_chart_and_manual_tag_above_actions_and_list(self):
+    def test_backup_list_and_manual_tag_above_actions_and_storage_chart(self):
         screen=FakeScreen([curses.KEY_DOWN, 27, 27],dimensions=(45,165))
         menu=CursesMenu(screen,Translator('pt'))
         with patch('netbox_ops.tui.load_config',return_value=self.cfg), \
@@ -228,11 +228,14 @@ class Ui040Tests(unittest.TestCase):
         self.assertTrue(any('ARMAZENAMENTO' in txt for _,_,txt,_ in writes))
         donut_positions=[y for y,x,txt,_ in writes if len(txt)==1 and 0x2800<ord(txt)<0x2900]
         self.assertTrue(donut_positions)
-        actions=[y for y,x,txt,_ in writes if 'OPERAÇÕES SOBRE BACKUPS' in txt]
-        self.assertTrue(all(y>max(donut_positions) for y in actions))
-        table = [y for y,x,txt,_ in writes if 'BACKUPS' in txt and y > min(actions)]
+        actions = [y for y, _, txt, _ in writes if 'OPERAÇÕES SOBRE BACKUPS' in txt]
+        table = [y for y, _, txt, _ in writes if txt.startswith('BACKUPS DISPONÍVEIS')]
+        self.assertTrue(actions)
         self.assertTrue(table)
-        self.assertLess(min(actions), min(table))
+        self.assertLess(max(table), min(actions))
+        self.assertLess(max(actions), min(donut_positions))
+        self.assertTrue(any('MANUAL' in txt and max(table) < y < min(actions)
+                            for y, _, txt, _ in writes))
 
     def test_detail_follows_current_focus_while_another_is_marked(self):
         screen=FakeScreen([curses.KEY_DOWN,32,curses.KEY_DOWN,27,27,27],dimensions=(45,165))
