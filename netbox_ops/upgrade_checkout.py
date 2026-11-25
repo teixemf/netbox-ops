@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Callable
 
 from .upgrade_discovery import _trusted_origin, inspect_git_installation
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_diagnostics import run_checked
 from .upgrade_process import run_managed
 from .upgrade_git import OFFICIAL_REMOTE, PinnedStage
 
@@ -31,13 +31,8 @@ def _run_git(root: Path, arguments: list[str], *,
     command = ['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
                '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
                '-C', str(root), *arguments]
-    try:
-        result = runner(command, cwd=root, env=env, capture_output=True,
-                        text=True, check=False, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        raise UpgradeExecutionError('NetBox Git command unavailable or timed out') from None
-    if result.returncode:
-        raise UpgradeExecutionError('NetBox Git command failed') from None
+    result = run_checked('git.' + arguments[0], command, runner=runner, timeout=timeout,
+                         cwd=root, env=env, capture_output=True, text=True)
     return result.stdout.strip()
 
 

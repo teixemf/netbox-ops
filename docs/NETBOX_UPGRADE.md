@@ -68,9 +68,10 @@ in a private `pre-upgrade-*` directory under the configured backup directory.
 Recovery directories are root:root 0700; files are root:root 0600. They are
 separate from the ordinary backup listing.
 
-Each required intermediate release is fetched from the official remote,
-checked against its pinned commit, checked out without forcing or overwriting
-ignored files, and processed by the official NetBox upgrade script. The
+Each target and required intermediate release is fetched from the official
+remote and checked against its pinned commit before downtime. During maintenance,
+each stage is checked out without forcing or overwriting ignored files and
+processed by the official NetBox upgrade script. The
 executor checks Django, migrations and plugin packages before moving to the
 next stage. Writers stay stopped across intermediate stages. The final start
 must pass service checks and the NetBox HTTP status, plugin and RQ worker
@@ -89,8 +90,9 @@ upgrade and ordinary start/restart actions for NetBox writers until an
 administrator has investigated and safely resolved the interrupted operation.
 Pin changes and uninstall are blocked. A restore while recovery is pending
 requires both writers already stopped and does not start them or clear the
-marker. The executor's controlled final start is a separate path. Do not remove it simply to retry. The executor never
-automatically restores the database or claims a successful rollback (#63).
+marker. The executor's controlled final start is a separate path. Do not remove
+the marker simply to retry. The executor never automatically restores the
+database or claims a successful rollback (#63).
 
 Managed upgrade subprocesses run in separate process groups. On timeout or
 catchable interruption the executor requests termination, escalates to SIGKILL
@@ -124,8 +126,7 @@ wheel set. Dependency conflicts and incomplete resolution block execution.
 
 Once the verified backup is captured, the executor atomically writes the
 approved pins and installs the reviewed dependency set from the prepared
-wheelhouse in the existing
-NetBox virtualenv. Unlike the NetBox version upgrade script, this does not
+wheelhouse in the existing NetBox virtualenv. Unlike the NetBox version upgrade script, this does not
 rebuild the entire virtualenv. It runs pip's dependency check and verifies
 installed package versions before applying Django migrations and collecting
 static files. Only NetBox services are started afterward. The final HTTP status
@@ -245,7 +246,9 @@ expected NetBox status and RQ workers; the failure scenario instead requires
 stopped writers, a pending marker and a recovery diagnostic. Failure injection
 is confined to the test process; no production failure switch exists.
 
-Run the workflow on a pull request to dev or manually through GitHub Actions.
+The workflow runs on relevant pull requests to `dev`, on pushes to `dev`
+that change its definition or the package version, or through manual dispatch
+once the workflow exists on the default branch.
 Never run the guest fixture on an ordinary host. The script requires the
 explicit CI marker and QEMU/KVM virtualization, and the host harness checks
 the unchanged baseline hash.

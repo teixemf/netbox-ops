@@ -24,6 +24,8 @@ normally reside outside the application directory; keep them intact. This
 manual replacement is not a NetBox upgrade and is not the transactional
 self-upgrade mechanism.
 
+## Transactional self-upgrade
+
 The initiating process calls `launch_prepared_release` and then exits. The
 helper runs using the verified base Python interpreter, from the private
 `/opt/.netbox-ops-handoff` directory. It inherits the initiating process pidfd
