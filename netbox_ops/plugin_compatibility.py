@@ -79,7 +79,7 @@ class PluginReview:
 
 @dataclass(frozen=True)
 class DependencyPreflight:
-    status: str  # passed, blocked, unknown
+    status: str  # passed, blocked, unknown, not-run
     detail: str
     checked_core: bool = False
     packages: tuple[tuple[str, str], ...] = ()
