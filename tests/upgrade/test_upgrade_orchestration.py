@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock, call, patch
 
 from netbox_ops import upgrade_orchestration as orchestration
+from netbox_ops.upgrade_diagnostics import CommandFailure
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_health import NetBoxHealth
@@ -97,6 +98,17 @@ class OrchestrationTests(unittest.TestCase):
                     self.execute()
                 self.assertEqual('detail: NetBox upgrade script failed;' in str(error.exception), visible)
                 self.assertNotIn('secret token', str(error.exception))
+        self.calls.start_upgrade_writers.assert_not_called()
+
+    def test_command_failure_reports_stage_and_safe_audit(self):
+        self.calls.run_stage.side_effect = CommandFailure('netbox.upgrade script', 'exit', code=17)
+        with self.assertRaises(UpgradeExecutionError) as error:
+            self.execute()
+        message = str(error.exception)
+        self.assertIn('exit status 17', message)
+        self.assertIn('4.4.0', message)
+        self.assertIn('pre-upgrade-test', message)
+        self.assertIn('exit status 17', str(self.calls.write_audit.call_args))
         self.calls.start_upgrade_writers.assert_not_called()
 
     def test_interruption_during_stage_retains_recovery(self):

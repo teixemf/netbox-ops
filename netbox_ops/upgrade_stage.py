@@ -11,6 +11,7 @@ from typing import Callable
 from .upgrade_checkout import checkout_pinned_stage
 from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_diagnostics import run_checked
 from .upgrade_process import run_managed
 from .upgrade_git import PinnedStage
 from .upgrade_runtime import upgrade_environment
@@ -100,14 +101,9 @@ def run_stage(
     )
     for label, command, timeout in commands:
         require_quiesced_writers(systemd)
-        try:
-            result = runner(command, cwd=root, env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            check=False, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired):
-            raise UpgradeExecutionError(f'NetBox {label} unavailable or timed out') from None
-        if result.returncode:
-            raise UpgradeExecutionError(f'NetBox {label} failed')
+        run_checked('netbox.' + label, command, runner=runner, timeout=timeout,
+                    cwd=root, env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     require_quiesced_writers(systemd)
     final = inspector(root)
     if (final.root != root or final.commit != stage.commit
