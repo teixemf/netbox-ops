@@ -81,10 +81,10 @@ def _group_active(pgid: int) -> bool:
                 continue
             try:
                 # comm may contain spaces and parentheses; parse from the end.
-                fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                fields = (entry / 'stat').read_bytes().rsplit(b')', 1)[1].split()
             except (FileNotFoundError, ProcessLookupError):
                 continue
-            if int(fields[2]) == pgid and fields[0] not in ('Z', 'X', 'x'):
+            if int(fields[2]) == pgid and fields[0] not in (b'Z', b'X', b'x'):
                 return True
         return False
     except (OSError, UnicodeError, ValueError, IndexError):
@@ -96,6 +96,10 @@ def _signal_group(pgid: int, signum: int) -> None:
     try:
         os.killpg(pgid, signum)
     except ProcessLookupError:
+        pass
+    except OSError:
+        # The group still needs verification. Never skip the wait because
+        # signalling failed (for example, after a child changes credentials).
         pass
 
 

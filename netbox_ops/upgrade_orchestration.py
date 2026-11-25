@@ -222,6 +222,7 @@ def _execute_upgrade(
             phase = 'start writers'
             report('start', completed)
             try:
+                check_cancelled()
                 start_upgrade_writers(systemd)
                 check_cancelled()
                 phase = 'functional health check'

@@ -1059,7 +1059,7 @@ class CursesMenu:
         """Keep curses in the UI thread and show actual backend stage progress."""
         from contextvars import copy_context
         from .upgrade_execution import UpgradeExecutionError
-        from .upgrade_process import UpgradeInterrupted, check_cancelled, upgrade_signals
+        from .upgrade_process import UpgradeInterrupted, upgrade_signals
         events = queue.SimpleQueue()
         phase, done, total = 'preflight', 0, 0
         tick = 0
@@ -1079,9 +1079,7 @@ class CursesMenu:
                         self.stdscr.refresh()
                     tick += 1
                     self.stdscr.getch()
-                result = future.result()
-                check_cancelled()
-                return result
+                return future.result()
         except UpgradeInterrupted:
             error = self.t('upgrade_cancelled')
         except UpgradeExecutionError as exc:
