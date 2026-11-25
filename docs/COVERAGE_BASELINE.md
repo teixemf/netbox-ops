@@ -88,3 +88,9 @@ These are coverage review candidates, not confirmed defects.
 - Review test assertions and failure scenarios; coverage alone does not establish correctness.
 
 Re-measure against the final v0.6.0 baseline before integrating the next-release policy. Do not merge the experimental branch-specific workflow into v0.6.0.
+
+## Follow-up: base interpreter tests
+
+[Run 45618730189](https://github.com/teixemf/netbox-ops/actions/runs/45618730189), commit `e536a3dfb5fea7f98a8e775ba12502e98e8aca2e`: all seven new tests passed. 812 tests discovered, 811 passed, one skipped; 22.359 seconds. The package still has 9,022 statements; missed statements decreased from 1,516 to 1,490. Combined coverage rose from 80% to 81% (rounded), and upgrade_stage.py improved from 50% to 95%. Three statements remain uncovered in that module. The source code is unchanged.
+
+The next experiment adds separate exact totals and diff-cover 10.6.0 in reporting mode against the fixed initial baseline. A temporary Git repository verifies a 50% changed-line result with one covered and one missed line and exercises threshold failure. This is not yet a PR quality gate: base SHA selection, missing reports, renames and no-executable-change cases still require validation. No application changes should yield N/A, not an artificial 100% score.

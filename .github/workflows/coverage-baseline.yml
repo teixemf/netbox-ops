@@ -17,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Prepare report directory
         run: mkdir -p "$RUNNER_TEMP/netbox-ops-coverage"
@@ -30,13 +31,14 @@ jobs:
             python:3.12-bookworm \
             bash -ec 'set -o pipefail
               git config --global --add safe.directory /workspace
-              python -m pip install --disable-pip-version-check coverage==7.10.7
+              python -m pip install --disable-pip-version-check coverage==7.10.7 diff-cover==10.6.0
               bash -n install.sh upgrade.sh uninstall.sh
               python -m coverage run --branch --source=netbox_ops -m unittest discover -s tests -p "test_*.py" -v
               python -m coverage report -m | tee /coverage/coverage.txt
               python -m coverage xml -o /coverage/coverage.xml
               python -m coverage json -o /coverage/coverage.json
-              python -m coverage html -d /coverage/html'
+              python -m coverage html -d /coverage/html
+              bash scripts/ci/coverage-diff-smoke.sh /coverage'
       - name: Publish coverage summary
         if: success()
         run: |
@@ -46,6 +48,8 @@ jobs:
             echo 'Integration and VM E2E coverage are not included.'
             echo '~~~text'
             cat "$RUNNER_TEMP/netbox-ops-coverage/coverage.txt"
+            cat "$RUNNER_TEMP/netbox-ops-coverage/coverage-totals.txt"
+            cat "$RUNNER_TEMP/netbox-ops-coverage/diff-experiment.txt"
             echo '~~~'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage reports
