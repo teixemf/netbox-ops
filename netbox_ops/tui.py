@@ -1913,6 +1913,18 @@ class CursesMenu:
             elif key in (10,13,curses.KEY_ENTER) and selected is not None:
                 return kinds[selected]
 
+    def _backup_inventory_counts(self, entries):
+        """Count each displayed inventory entry once, without filesystem I/O."""
+        counts = dict.fromkeys(('db', 'media', 'combined', 'legacy', 'unknown'), 0)
+        for entry in entries:
+            kind = 'combined' if entry.kind == 'full' else entry.kind
+            counts[kind if kind in counts else 'unknown'] += 1
+        rows = [(self.t('nbo_inventory_' + kind), count)
+                for kind, count in counts.items()
+                if kind in ('db', 'media', 'combined') or count]
+        rows.append((self.t('nbo_inventory_total'), len(entries)))
+        return rows
+
     def _backups(self) -> None:
         """Responsive inventory; manifests loaded only for selection and cached.
 
@@ -1939,6 +1951,7 @@ class CursesMenu:
         task_key = None
         disk_info: tuple[int,int,int,int,int] | None = None
         disk_error = ''
+        inventory_error = ''
 
         def refresh_storage():
             nonlocal disk_info, disk_error
@@ -1984,10 +1997,27 @@ class CursesMenu:
                 return (str(entry.path), 'missing')
 
         def reload_inventory():
-            nonlocal entries, cursor, scroll, refreshed, column_widths
+            nonlocal entries, cursor, scroll, refreshed, column_widths, inventory_error
+            nonlocal disk_info, disk_error, task_key
             selected = entries[cursor].path if cursor is not None and cursor < len(entries) else None
             marked_fingerprints = {e.path: fingerprint(e) for e in entries if e.path in chosen}
-            entries = manager.quick_list()
+            try:
+                entries = manager.quick_list()
+            except (BackupError, OSError) as exc:
+                inventory_error = safe_text(exc) or self.t('nbo_inventory_unavailable')
+                # A failed inventory cannot authorize operations on old marks.
+                entries = []
+                chosen.clear()
+                cursor, scroll = None, 0
+                details.clear()
+                verified.clear()
+                task_key = None  # discard a late metadata result
+                disk_info = None
+                disk_error = self.t('nbo_inventory_unavailable')
+                column_widths = measure_columns()
+                refreshed = time.monotonic()
+                return False
+            inventory_error = ''
             column_widths = measure_columns()
             refresh_storage()
             cursor = next((i for i, e in enumerate(entries) if e.path == selected), None)
@@ -2003,20 +2033,20 @@ class CursesMenu:
                 if key not in fresh:
                     details.pop(key)
                     verified.discard(key)
+            return True
 
         self.stdscr.timeout(120)
         try:
             while True:
                 if time.monotonic() - refreshed >= 10:
-                    try:
-                        reload_inventory()
-                    except (BackupError, OSError):
-                        refreshed = time.monotonic()
+                    reload_inventory()
                 if task is not None and task.done():
                     try:
-                        details[task_key] = task.result()
+                        result = task.result()
                     except Exception:
-                        details[task_key] = None
+                        result = None
+                    if task_key is not None:
+                        details[task_key] = result
                     task = None
                     task_key = None
                 entry = entries[cursor] if cursor is not None and cursor < len(entries) else None
@@ -2075,12 +2105,22 @@ class CursesMenu:
                 hint_key = 'nbo_backup_actions_hint' if focus == 'actions' else 'nbo_backup_hint_034'
                 positions = self._backup_action_positions(
                     labels, max(1, self.stdscr.getmaxyx()[1] - 8), separator_before=4)
-                frame = self._frame(self.t('nbo_backup_title'), self._quit_hint(self.t(hint_key)))
+                hint = self.t(hint_key) if self.stdscr.getmaxyx()[1] >= 100 else self.t('nbo_inventory_hint_short')
+                frame = self._frame(self.t('nbo_backup_title'), self._quit_hint(hint))
                 if frame:
                     h, w = frame
                     pane = w >= 104
                     split = max(56, min(92, w * 55 // 100)) if pane else w - 3
-                    action_rows = max(row for _, row in positions) + 1
+                    count_rows = self._backup_inventory_counts(entries) if not inventory_error else []
+                    selected_label = f'{self.t("nbo_chosen")}: {len(marked)}'
+                    all_x, all_row = positions[-1]
+                    count_x = all_x + len(labels[-1]) + 4
+                    count_row = all_row
+                    if count_x + len(selected_label) > w - 8:
+                        selected_label = f'{self.t("nbo_inventory_selected_short")}: {len(marked)}'
+                    if count_x + len(selected_label) > w - 8:
+                        count_x, count_row = 0, all_row + 1
+                    action_rows = max(count_row, all_row) + 1
                     # The list owns the top and at least one visible item at the
                     # minimum terminal size. Bottom panels use at most half the
                     # space left after reserving the action bar.
@@ -2090,10 +2130,7 @@ class CursesMenu:
                     action_y = detail_y - action_rows - 2
                     list_title_y = 3
                     self._paint(list_title_y, 2, w - 4, action_y - list_title_y - 1)
-                    heading = (f'{self.t("nbo_backup_table")}   '
-                               f'{self.t("nbo_backup_count")}: {len(entries)}   '
-                               f'{self.t("nbo_chosen")}: {len(chosen)}')
-                    self._put(list_title_y, 3, heading[:w - 6], 'section')
+                    self._put(list_title_y, 3, self.t('nbo_backup_table')[:w - 6], 'section')
 
                     # Select the columns and one spacing policy for the entire
                     # table. Name always takes the remaining width.
@@ -2113,7 +2150,12 @@ class CursesMenu:
                                  for i, width in zip(indexes, widths)]
                         return marker + (' ' * gap).join(cells)
 
-                    self._put(list_title_y + 1, 4, format_row(headers), 'muted')
+                    if entries:
+                        self._put(list_title_y + 1, 4, format_row(headers), 'muted')
+                    else:
+                        message = self.t('nbo_inventory_unavailable' if inventory_error else 'nbo_backup_empty')
+                        self._put(list_title_y + 1, 4, message[:w - 8],
+                                  'warning' if inventory_error else 'muted')
                     visible = max(0, action_y - list_title_y - 3)
                     scroll = min(scroll, max(0, len(entries) - visible))
                     if cursor is not None and visible:
@@ -2130,8 +2172,6 @@ class CursesMenu:
                         marker = f"[{'x' if item.path in chosen else ' '}] "
                         self._put(row, 4, format_row(table_values(item), marker),
                                   'selected' if selected else '')
-                    if not entries and visible:
-                        self._put(list_title_y + 2, 4, self.t('nbo_backup_empty'), 'muted')
 
                     self._put(action_y - 1, 3, '─' * (w - 7), 'muted')
                     self._put(action_y, 3, self.t('nbo_backup_actions_label'), 'section')
@@ -2150,6 +2190,8 @@ class CursesMenu:
                         self._put(action_y + 1 + row, 4 + ax, label, style)
                         if focus == 'actions' and action_index == i and not enabled:
                             self._put(action_y + 1 + row, 3 + ax, '›', 'section')
+                    self._put(action_y + 1 + count_row, 4 + count_x, selected_label,
+                              'title' if marked else 'muted')
                     self._put(detail_y - 1, 3, '─' * (w - 7), 'muted')
 
                     # Match the separate service/detail panels. On narrow
@@ -2186,8 +2228,11 @@ class CursesMenu:
                         panel_width = w - x - 3
                         self._paint(detail_y, split + 1, w - split - 4, panel_height)
                         self._put(detail_y, x, self.t('nbo_storage_label')[:panel_width], 'section')
+                        legend_x = x
+                        legend_width = panel_width
+                        counts_start = detail_y + 3
                         if disk_info is not None:
-                            used, other, free, total, count = disk_info
+                            used, other, free, total, _ = disk_info
                             show_ring = panel_height >= 10 and panel_width >= 46
                             legend_x = x + 21 if show_ring else x
                             legend_width = w - legend_x - 3
@@ -2200,39 +2245,52 @@ class CursesMenu:
                                 for j, (label, value, color) in enumerate(legends):
                                     self._put(detail_y + 1 + j, legend_x,
                                               f'● {label}: {self._human_size(value)}'[:legend_width], color)
-                                self._put(detail_y + 4, legend_x,
-                                          f'{self.t("nbo_storage_count")}: {count}', 'muted')
+                                counts_start = detail_y + 5
                             else:
                                 self._put(detail_y + 1, x,
                                           f'{self._human_size(used)} / {self._human_size(total)}'[:panel_width],
                                           'muted')
-                            if len(marked) >= 2 and panel_height >= 8:
-                                sy = detail_y + panel_height - 3
-                                self._put(sy, legend_x, (self.t('nbo_multi_title') +
-                                          f' ({len(marked)})')[:legend_width], 'section')
-                                self._put(sy + 1, legend_x, (f'{self.t("nbo_total_size")}: '
-                                          f'{self._human_size(sum(e.size for e in marked))}')[:legend_width], 'muted')
-                                self._put(sy + 2, legend_x,
-                                          self.t('nbo_multi_restore_disabled')[:legend_width], 'warning')
                         else:
                             self._put(detail_y + 1, x, (disk_error or '—')[:panel_width],
                                       'warning' if disk_error else 'muted')
+                        # Inventory counts are independent of disk accounting.
+                        show_multi = len(marked) >= 2 and panel_height >= 8
+                        counts_end = detail_y + panel_height - (3 if show_multi else 0)
+                        size = max((len(label) for label, _ in count_rows), default=0)
+                        if count_rows and counts_start + len(count_rows) <= counts_end and all(
+                                size + 3 + len(str(count)) <= legend_width for _, count in count_rows):
+                            for row, (label, count) in enumerate(count_rows, counts_start):
+                                self._put(row, legend_x, f'{label:<{size}} : {count}', 'muted')
+                        elif counts_start - 1 < counts_end:
+                            message = (self.t('nbo_inventory_unavailable') if inventory_error
+                                       else self.t('nbo_inventory_details'))
+                            self._put(counts_start - 1, legend_x, message[:legend_width],
+                                      'warning' if inventory_error else 'muted')
+                        if show_multi:
+                            sy = detail_y + panel_height - 3
+                            self._put(sy, legend_x, (self.t('nbo_multi_title') +
+                                      f' ({len(marked)})')[:legend_width], 'section')
+                            self._put(sy + 1, legend_x, (f'{self.t("nbo_total_size")}: '
+                                      f'{self._human_size(sum(e.size for e in marked))}')[:legend_width], 'muted')
+                            self._put(sy + 2, legend_x,
+                                      self.t('nbo_multi_restore_disabled')[:legend_width], 'warning')
                     else:
                         self._paint(storage_y, 2, w - 4, storage_rows)
                         label = self.t('nbo_storage_label')
                         storage_text = disk_error or '—'
                         if disk_info is not None:
-                            used, _, _, total, count = disk_info
+                            used, _, _, total, _ = disk_info
                             storage_text = f'{self._human_size(used)} / {self._human_size(total)}'
-                            if storage_rows == 2:
-                                storage_text += f'   {self.t("nbo_storage_count")}: {count}'
+                        if inventory_error:
+                            storage_text = self.t('nbo_inventory_unavailable') + ' | ' + storage_text
+                        label += ' (B)'
                         if storage_rows == 1:
                             self._put(storage_y, 3, f'{label}: {storage_text}'[:w - 6],
-                                      'warning' if disk_error else 'muted')
+                                      'warning' if disk_error or inventory_error else 'muted')
                         else:
                             self._put(storage_y, 3, label[:w - 6], 'section')
                             self._put(storage_y + 1, 4, storage_text[:w - 8],
-                                      'warning' if disk_error else 'muted')
+                                      'warning' if disk_error or inventory_error else 'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
                 self._check_quit(key)
@@ -2260,10 +2318,9 @@ class CursesMenu:
                     else:
                         chosen.add(path)
                 elif key in (curses.KEY_F5,):
-                    try:
-                        reload_inventory()
-                    except (BackupError, OSError) as exc:
-                        self._show_lines(self.t('tui_error_title'),[(safe_text(exc),'failure')])
+                    if not reload_inventory():
+                        self.stdscr.timeout(-1)
+                        self._show_lines(self.t('tui_error_title'), [(inventory_error, 'failure')])
                         self.stdscr.timeout(120)
                 elif key in (curses.KEY_UP,curses.KEY_DOWN,ord('j'),ord('k'),
                              curses.KEY_LEFT,curses.KEY_RIGHT,
@@ -2276,6 +2333,31 @@ class CursesMenu:
                             cursor = len(entries)-1 if key in (curses.KEY_UP,ord('k')) else 0
                         else:
                             cursor = move_selection(cursor,key,len(entries))
+                elif key in (ord('b'), ord('B')):
+                    lines = []
+                    if disk_info is not None:
+                        used, other, free, _, _ = disk_info
+                        lines.extend((f'{self.t(key)}: {self._human_size(value)}', 'muted')
+                                     for key, value in (('nbo_storage_used', used),
+                                                        ('nbo_storage_other', other),
+                                                        ('nbo_storage_free', free)))
+                    else:
+                        lines.append((disk_error or '—', 'warning'))
+                    if inventory_error:
+                        lines.append((self.t('nbo_inventory_unavailable') + ': ' + inventory_error, 'warning'))
+                    else:
+                        counts = self._backup_inventory_counts(entries)
+                        size = max(len(label) for label, _ in counts)
+                        lines.extend((f'{label:<{size}} : {count}', 'muted') for label, count in counts)
+                    lines.append((f'{self.t("nbo_chosen")}: {len(marked)}', 'title' if marked else 'muted'))
+                    if len(marked) >= 2:
+                        lines.extend([(f'{self.t("nbo_total_size")}: {self._human_size(sum(e.size for e in marked))}',
+                                       'muted'), (self.t('nbo_multi_restore_disabled'), 'warning')])
+                    self.stdscr.timeout(-1)
+                    try:
+                        self._show_lines(self.t('nbo_storage_label'), lines, allow_quit=True)
+                    finally:
+                        self.stdscr.timeout(120)
                 elif key in (ord('i'), ord('I')) and focus != 'actions' and props:
                     # A long filename can always be read in full, even when the
                     # compact bottom panel has only one preview row.
