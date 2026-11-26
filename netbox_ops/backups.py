@@ -876,12 +876,12 @@ class BackupManager:
     def dashboard_storage(self) -> tuple[tuple[int, int, int, int, int], BackupSummary | None]:
         """One chronological inventory and disk measurement; no archive/manifest reads."""
         try:
-            info = self.directory.stat()
+            info = self.directory.lstat()
         except FileNotFoundError:
             base = self.directory.parent
             files = []
         else:
-            if not stat.S_ISDIR(info.st_mode) or self.directory.is_symlink():
+            if not stat.S_ISDIR(info.st_mode):
                 raise BackupError('Backup directory is not a real directory')
             base = self.directory
             files = self.list_backups()
