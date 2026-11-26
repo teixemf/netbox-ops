@@ -127,6 +127,7 @@
   "backup_restore_cli_hint": "Para ficheiros externos, utilize: sudo netbox-ops restore <tipo> --file CAMINHO",
   "menu_backup_manage": "Gestão de backups",
   "nbo_main_hint": "1–4 Abrir | ↑↓ Selecionar | Enter Abrir | B Detalhes | F5 Atualizar | L Idioma | Q Sair",
+  "nbo_main_hint_compact": "1–4 | ↑↓ Enter | B Info | F5 | L | Q",
   "nbo_menu_label": "MENU",
   "nbo_dashboard_label": "ESTADO DA PLATAFORMA",
   "nbo_dashboard_failed": "Falhou",
