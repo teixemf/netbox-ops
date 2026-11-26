@@ -9,10 +9,9 @@ import textwrap
 import time
 import datetime as dt
 import queue
-import shutil
 import concurrent.futures
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from . import __version__
 from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
@@ -21,6 +20,9 @@ from .journal import JournalPanel, JournalViewport
 from .menu import TUI_MENU_ACTIONS, UPGRADE_ACTIONS
 from .services import (ServiceError, ServiceState, SystemdServices, ServiceVersionCache,
                        challenge, order_services, perform_service_batch)
+
+if TYPE_CHECKING:
+    from .backups import BackupSummary
 
 SECTIONS = {0: 'menu_services', 1: 'menu_backups', 2: 'menu_updates',
             4: 'menu_maintenance'}
@@ -893,9 +895,8 @@ class CursesMenu:
         legend = [(used, 'disk_backup'), (other, 'disk_other'),
                   (available, 'disk_free'), (count_label, 'muted')]
         remaining = bottom - y + 1
-        # The donut is nine rows high. Reserve two more rows for the latest
-        # backup summary planned in #171; compact text is always available.
-        if disk[3] and remaining >= 11 and width >= 20 + max(len(label) + 2 for label, _ in legend):
+        # The caller reserves any latest-backup rows before drawing storage.
+        if disk[3] and remaining >= 9 and width >= 20 + max(len(label) + 2 for label, _ in legend):
             self._draw_storage_ring(x, y, disk)
             for row, (label, style) in enumerate(legend, y):
                 self._put(row, x + 20, f'● {label}' if style != 'muted' else label, style)
@@ -913,15 +914,29 @@ class CursesMenu:
             return y + 2
         return y + 1
 
+    def _latest_backup_lines(self, latest: BackupSummary | None, width: int) -> list[tuple[str, str]]:
+        """Report the observed filename date or mtime, never verified recovery."""
+        if latest is None:
+            return [(self.t('nbo_latest_none'), 'muted')]
+        title = self.t('nbo_latest_' + latest.source)
+        stamp = latest.timestamp.astimezone(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        tag = self.t({'manual': 'nbo_manual_short', 'pre_restore': 'nbo_pre_restore_short',
+                      'unknown': 'nbo_latest_unknown_tag'}[latest.purpose])
+        detail = f'{latest.kind} / {tag}'
+        if len(title) + 2 + len(stamp) <= width:
+            return [(f'{title}: {stamp}', 'section'), (detail, 'muted')]
+        return [(title, 'section'), (stamp, 'muted'), (detail, 'muted')]
+
     def _main(self) -> int:
         """Main screen: compact menu and live service/storage dashboard."""
-        from .backups import BackupManager
+        from .backups import BackupError, BackupManager
         names = list(SERVICE_NAMES)
         states: list[ServiceState] = []
         metrics: dict[str, str] = {}
         service_error = ''
         storage = (0, 0, 0)
         disk = (0, 0, 0, 0, 0)
+        latest: BackupSummary | None = None
         storage_error = ''
         last_updated = 0.0
         last_storage = 0.0
@@ -953,14 +968,14 @@ class CursesMenu:
                 if now - last_storage >= 15 or not last_storage:
                     last_storage = now
                     try:
-                        storage = manager.storage_stats()
-                        # disk_usage does not walk backup contents.
-                        usage = shutil.disk_usage(manager.directory if manager.directory.exists() else manager.directory.parent)
-                        occupied, _, count = storage
-                        disk = (occupied, max(0,usage.used-occupied),usage.free,usage.total,count)
+                        disk, latest = manager.dashboard_storage()
+                        storage = (disk[0], disk[2], disk[4])
                         storage_error = ''
-                    except (OSError, ValueError) as exc:
-                        storage_error = safe_text(exc)[:90]
+                    except (BackupError, OSError, ValueError, OverflowError) as exc:
+                        disk = (0, 0, 0, 0, 0)
+                        storage = (0, 0, 0)
+                        latest = None
+                        storage_error = safe_text(exc)[:90] or self.t('nbo_latest_unavailable')
                 items = make_main_items(self.t)
                 frame = self._frame(self.t('tui_main_title'), self.t('nbo_main_hint'))
                 if frame:
@@ -987,9 +1002,25 @@ class CursesMenu:
                         dashboard_x, 4, dashboard_width, states, metrics, service_error)
                     if separator <= bottom:
                         self._put(separator, dashboard_x, '─' * dashboard_width, 'muted')
-                    next_row = self._draw_dashboard_storage(
-                        dashboard_x, separator + 1, dashboard_width, bottom,
-                        storage, disk, storage_error)
+                    if storage_error:
+                        next_row = self._draw_dashboard_storage(
+                            dashboard_x, separator + 1, dashboard_width, bottom,
+                            storage, disk, storage_error)
+                    else:
+                        latest_lines = self._latest_backup_lines(latest, dashboard_width)
+                        storage_bottom = bottom - len(latest_lines)
+                        next_row = separator + 1
+                        # At minimum height preserve the latest date/type/tag
+                        # instead of clipping the observation or the footer.
+                        if storage_bottom >= next_row + 1:
+                            next_row = self._draw_dashboard_storage(
+                                dashboard_x, next_row, dashboard_width, storage_bottom,
+                                storage, disk, '')
+                        for label, style in latest_lines:
+                            if next_row > bottom:
+                                break
+                            self._put(next_row, dashboard_x, label[:dashboard_width], style)
+                            next_row += 1
                     if next_row <= bottom and h > 31:
                         self._put(next_row, dashboard_x, self.t('nbo_live_note')[:dashboard_width], 'muted')
                     self.stdscr.refresh()
