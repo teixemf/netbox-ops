@@ -857,7 +857,8 @@ class CursesMenu:
             if size < 1:
                 break
             positions.append((i, offset, size))
-            self._put(y, offset, fit(headers[i], size), 'muted')
+            heading = fit(headers[i], size)
+            self._put(y, offset, heading.rjust(size) if i in (3, 4) else heading, 'muted')
             offset += size + gap
         if error:
             self._put(y + 1, x, fit(error, width), 'failure')
