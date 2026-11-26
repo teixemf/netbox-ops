@@ -105,3 +105,15 @@ panel uses the existing disk chart only when it and its legend fit; otherwise
 show compact textual usage/count. Keep all dashboard rows above the footer, and
 reserve room for the latest-backup summary where possible. Do not change menu
 navigation or the existing refresh intervals.
+
+The latest local backup found is derived from the same filesystem inventory as
+storage usage/count. Display the timestamp in UTC, explicitly labeled as the
+name-derived date or filesystem modification date (fallback). Display the
+recognized archive kind (including historical full and legacy) and the
+filename-derived manual/pre-restore tag, or an unknown tag for imported names.
+The dashboard does not read manifests, decompress or verify archives; an
+observed filename/type/tag is not proof of successful creation, integrity or
+a complete recovery point. A refresh failure replaces the previous snapshot
+with an error. Refresh every 15 seconds, on F5/R and after returning from backup
+management. On the shortest terminals, keep the latest date/type/tag instead
+of the disk chart and, if necessary, the storage usage rows.

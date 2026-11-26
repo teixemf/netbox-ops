@@ -1,10 +1,11 @@
 """Main dashboard layout without a real terminal or systemd."""
 import curses
+import datetime as dt
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from netbox_ops.backups import BackupSummary
 from netbox_ops.config import SERVICE_NAMES
 from netbox_ops.i18n import LANGUAGES, Translator
 from netbox_ops.services import ServiceError, ServiceState
@@ -134,21 +135,25 @@ class DashboardLayoutTests(unittest.TestCase):
                 systemd = MagicMock()
                 systemd.status.side_effect = [service_states(), ServiceError('systemd unavailable')]
                 manager = MagicMock()
-                manager.directory = Path('/tmp')
-                manager.storage_stats.side_effect = [(1024, 4096, 2), OSError('storage unavailable')]
+                latest = BackupSummary(Path('/backup/latest.dump'), 'db',
+                                       dt.datetime(2026, 11, 25, 12, 34, tzinfo=dt.timezone.utc),
+                                       'filename', 'manual')
+                manager.dashboard_storage.side_effect = [
+                    ((1024, 3072, 4096, 8192, 2), latest), OSError('storage unavailable'),
+                ]
                 with (patch('netbox_ops.tui.load_config'),
                       patch('netbox_ops.tui.SystemdServices', return_value=systemd),
-                      patch('netbox_ops.backups.BackupManager', return_value=manager),
-                      patch('netbox_ops.tui.shutil.disk_usage',
-                            return_value=SimpleNamespace(used=4096, free=4096, total=8192))):
+                      patch('netbox_ops.backups.BackupManager', return_value=manager)):
                     self.assertEqual(menu._main(), 0)
                 self.assertEqual(systemd.status.call_count, 2)
-                self.assertEqual(manager.storage_stats.call_count, 2)
+                self.assertEqual(manager.dashboard_storage.call_count, 2)
                 for frame, width, height in zip(screen.frames, (140, 50, 50), (34, 16, 16)):
                     split = max(22, width * 35 // 100)
                     x = split + 2
                     self.assertIn((10, x, '─' * (width - split - 4), 0), frame)
-                    self.assertTrue(any(y == 11 and col == x and text == menu.t('nbo_storage_label')
+                    label = menu.t('nbo_storage_label' if frame is not screen.frames[1]
+                                   else 'nbo_latest_filename')[:width - split - 4]
+                    self.assertTrue(any(y == 11 and col == x and text == label
                                         for y, col, text, _ in frame))
                     self.assertFalse(any(y >= height - 2 and col >= x and 'KiB' in text
                                          for y, col, text, _ in frame))
@@ -156,4 +161,66 @@ class DashboardLayoutTests(unittest.TestCase):
                 self.assertIn('systemd unavailable', final)
                 self.assertIn('storage unavailable', final)
                 self.assertNotIn('1.0 KiB', final)
+                self.assertNotIn('2026-11-25 12:34 UTC', final)
+                for frame in screen.frames[:2]:
+                    self.assertTrue(any('2026-11-25 12:34 UTC' in text for _, _, text, _ in frame))
+                    self.assertTrue(any('db / ' + menu.t('nbo_manual_short') in text
+                                        for _, _, text, _ in frame))
                 self.assertEqual(screen.wait_ms, -1)
+
+    def test_latest_lines_show_utc_source_and_unknown_tag_in_both_languages(self):
+        stamp = dt.datetime(2026, 11, 26, 2, 5, tzinfo=dt.timezone(dt.timedelta(hours=1)))
+        for language in LANGUAGES:
+            menu, _ = self.menu(language)
+            for kind, source, purpose, tag in (
+                ('combined', 'filename', 'manual', 'nbo_manual_short'),
+                ('full', 'filename', 'pre_restore', 'nbo_pre_restore_short'),
+                ('legacy', 'mtime', 'unknown', 'nbo_latest_unknown_tag'),
+            ):
+                latest = BackupSummary(Path('/backup/archive'), kind, stamp, source, purpose)
+                for width in (24, 85):
+                    with self.subTest(language=language, kind=kind, width=width):
+                        rows = menu._latest_backup_lines(latest, width)
+                        self.assertTrue(all(len(line) <= width for line, _ in rows))
+                        text = ' '.join(line for line, _ in rows)
+                        self.assertIn(menu.t('nbo_latest_' + source), text)
+                        self.assertIn('2026-11-26 01:05 UTC', text)
+                        self.assertIn(kind + ' / ' + menu.t(tag), text)
+            self.assertEqual(menu._latest_backup_lines(None, 24),
+                             [(menu.t('nbo_latest_none'), 'muted')])
+
+    def test_dashboard_refresh_cadence_return_and_f5_replace_latest_snapshot(self):
+        screen = FakeScreen([-1, -1, ord('2'), curses.KEY_F5, ord('q')], dimensions=(34, 140))
+        menu, _ = self.menu('en', screen=screen)
+        systemd = MagicMock()
+        systemd.status.return_value = service_states()
+        manager = MagicMock()
+        before = BackupSummary(Path('/backup/one.dump'), 'db',
+                               dt.datetime(2026, 11, 25, 12, tzinfo=dt.timezone.utc),
+                               'filename', 'manual')
+        after = BackupSummary(Path('/backup/two.media.tar.gz'), 'media',
+                              dt.datetime(2026, 11, 26, 1, tzinfo=dt.timezone.utc),
+                              'mtime', 'pre_restore')
+        manager.dashboard_storage.side_effect = [
+            ((1024, 3072, 4096, 8192, 1), before),
+            ((0, 4096, 4096, 8192, 0), None),
+            ((1024, 3072, 4096, 8192, 1), after),
+            OSError('backup inventory unavailable'),
+        ]
+        with (patch('netbox_ops.tui.load_config'),
+              patch('netbox_ops.tui.SystemdServices', return_value=systemd),
+              patch('netbox_ops.backups.BackupManager', return_value=manager),
+              patch('netbox_ops.tui.time.monotonic', side_effect=[100, 101, 115, 116, 117]),
+              patch.object(menu, '_backups') as backups):
+            self.assertEqual(menu._main(), 0)
+        backups.assert_called_once()
+        self.assertEqual(manager.dashboard_storage.call_count, 4)
+        frames = [' '.join(text for _, _, text, _ in frame) for frame in screen.frames]
+        self.assertIn('2026-11-25 12:00 UTC', frames[0])
+        self.assertIn('2026-11-25 12:00 UTC', frames[1])
+        self.assertIn(menu.t('nbo_latest_none'), frames[2])
+        self.assertNotIn('2026-11-25 12:00 UTC', frames[2])
+        self.assertIn('2026-11-26 01:00 UTC', frames[3])
+        self.assertIn('media / ' + menu.t('nbo_pre_restore_short'), frames[3])
+        self.assertIn('backup inventory unavailable', frames[4])
+        self.assertNotIn('2026-11-26 01:00 UTC', frames[4])

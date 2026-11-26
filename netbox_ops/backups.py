@@ -61,6 +61,25 @@ class BackupEntry:
     purpose: str = 'manual'  # manual | pre_restore
 
 
+@dataclass(frozen=True)
+class BackupSummary:
+    """Filesystem observation, not evidence of archive validity."""
+    path: Path
+    kind: str
+    timestamp: dt.datetime
+    source: str  # filename | mtime
+    purpose: str  # manual | pre_restore | unknown
+
+
+def _backup_filename_time(path: Path) -> dt.datetime | None:
+    match = re.search(r'(?<!\d)(\d{8}T\d{6}Z)(?!\d)', path.name)
+    try:
+        return (dt.datetime.strptime(match.group(1), '%Y%m%dT%H%M%SZ')
+                .replace(tzinfo=dt.timezone.utc) if match else None)
+    except (OverflowError, ValueError):
+        return None
+
+
 ProgressCallback = Callable[[str, int, int, str], None]
 
 
@@ -735,12 +754,8 @@ class BackupManager:
         # For older/unrecognised names, fall back to the file modification time.
         def created_at(path: Path) -> tuple[float, float, str]:
             info = path.stat()
-            match = re.search(r'(?<!\d)(\d{8}T\d{6}Z)(?!\d)', path.name)
-            try:
-                created = dt.datetime.strptime(match.group(1), '%Y%m%dT%H%M%SZ') if match else None
-                timestamp = created.replace(tzinfo=dt.timezone.utc).timestamp() if created else info.st_mtime
-            except (OverflowError, ValueError):
-                timestamp = info.st_mtime
+            created = _backup_filename_time(path)
+            timestamp = created.timestamp() if created else info.st_mtime
             return (timestamp, info.st_mtime, path.name)
         return sorted(paths, key=created_at, reverse=True)
 
@@ -845,13 +860,49 @@ class BackupManager:
     def storage_stats(self) -> tuple[int, int, int]:
         '''(bytes occupied by recognised backups, filesystem bytes free, number).'''
         files = self.list_backups()
+        occupied = self._storage_bytes(files)
+        base = self.directory if self.directory.exists() else self.directory.parent
+        return occupied, shutil.disk_usage(base).free, len(files)
+
+    @staticmethod
+    def _storage_bytes(files: list[Path]) -> int:
         occupied = sum(p.stat().st_size for p in files)
         for p in files:
             sidecar = Path(str(p) + '.json')
             if sidecar.is_file() and not sidecar.is_symlink():
                 occupied += sidecar.stat().st_size
-        base = self.directory if self.directory.exists() else self.directory.parent
-        return occupied, shutil.disk_usage(base).free, len(files)
+        return occupied
+
+    def dashboard_storage(self) -> tuple[tuple[int, int, int, int, int], BackupSummary | None]:
+        """One chronological inventory and disk measurement; no archive/manifest reads."""
+        try:
+            info = self.directory.lstat()
+        except FileNotFoundError:
+            base = self.directory.parent
+            files = []
+        else:
+            if not stat.S_ISDIR(info.st_mode):
+                raise BackupError('Backup directory is not a real directory')
+            base = self.directory
+            files = self.list_backups()
+        occupied = self._storage_bytes(files)
+        usage = shutil.disk_usage(base)
+        disk = (occupied, max(0, usage.used - occupied), usage.free, usage.total, len(files))
+        if not files:
+            return disk, None
+        path = files[0]  # Existing chronological order, across all recognized types.
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise BackupError('Latest backup removed or unsafe')
+        kind = self.classify(path)
+        timestamp = _backup_filename_time(path)
+        source = 'filename' if timestamp is not None else 'mtime'
+        if timestamp is None:
+            timestamp = dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc)
+        prefix = 'netbox-' + ('files' if kind == 'legacy' else kind) + '-'
+        # Do not infer a manual backup from an arbitrary imported archive name.
+        purpose = self.backup_purpose(path) if path.name.startswith(prefix) else 'unknown'
+        return disk, BackupSummary(path, kind, timestamp, source, purpose)
 
     def storage_breakdown(self) -> tuple[int, int, int, int, int]:
         """(backup bytes, other disk used bytes, free bytes, total bytes, count).

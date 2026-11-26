@@ -43,7 +43,7 @@ class MenuNavigationTests(unittest.TestCase):
                      patch('netbox_ops.tui.load_config'), \
                      patch('netbox_ops.backups.BackupManager') as backups, \
                      patch.object(menu, method, return_value=None) as action:
-                    backups.return_value.storage_stats.return_value = (0, 0, 0)
+                    backups.return_value.dashboard_storage.return_value = ((0, 0, 0, 0, 0), None)
                     menu.versions.request = MagicMock()
                     self.assertEqual(menu._main(), 0)
                 action.assert_called_once_with(*args)
@@ -156,7 +156,7 @@ class RestartSafetyTests(unittest.TestCase):
         with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
              patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups, \
              patch.object(menu, '_show_lines') as show:
-            backups.return_value.storage_stats.return_value = (0,0,0)
+            backups.return_value.dashboard_storage.return_value = ((0, 0, 0, 0, 0), None)
             self.assertEqual(menu.run(), 0)
         self.assertEqual(show.call_count, 1)
         self.assertIn('NÃO IMPLEMENTADO', show.call_args.args[1][0][0])
@@ -194,7 +194,7 @@ class NewServiceTuiTests(unittest.TestCase):
         systemd.status.return_value=[]
         with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices',return_value=systemd), \
              patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups:
-            backups.return_value.storage_stats.return_value=(0,0,0)
+            backups.return_value.dashboard_storage.return_value = ((0, 0, 0, 0, 0), None)
             self.assertEqual(menu.run(),0)
 
     def test_status_initial_view_has_no_highlight(self):
