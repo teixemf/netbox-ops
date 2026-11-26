@@ -2352,6 +2352,9 @@ class CursesMenu:
                         panel_width = w - x - 3
                         self._paint(detail_y, split + 1, w - split - 4, panel_height)
                         self._put(detail_y, x, self.t('nbo_storage_label')[:panel_width], 'section')
+                        legend_x = x
+                        legend_width = panel_width
+                        counts_start = detail_y + 3
                         if disk_info is not None:
                             used, other, free, total, _ = disk_info
                             show_ring = panel_height >= 10 and panel_width >= 46
@@ -2366,34 +2369,35 @@ class CursesMenu:
                                 for j, (label, value, color) in enumerate(legends):
                                     self._put(detail_y + 1 + j, legend_x,
                                               f'● {label}: {self._human_size(value)}'[:legend_width], color)
-                                # Inventory owns counts; disk accounting supplies bytes.
-                                start = detail_y + 5
-                                end = detail_y + panel_height - (3 if len(marked) >= 2 and panel_height >= 8 else 0)
-                                size = max((len(label) for label, _ in count_rows), default=0)
-                                if count_rows and start + len(count_rows) <= end and all(
-                                        size + 3 + len(str(count)) <= legend_width for _, count in count_rows):
-                                    for row, (label, count) in enumerate(count_rows, start):
-                                        self._put(row, legend_x, f'{label:<{size}} : {count}', 'muted')
-                                else:
-                                    message = (self.t('nbo_inventory_unavailable') if inventory_error
-                                               else self.t('nbo_inventory_details'))
-                                    self._put(detail_y + 4, legend_x, message[:legend_width],
-                                              'warning' if inventory_error else 'muted')
+                                counts_start = detail_y + 5
                             else:
                                 self._put(detail_y + 1, x,
                                           f'{self._human_size(used)} / {self._human_size(total)}'[:panel_width],
                                           'muted')
-                            if len(marked) >= 2 and panel_height >= 8:
-                                sy = detail_y + panel_height - 3
-                                self._put(sy, legend_x, (self.t('nbo_multi_title') +
-                                          f' ({len(marked)})')[:legend_width], 'section')
-                                self._put(sy + 1, legend_x, (f'{self.t("nbo_total_size")}: '
-                                          f'{self._human_size(sum(e.size for e in marked))}')[:legend_width], 'muted')
-                                self._put(sy + 2, legend_x,
-                                          self.t('nbo_multi_restore_disabled')[:legend_width], 'warning')
                         else:
                             self._put(detail_y + 1, x, (disk_error or '—')[:panel_width],
-                                      'warning' if disk_error or inventory_error else 'muted')
+                                      'warning' if disk_error else 'muted')
+                        # Inventory counts are independent of disk accounting.
+                        show_multi = len(marked) >= 2 and panel_height >= 8
+                        counts_end = detail_y + panel_height - (3 if show_multi else 0)
+                        size = max((len(label) for label, _ in count_rows), default=0)
+                        if count_rows and counts_start + len(count_rows) <= counts_end and all(
+                                size + 3 + len(str(count)) <= legend_width for _, count in count_rows):
+                            for row, (label, count) in enumerate(count_rows, counts_start):
+                                self._put(row, legend_x, f'{label:<{size}} : {count}', 'muted')
+                        elif counts_start - 1 < counts_end:
+                            message = (self.t('nbo_inventory_unavailable') if inventory_error
+                                       else self.t('nbo_inventory_details'))
+                            self._put(counts_start - 1, legend_x, message[:legend_width],
+                                      'warning' if inventory_error else 'muted')
+                        if show_multi:
+                            sy = detail_y + panel_height - 3
+                            self._put(sy, legend_x, (self.t('nbo_multi_title') +
+                                      f' ({len(marked)})')[:legend_width], 'section')
+                            self._put(sy + 1, legend_x, (f'{self.t("nbo_total_size")}: '
+                                      f'{self._human_size(sum(e.size for e in marked))}')[:legend_width], 'muted')
+                            self._put(sy + 2, legend_x,
+                                      self.t('nbo_multi_restore_disabled')[:legend_width], 'warning')
                     else:
                         self._paint(storage_y, 2, w - 4, storage_rows)
                         label = self.t('nbo_storage_label')

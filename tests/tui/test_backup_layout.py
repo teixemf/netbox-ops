@@ -164,6 +164,35 @@ class BackupLayoutTests(unittest.TestCase):
         self.assertNotIn('999', str(rows))
         manager.describe_one.assert_not_called()
 
+    def test_disk_measurement_failure_does_not_hide_inventory_counts(self):
+        screen = FakeScreen([27], dimensions=(36, 120))
+        menu = CursesMenu(screen, Translator('en'))
+        manager = MagicMock()
+        manager.quick_list.return_value = self.entries[:2]
+        manager.storage_breakdown.side_effect = OSError('Disk measurement failed')
+        with (patch('netbox_ops.backups.BackupManager', return_value=manager),
+              patch('netbox_ops.tui.load_config')):
+            menu._backups()
+        frame = screen.frames[-1]
+        self.assertTrue(any(text == 'Disk measurement failed' for _, _, text, _ in frame))
+        for count in ('Database : 2', 'Media    : 0', 'Combined : 0', 'Total    : 2'):
+            self.assertTrue(any(text == count for _, _, text, _ in frame), count)
+
+    def test_inventory_refresh_failure_is_not_reported_as_zero_and_recovers(self):
+        screen = FakeScreen([curses.KEY_F5, curses.KEY_F5, 27], dimensions=(36, 120))
+        menu = CursesMenu(screen, Translator('en'))
+        manager = MagicMock()
+        manager.quick_list.side_effect = [[], OSError('Inventory read failed'), self.entries[:1]]
+        manager.storage_breakdown.return_value = (100, 100, 800, 1000, 999)
+        with (patch('netbox_ops.backups.BackupManager', return_value=manager),
+              patch('netbox_ops.tui.load_config'), patch.object(menu, '_show_lines')):
+            menu._backups()
+        empty, failed, recovered = screen.frames[:3]
+        self.assertTrue(any(text == 'Total    : 0' for _, _, text, _ in empty))
+        self.assertTrue(any(text == 'Inventory unavailable' for _, _, text, _ in failed))
+        self.assertFalse(any(text.startswith('Total ') for _, _, text, _ in failed))
+        self.assertTrue(any(text == 'Total    : 1' for _, _, text, _ in recovered))
+
     def test_select_all_remains_a_real_action_after_separator(self):
         frames = self.render('en', (30, 120),
                              [9] + [curses.KEY_RIGHT] * 4 + [10, 27, 27, 27])
