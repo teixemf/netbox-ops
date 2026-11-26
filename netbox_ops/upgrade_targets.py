@@ -230,6 +230,10 @@ class TargetModel:
                 listing is None or version not in self._plugin_versions(component, listing)
             ):
                 raise UpgradePlanError('Select an installed or published newer stable plugin version')
+            known = self._assessments.get((component, version, self.selection.netbox,
+                                           self.context.installation.python_version))
+            if version != current[component] and known is not None and known.availability == 'unavailable':
+                raise UpgradePlanError('Selected plugin release is no longer available')
             targets = dict(self.selection.plugins)
             targets[component] = version
             self.selection = replace(self.selection, plugins=tuple(sorted(targets.items())))
