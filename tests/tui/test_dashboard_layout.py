@@ -167,3 +167,60 @@ class DashboardLayoutTests(unittest.TestCase):
                     self.assertTrue(any('db / ' + menu.t('nbo_manual_short') in text
                                         for _, _, text, _ in frame))
                 self.assertEqual(screen.wait_ms, -1)
+
+    def test_latest_lines_show_utc_source_and_unknown_tag_in_both_languages(self):
+        stamp = dt.datetime(2026, 11, 26, 2, 5, tzinfo=dt.timezone(dt.timedelta(hours=1)))
+        for language in LANGUAGES:
+            menu, _ = self.menu(language)
+            for kind, source, purpose, tag in (
+                ('combined', 'filename', 'manual', 'nbo_manual_short'),
+                ('full', 'filename', 'pre_restore', 'nbo_pre_restore_short'),
+                ('legacy', 'mtime', 'unknown', 'nbo_latest_unknown_tag'),
+            ):
+                latest = BackupSummary(Path('/backup/archive'), kind, stamp, source, purpose)
+                for width in (24, 85):
+                    with self.subTest(language=language, kind=kind, width=width):
+                        rows = menu._latest_backup_lines(latest, width)
+                        self.assertTrue(all(len(line) <= width for line, _ in rows))
+                        text = ' '.join(line for line, _ in rows)
+                        self.assertIn(menu.t('nbo_latest_' + source), text)
+                        self.assertIn('2026-11-26 01:05 UTC', text)
+                        self.assertIn(kind + ' / ' + menu.t(tag), text)
+            self.assertEqual(menu._latest_backup_lines(None, 24),
+                             [(menu.t('nbo_latest_none'), 'muted')])
+
+    def test_dashboard_refresh_cadence_return_and_f5_replace_latest_snapshot(self):
+        screen = FakeScreen([-1, -1, ord('2'), curses.KEY_F5, ord('q')], dimensions=(34, 140))
+        menu, _ = self.menu('en', screen=screen)
+        systemd = MagicMock()
+        systemd.status.return_value = service_states()
+        manager = MagicMock()
+        before = BackupSummary(Path('/backup/one.dump'), 'db',
+                               dt.datetime(2026, 11, 25, 12, tzinfo=dt.timezone.utc),
+                               'filename', 'manual')
+        after = BackupSummary(Path('/backup/two.media.tar.gz'), 'media',
+                              dt.datetime(2026, 11, 26, 1, tzinfo=dt.timezone.utc),
+                              'mtime', 'pre_restore')
+        manager.dashboard_storage.side_effect = [
+            ((1024, 3072, 4096, 8192, 1), before),
+            ((0, 4096, 4096, 8192, 0), None),
+            ((1024, 3072, 4096, 8192, 1), after),
+            OSError('backup inventory unavailable'),
+        ]
+        with (patch('netbox_ops.tui.load_config'),
+              patch('netbox_ops.tui.SystemdServices', return_value=systemd),
+              patch('netbox_ops.backups.BackupManager', return_value=manager),
+              patch('netbox_ops.tui.time.monotonic', side_effect=[100, 101, 115, 116, 117]),
+              patch.object(menu, '_backups') as backups):
+            self.assertEqual(menu._main(), 0)
+        backups.assert_called_once()
+        self.assertEqual(manager.dashboard_storage.call_count, 4)
+        frames = [' '.join(text for _, _, text, _ in frame) for frame in screen.frames]
+        self.assertIn('2026-11-25 12:00 UTC', frames[0])
+        self.assertIn('2026-11-25 12:00 UTC', frames[1])
+        self.assertIn(menu.t('nbo_latest_none'), frames[2])
+        self.assertNotIn('2026-11-25 12:00 UTC', frames[2])
+        self.assertIn('2026-11-26 01:00 UTC', frames[3])
+        self.assertIn('media / ' + menu.t('nbo_pre_restore_short'), frames[3])
+        self.assertIn('backup inventory unavailable', frames[4])
+        self.assertNotIn('2026-11-26 01:00 UTC', frames[4])
