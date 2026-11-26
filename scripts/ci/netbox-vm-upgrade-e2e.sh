@@ -155,6 +155,127 @@ echo 'PASS: stale fingerprint rejected before downtime'
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 wait_health "$old"
 
+# Exercise real TUI selection, review, cancellation and execution. Only the
+# screen is synthetic; inventory, planning, execution and recovery are real.
+if [[ "$scenario" == netbox || "$scenario" == plugins || "$scenario" == combined ]]; then
+  python3 - "$scenario" "$target" "$plugin" "$new_plugin" "$status_url" <<'PY'
+import curses
+import sys
+import subprocess
+import time
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.config import load_config
+from netbox_ops.i18n import Translator
+from netbox_ops.tui import CursesMenu
+from netbox_ops.upgrade_dashboard import UpgradeDashboard
+from netbox_ops.upgrade_plan import UpgradePlanError
+from netbox_ops.upgrade_targets import MAX_PICKER_ROWS, TargetModel, discover_target_context
+from tests.helpers.fake_screen import FakeScreen
+
+scenario, target, plugin, plugin_target, status_url = sys.argv[1:]
+cfg = load_config()
+context = discover_target_context(cfg)
+class TimedScreen(FakeScreen):
+    def getch(self):
+        # Match curses timeout behavior while backend work is in progress.
+        # Do not deliver a queued approval or result acknowledgement to a job.
+        if getattr(self, 'wait_ms', -1) >= 0:
+            time.sleep(self.wait_ms / 1000)
+            return -1
+        return super().getch()
+
+screen = TimedScreen(dimensions=(34, 140))
+menu = CursesMenu(screen, Translator('en'))
+dashboard = UpgradeDashboard(menu)
+dashboard.cfg = cfg
+dashboard.model = model = TargetModel(context)
+model.reset()
+assert not dashboard._enabled('validate') and not dashboard._enabled('execute')
+try:
+    model.select('tomli-w', '1.2.0')
+except UpgradePlanError:
+    pass
+else:
+    raise AssertionError('Non-plugin accepted as target')
+
+def choose(component, version):
+    # Find the pinned fixture version using the public paged catalogue,
+    # then drive the actual picker with navigation keys, not private caches.
+    offset = 0
+    while True:
+        result = model.evaluate(model.request('catalogue', component, offset=offset))
+        assert model.accept(result)
+        positions = [i for i, row in enumerate(result.rows) if row.target == version]
+        if positions:
+            screen.keys = iter([curses.KEY_NPAGE] * (offset // MAX_PICKER_ROWS)
+                               + [curses.KEY_DOWN] * positions[0] + [10])
+            assert dashboard._picker(component) == version
+            model.select(component, version)
+            return
+        offset += MAX_PICKER_ROWS
+        if offset >= result.total:
+            raise AssertionError('Pinned fixture release missing from catalogue')
+
+if scenario != 'plugins':
+    choose(None, target)
+if scenario != 'netbox':
+    choose(plugin, plugin_target)
+operation, netbox, pins = model.selection.plan_arguments(model.installed)
+assert operation == {'netbox': 'netbox', 'plugins': 'plugins', 'combined': 'stack'}[scenario]
+assert netbox == (None if scenario == 'plugins' else target)
+assert pins == ({} if scenario == 'netbox' else {plugin: plugin_target})
+result = model.evaluate(model.request('assess'))
+assert model.accept(result)
+dashboard.snapshot = result
+dashboard._validate()
+assert dashboard._enabled('execute'), 'Fixture plan is not executable'
+plan = dashboard.plan
+assert plan.target_netbox == target and dict(plan.selected_plugins) == pins
+
+# Render both supported languages and representative terminal sizes.
+for language in ('en', 'pt'):
+    for size in ((16, 50), (34, 140)):
+        menu.t = dashboard.t = Translator(language)
+        screen.dimensions = size
+        assert dashboard._draw()
+        frame = screen.frames[-1]
+        headers = ' '.join(text for y, _, text, _ in frame if y == 4)
+        for name in ('component', 'current', 'target', 'status'):
+            assert menu.t('ut_col_' + name) in headers, headers
+        print(f'PASS: {scenario} dashboard {language} {size[1]}x{size[0]}: {headers}')
+
+# Actual review, URL input and literal-token prompt; Esc must cancel
+# before the execution boundary. Guard against accidental mutation.
+screen.dimensions = (34, 140)
+screen.keys = iter([10, *map(ord, status_url), 10, 10, 27])
+with patch('netbox_ops.upgrade_ui.execute_plan',
+           side_effect=AssertionError('Cancelled review attempted execution')) as execute:
+    assert not menu._execute_reviewed_upgrade('Upgrade', cfg, operation, plan)
+    execute.assert_not_called()
+print(f'PASS: {scenario} real TUI discovery, exact picker, validation and cancellation')
+# Check cancellation before deliberately approving the real upgrade.
+assert subprocess.check_output(['git', '-C', '/opt/netbox', 'rev-parse', 'HEAD'],
+                               text=True).strip() == context.installation.commit
+assert not Path('/var/lib/netbox-ops/upgrade.pending').exists()
+assert not any(cfg.backup_directory.iterdir())
+assert dashboard._enabled('execute')
+# Use the exact reviewed plan, the real confirmation prompts and the actual
+# worker/progress path. Do not patch execute_plan or the backend here.
+menu.t = dashboard.t = Translator('en')
+approval = [10, *map(ord, status_url), 10, 10, *map(ord, 'UPGRADE'), 10]
+if plan.requires_strong_confirmation:
+    approval.extend([*map(ord, 'UNCERTAIN'), 10])
+screen.keys = iter([*approval, 10])
+assert menu._execute_reviewed_upgrade('Upgrade', cfg, operation, plan)
+assert any('Upgrade validated.' in text for _, _, text, _ in screen.frames[-1]), screen.frames[-1]
+model.reset()
+assert not dashboard._enabled('execute')
+print(f'PASS: {scenario} real TUI approval and execution')
+PY
+fi
+
 if [[ "$scenario" == failure ]]; then
   # Inject a failure only in the test process, after the genuine backup and
   # checkout/script/migrations have completed. Do not add a production flag.
@@ -191,8 +312,12 @@ PY
     [[ $(systemctl is-active "$unit" || true) == inactive ]]
   done
 else
-  "${cli[@]}" "${args[@]}" --execute --approve-plan "$fingerprint" \
-    --accept-unknowns --health-url "$status_url"
+  # Cross-minor retains the real CLI execution path. The three other
+  # success scenarios executed the exact reviewed plan through the TUI.
+  if [[ "$scenario" == cross-minor ]]; then
+    "${cli[@]}" "${args[@]}" --execute --approve-plan "$fingerprint" \
+      --accept-unknowns --health-url "$status_url"
+  fi
   [[ ! -e "$marker" ]]
   wait_health "$target"
   for unit in netbox netbox-rq; do

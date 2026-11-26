@@ -74,6 +74,15 @@ class TargetModelTests(unittest.TestCase):
         self.assertTrue(model.accept(result))
         return result
 
+    def test_cancelled_evaluation_does_not_fetch_remote_metadata(self):
+        from concurrent.futures import CancelledError
+
+        model = self.model()
+        with self.assertRaises(CancelledError):
+            model.evaluate(model.request('suggest'), cancelled=lambda: True)
+        self.fetcher.assert_not_called()
+        self.docs.assert_not_called()
+
     def test_initial_latest_netbox_and_highest_supported_plugin_not_downgrades(self):
         model = self.model()
         result = self.run_request(model, 'suggest')
