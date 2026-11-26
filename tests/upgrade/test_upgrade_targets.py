@@ -138,6 +138,8 @@ class TargetModelTests(unittest.TestCase):
         row = next(row for row in picker.rows if row.target == '2.0.0')
         self.assertEqual(row.assessment.availability, 'unavailable')
         self.assertEqual(row.assessment.status, 'warning')
+        with self.assertRaisesRegex(UpgradePlanError, 'no longer available'):
+            model.select('demo-plugin', '2.0.0')
 
     def test_target_edits_reassess_unchanged_plugins_and_preserve_explicit_choices(self):
         inventory = replace(self.context.inventory, enabled=('demo_plugin', 'other_plugin'),
