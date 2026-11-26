@@ -270,7 +270,8 @@ class CursesMenu:
     def _choose(self, title: str, entries: Sequence[tuple[str, str]],
                 hint: str, index: int = 0, headings: dict[int, str] | None = None,
                 allow_language_key: bool = False, main_menu: bool = False,
-                numeric_shortcuts: bool = False, escape_clears_selection: bool = True) -> int | None | str:
+                numeric_shortcuts: bool = False, escape_clears_selection: bool = True,
+                overview: Sequence[tuple[str, str]] = ()) -> int | None | str:
         """No initial highlight; Esc disarms selection before leaving submenu."""
         headings = headings or {}
         if not entries:
@@ -290,14 +291,26 @@ class CursesMenu:
         while True:
             frame = self._frame(title, self._quit_hint(hint))
             if frame:
-                h, _ = frame
-                rows_visible = h - 6
+                h, w = frame
+                start = 3
+                if overview:
+                    limit = min(10, max(5, (h - 7) // 2))
+                    shown = list(overview[:limit])
+                    if len(overview) > limit:
+                        shown[-1] = (self.t('upgrade_overview_more'), 'muted')
+                    for y, (label, style) in enumerate(shown, start):
+                        self._put(y, 3, safe_text(label)[:w - 6], style)
+                    start += len(shown)
+                    self._put(start, 3, '─' * (w - 7), 'muted')
+                    start += 1
+                rows_visible = max(1, h - start - 3)
+                scroll = min(scroll, max(0, len(lines) - rows_visible))
                 target = select_to_row[index] if armed else 0
                 if target < scroll:
                     scroll = target
                 elif target >= scroll + rows_visible:
                     scroll = target - rows_visible + 1
-                for y, (item_idx, label, style) in enumerate(lines[scroll:scroll + rows_visible], 3):
+                for y, (item_idx, label, style) in enumerate(lines[scroll:scroll + rows_visible], start):
                     if armed and item_idx == index:
                         self._put(y, 3, '  ' + label + '  ', 'selected')
                     elif item_idx is None:
@@ -341,8 +354,8 @@ class CursesMenu:
                     index = move_selection(index, key, len(entries))
 
     def _show_lines(self, title: str, lines: Sequence[tuple[str, str]],
-                    hint: str | None = None, *, allow_quit: bool = False) -> None:
-        """Results require acknowledgement; explicitly read-only views may quit."""
+                    hint: str | None = None, *, allow_quit: bool = False) -> bool:
+        """Return True on Enter, False on cancellation; read-only views may quit."""
         hint = hint or self.t('tui_ack_hint')
         if allow_quit:
             hint = self._quit_hint(hint)
@@ -373,7 +386,7 @@ class CursesMenu:
             if key in (27, 10, 13, curses.KEY_ENTER, 3):
                 if not allow_quit:
                     self._flush_input()
-                return
+                return key in (10, 13, curses.KEY_ENTER) and bool(frame)
             if not frame:
                 continue
             if key in (curses.KEY_DOWN, ord('j')):
@@ -999,9 +1012,10 @@ class CursesMenu:
         """Edit a shared plan and require explicit confirmation before execution."""
         from .upgrade_ui import discover_context, make_plan, summary_lines, execute_plan, alternative_release_choices
         from .upgrade_execution import UpgradeExecutionError
+        from .upgrade_tui import netbox_overview
 
         title = self.t({'netbox': 'menu_10', 'plugins': 'menu_11', 'stack': 'menu_12'}[operation])
-        hint = self.t('tui_back_hint')
+        hint = self.t('upgrade_overview_hint')
         try:
             cfg = load_config(self.config_path)
             context = self._upgrade_job(title, lambda _: discover_context(cfg, releases=operation != 'plugins'))
@@ -1022,11 +1036,21 @@ class CursesMenu:
                 entries.append((self.t('upgrade_preview'), ''))
                 actions.append('preview')
                 if plan is not None:
-                    entries.extend(((self.t('upgrade_details'), ''), (self.t('upgrade_execute'), '')))
-                    actions.extend(('details', 'execute'))
+                    entries.append((self.t('upgrade_details'), ''))
+                    actions.append('details')
+                    if plan.can_execute:
+                        entries.append((self.t('upgrade_execute'), 'warning'))
+                        actions.append('execute')
                 entries.append((self.t('upgrade_pins'), ''))
                 actions.append('pins')
-                choice = self._choose(title, entries, hint)
+                if plan is None:
+                    entries.append((self.t('upgrade_overview_details'), ''))
+                    actions.append('details')
+                entries.append((self.t('upgrade_refresh'), ''))
+                actions.append('refresh')
+                overview = netbox_overview(context, target, selected, plan, self.t, operation=operation)
+                choice = self._choose(title, entries, hint, overview=overview,
+                                      escape_clears_selection=False)
                 if not isinstance(choice, int):
                     return
                 action = actions[choice]
@@ -1035,6 +1059,17 @@ class CursesMenu:
                     if isinstance(choice, int):
                         target = context.targets[choice]
                         plan = None
+                elif action == 'refresh':
+                    plan = None
+                    refreshed = self._upgrade_job(title, lambda _: discover_context(
+                        cfg, releases=operation != 'plugins'))
+                    if refreshed is None:
+                        # Do not keep a stale catalogue or executable review.
+                        return
+                    context = refreshed
+                    if target not in context.targets:
+                        target = None
+                    selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
                 elif action == 'pins':
                     if self._review_plugin_pins(title, context.inventory):
                         plan = None
@@ -1042,6 +1077,8 @@ class CursesMenu:
                         if context is None:
                             return
                         selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
+                        if target not in context.targets:
+                            target = None
                     continue
                 elif action == 'plugins':
                     if context.plugin_selection_incomplete:
@@ -1087,17 +1124,24 @@ class CursesMenu:
                                         selected[name] = choices[candidates].version
                         plan = None
                 elif action == 'preview':
+                    plan = None
                     plan = self._upgrade_job(title, lambda _: make_plan(context, operation, target, selected))
-                    if plan is not None:
-                        self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)], allow_quit=True)
                 elif action == 'details':
-                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t, details=True)], allow_quit=True)
+                    details = overview if plan is None else [
+                        *overview, (self.t('upgrade_details'), 'section'),
+                        *((line, '') for line in summary_lines(plan, self.t, details=True)),
+                    ]
+                    self._show_lines(title, details, allow_quit=True)
                 elif action == 'execute':
                     if not plan.can_execute:
                         self._show_lines(title, [(self.t('upgrade_blocked'), 'failure')])
                         continue
-                    # Display the exact plan again immediately before approval.
-                    self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t)], allow_quit=True)
+                    # Display the full exact plan, including recovery safeguards,
+                    # again immediately before approval.
+                    if self._show_lines(title, [(line, '') for line in summary_lines(
+                            plan, self.t, details=True)], self.t('upgrade_review_hint'),
+                            allow_quit=True) is False:
+                        continue
                     url = self._upgrade_input(title, self.t('upgrade_url_prompt'))
                     if not url:
                         continue
@@ -1151,8 +1195,9 @@ class CursesMenu:
                 if not selected:
                     continue
                 review = build_pin_review(inventory, tuple(name for name in available if name in selected))
-                self._show_lines(title, [(line, '') for line in pin_review_lines(review, self.t)],
-                                 allow_quit=True)
+                if self._show_lines(title, [(line, '') for line in pin_review_lines(review, self.t)],
+                                    self.t('upgrade_review_hint'), allow_quit=True) is False:
+                    continue
                 if not self._confirm_token(title, self.t('upgrade_pin_confirm'), 'PIN',
                                            target_names=review.selected):
                     return False
@@ -1170,7 +1215,7 @@ class CursesMenu:
                 else:
                     selected.add(name)
 
-    def _upgrade_job(self, title: str, worker):
+    def _upgrade_job(self, title: str, worker, *, error_key: str = 'upgrade_discovery_error'):
         """Keep curses in the UI thread and show actual backend stage progress."""
         from contextvars import copy_context
         from .upgrade_execution import UpgradeExecutionError
@@ -1200,7 +1245,7 @@ class CursesMenu:
         except UpgradeExecutionError as exc:
             error = self.t('upgrade_error', message=str(exc))
         except Exception:
-            error = self.t('upgrade_discovery_error')
+            error = self.t(error_key)
         finally:
             self.stdscr.timeout(-1)
             self._flush_input()
@@ -1208,77 +1253,147 @@ class CursesMenu:
         return None
 
     def _self_upgrade(self) -> int | None:
-        """Browse releases, review the next step and leave on handoff."""
-        from .self_upgrade_releases import ReleaseDiscoveryError, Version, discover_releases
+        """Keep selection, compatibility, review and recovery status together."""
+        from .self_upgrade_releases import Version, discover_releases
         from .self_upgrade_ui import (
             HANDOFF_EXIT, catalogue_lines, changelog_lines, compatibility_catalogue,
-            execute_review, review_lines, review_upgrade, status_lines,
+            decision_lines, execute_review, release_status, review_lines, review_upgrade,
+            tui_recovery_state,
         )
-        from .self_upgrade_archive import ReleaseArchiveError
 
         title = self.t('menu_13')
+        hint = self.t('upgrade_overview_hint')
         try:
             installed = Version.parse(f'v{__version__}')
-            releases = sorted(discover_releases(), key=lambda item: item.version, reverse=True)
         except ValueError:
             self._show_lines(title, [(self.t('self_upgrade_invalid_version'), 'failure')])
             return None
-        except (ReleaseDiscoveryError, OSError):
-            self._show_lines(title, [(self.t('self_upgrade_discovery_failed'), 'failure')])
-            releases = []
-        catalogue = compatibility_catalogue(releases, installed)
-        lines = catalogue_lines(releases, self.t, installed, catalogue=catalogue)
-        if not releases:
-            self._show_lines(title, [(line, 'muted') for line in lines])
-        title = f"{title} — {lines[0]}"
-        entries = [(line, '') for line in lines[1:-1]] if releases else []
-        entries.append((self.t('self_upgrade_status_menu'), ''))
+
+        def discover():
+            releases = sorted(discover_releases(), key=lambda item: item.version, reverse=True)
+            catalogue = compatibility_catalogue(releases, installed)
+            # Resolve catalogue decisions in the worker, not during curses redraw.
+            lines = catalogue_lines(releases, self.t, installed, catalogue=catalogue)
+            return releases, catalogue, lines
+
+        snapshot = self._upgrade_job(title, lambda _: discover(), error_key='self_upgrade_discovery_failed')
+        selected = None
+        review = None
         while True:
-            selected = self._choose(title, entries, self.t('tui_back_hint'))
-            if not isinstance(selected, int):
+            recovery_clear, recovery = tui_recovery_state(self.t)
+            if not recovery_clear:
+                review = None
+            releases, catalogue, lines = snapshot if snapshot is not None else ([], None, [])
+            overview = [
+                (self.t('self_upgrade_installed', version=str(installed)), 'section'),
+                (self.t('self_upgrade_target', version=selected.tag if selected else '?'), 'title'),
+                (recovery[0], 'muted' if recovery_clear else 'failure'),
+            ]
+            actions = []
+            entries = []
+
+            def add(action, label, style=''):
+                actions.append(action)
+                entries.append((self.t(label), style))
+
+            decision = (review.decision if review is not None else
+                        catalogue.decision_for(selected.version) if selected and catalogue is not None else None)
+            if decision is not None:
+                status = release_status(selected, installed, decision)
+                eligible = (selected.version > installed and decision.status == 'compatible')
+                overview.insert(2, (self.t(status), 'success' if eligible else 'warning'))
+                overview.extend((line, 'muted') for line in decision_lines(decision, self.t))
+            else:
+                eligible = False
+                overview.insert(2, (self.t('upgrade_status_not_checked'), 'muted'))
+            if review is not None:
+                overview.insert(4, (self.t('self_upgrade_reviewed'), 'section'))
+            if releases:
+                add('target', 'self_upgrade_select_target')
+            else:
+                overview.append((self.t('self_upgrade_empty' if snapshot is not None else
+                                        'self_upgrade_discovery_failed'), 'warning'))
+            if selected is not None:
+                add('notes', 'self_upgrade_notes_menu')
+            if eligible:
+                add('review', 'self_upgrade_review_menu')
+                if review is not None:
+                    add('review_details', 'upgrade_overview_details')
+                    if recovery_clear:
+                        add('install', 'self_upgrade_install_reviewed', 'warning')
+            add('status', 'self_upgrade_status_menu')
+            add('refresh', 'upgrade_refresh')
+            choice = self._choose(title, entries, hint, overview=overview,
+                                  escape_clears_selection=False)
+            if not isinstance(choice, int):
                 return None
-            if selected == len(releases):
-                _, status = status_lines(self.t)
-                self._show_lines(title, [(line, '') for line in status], allow_quit=True)
-                continue
-            release = releases[selected]
-            details = changelog_lines(release, self.t, installed, catalogue=catalogue)
-            self._show_lines(self.t('menu_13'), [(line, '') for line in details], allow_quit=True)
-            if catalogue.decision_for(release.version).status != 'compatible':
-                continue
-            action = self._choose(title, [(self.t('self_upgrade_install_menu'), 'warning')],
-                                  self.t('tui_back_hint'))
-            if action != 0:
-                continue
-            try:
-                review = review_upgrade(release.version)
-            except (ReleaseArchiveError, ReleaseDiscoveryError, OSError, ValueError):
-                self._show_lines(title, [(self.t('self_upgrade_review_failed'), 'failure')])
-                continue
-            self._show_lines(title, [(line, '') for line in review_lines(review, self.t)], allow_quit=True)
-            if review.decision.status != 'compatible':
-                continue
-            if not self._confirm_token(title, self.t('self_upgrade_install_warning'), review.token,
-                                       target_names=[f'v{step}' for step in review.decision.steps]):
-                continue
+            action = actions[choice]
+            if action == 'target':
+                index = self._choose(title, [(line, '') for line in lines[1:-1]], hint,
+                                     overview=[overview[0]], escape_clears_selection=False)
+                if isinstance(index, int):
+                    selected = releases[index]
+                    review = None
+            elif action == 'notes':
+                self._show_lines(title, [(line, '') for line in changelog_lines(
+                    selected, self.t, installed, catalogue=catalogue)], allow_quit=True)
+            elif action == 'status':
+                self._show_lines(title, [(line, '') for line in recovery], allow_quit=True)
+            elif action == 'refresh':
+                selected = None
+                review = None
+                snapshot = self._upgrade_job(title, lambda _: discover(),
+                                             error_key='self_upgrade_discovery_failed')
+            elif action == 'review':
+                review = None
+                candidate = self._upgrade_job(title, lambda _: review_upgrade(selected.version),
+                                              error_key='self_upgrade_review_failed')
+                if candidate is not None:
+                    accepted = self._show_lines(title, [(line, '') for line in review_lines(candidate, self.t)],
+                                                self.t('upgrade_review_hint'), allow_quit=True)
+                    if (accepted is not False and candidate.decision.status == 'compatible'
+                            and candidate.decision.steps and candidate.target == selected.version
+                            and candidate.installed.version == installed):
+                        review = candidate
+            elif action == 'review_details':
+                self._show_lines(title, [(line, '') for line in review_lines(review, self.t)],
+                                 allow_quit=True)
+            elif action == 'install':
+                # Read live recovery state again; the backend independently
+                # rechecks the reviewed path, installation and locked state.
+                clear, status = tui_recovery_state(self.t)
+                if not clear or review is None or review.target != selected.version:
+                    review = None
+                    self._show_lines(title, [(line, 'failure') for line in status])
+                    continue
+                if self._show_lines(title, [(line, '') for line in review_lines(review, self.t)],
+                                    self.t('upgrade_review_hint'), allow_quit=True) is False:
+                    continue
+                if not self._confirm_token(title, self.t('self_upgrade_install_warning'), review.token,
+                                           target_names=[f'v{step}' for step in review.decision.steps]):
+                    continue
+                clear, status = tui_recovery_state(self.t)
+                if not clear:
+                    review = None
+                    self._show_lines(title, [(line, 'failure') for line in status])
+                    continue
+                messages = []
 
-            messages = []
+                def progress(message: str) -> None:
+                    messages.append(message)
+                    frame = self._frame(title, self.t('tui_quit_blocked'))
+                    if frame:
+                        h, w = frame
+                        for i, line in enumerate(messages[-max(1, h - 6):], 3):
+                            self._put(i, 3, safe_text(line)[:max(1, w - 6)], 'muted')
+                        self.stdscr.refresh()
 
-            def progress(message: str) -> None:
-                messages.append(message)
-                frame = self._frame(title, self.t('tui_quit_blocked'))
-                if frame:
-                    h, w = frame
-                    for i, line in enumerate(messages[-max(1, h - 6):], 3):
-                        self._put(i, 3, safe_text(line)[:max(1, w - 6)], 'muted')
-                    self.stdscr.refresh()
-
-            result = execute_review(review, review.token, self.t, progress)
-            self._flush_input()
-            if result == HANDOFF_EXIT:
-                return result
-            self._show_lines(title, [(line, '') for line in messages])
-
+                result = execute_review(review, review.token, self.t, progress)
+                self._flush_input()
+                if result == HANDOFF_EXIT:
+                    return result
+                review = None
+                self._show_lines(title, [(line, '') for line in messages])
 
     def _render_journal(self, panel: JournalPanel, y: int, rows: int,
                          x: int, width: int, *, viewport: JournalViewport) -> None:

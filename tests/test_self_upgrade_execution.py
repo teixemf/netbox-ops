@@ -14,10 +14,10 @@ from netbox_ops.self_upgrade_compatibility import LocalEnvironment, UpgradeDecis
 from netbox_ops.self_upgrade_installation import InstalledRelease
 from netbox_ops.self_upgrade_releases import Version
 from netbox_ops.self_upgrade_transaction import SwapError
-from netbox_ops.self_upgrade_ui import HANDOFF_EXIT, Review, execute_review, status_lines
+from netbox_ops.self_upgrade_ui import HANDOFF_EXIT, Review, execute_review, status_lines, tui_recovery_state
 from netbox_ops.tui import CursesMenu
 from tests.helpers.fake_screen import FakeScreen
-from tests.tui.test_self_upgrade_tui import release
+from tests.tui.test_self_upgrade_tui import ImmediateExecutor, release
 
 
 class ExecutionTests(unittest.TestCase):
@@ -111,30 +111,89 @@ class ExecutionTests(unittest.TestCase):
             with patch('netbox_ops.self_upgrade_ui.read_result', return_value={**data, 'phase': phase}):
                 self.assertEqual(status_lines(Translator('pt'))[0], expected)
 
-    def test_tui_confirmation_and_exit(self):
+    def tui_menu(self, choices, *, confirmed=True, recovery=None, show_result=True):
         menu = CursesMenu(FakeScreen(), Translator('en'))
         catalogue = MagicMock()
         catalogue.decision_for.return_value = self.review.decision
-        with (patch('netbox_ops.self_upgrade_releases.discover_releases',
+        with (patch('netbox_ops.tui.__version__', str(self.old)),
+              patch('netbox_ops.self_upgrade_releases.discover_releases',
                     return_value=[release('v0.7.0')]),
               patch('netbox_ops.self_upgrade_ui.compatibility_catalogue', return_value=catalogue),
-              patch.object(menu, '_choose', side_effect=[0, 0]),
-              patch.object(menu, '_show_lines'),
-              patch.object(menu, '_confirm_token', return_value=True) as confirm,
+              patch('netbox_ops.tui.concurrent.futures.ThreadPoolExecutor', ImmediateExecutor),
+              patch('netbox_ops.self_upgrade_ui.tui_recovery_state',
+                    side_effect=recovery or (lambda t: (True, [t('self_upgrade_no_result')]))),
+              patch.object(menu, '_choose', side_effect=choices) as choose,
+              patch.object(menu, '_show_lines', return_value=show_result) as show,
+              patch.object(menu, '_confirm_token', return_value=confirmed) as confirm,
               patch.object(menu, '_frame', return_value=None)):
-            self.assertEqual(menu._self_upgrade(), HANDOFF_EXIT)
+            result = menu._self_upgrade()
+        return result, choose, show, confirm
+
+    def test_tui_confirmation_and_exit(self):
+        result, choose, show, confirm = self.tui_menu([0, 0, 2, 4])
+        self.assertEqual(result, HANDOFF_EXIT)
         self.assertEqual(confirm.call_args.args[2], self.review.token)
         self.launch.assert_called_once()
+        self.assertIn('Install reviewed next step', str(choose.call_args_list[-1].args[1]))
+        self.assertIn('Required upgrade path', str(show.call_args_list))
 
     def test_tui_cancel_does_not_prepare(self):
-        menu = CursesMenu(FakeScreen(), Translator('pt'))
-        catalogue = MagicMock()
-        catalogue.decision_for.return_value = self.review.decision
-        with (patch('netbox_ops.self_upgrade_releases.discover_releases',
-                    return_value=[release('v0.7.0')]),
-              patch('netbox_ops.self_upgrade_ui.compatibility_catalogue', return_value=catalogue),
-              patch.object(menu, '_choose', side_effect=[0, 0, None]),
-              patch.object(menu, '_show_lines'),
-              patch.object(menu, '_confirm_token', return_value=False)):
-            self.assertIsNone(menu._self_upgrade())
+        result, _, _, confirm = self.tui_menu([0, 0, 2, 4, None], confirmed=False)
+        self.assertIsNone(result)
+        confirm.assert_called_once()
         self.prepare.assert_not_called()
+
+    def test_tui_review_cancel_does_not_offer_install(self):
+        result, choose, _, confirm = self.tui_menu([0, 0, 2, None], show_result=False)
+        self.assertIsNone(result)
+        self.assertNotIn('Install reviewed next step', str(choose.call_args_list[-1].args[1]))
+        confirm.assert_not_called()
+        self.prepare.assert_not_called()
+
+    def test_tui_recovery_pending_hides_install(self):
+        result, choose, _, confirm = self.tui_menu(
+            [0, 0, 2, None], recovery=lambda t: (False, [t('self_upgrade_recovery_pending')]))
+        self.assertIsNone(result)
+        self.assertNotIn('Install reviewed next step', str(choose.call_args_list[-1].args[1]))
+        self.assertIn('installation blocked', str(choose.call_args_list[-1].kwargs['overview']))
+        confirm.assert_not_called()
+        self.prepare.assert_not_called()
+
+    def test_tui_recovery_drift_after_review_prevents_execution(self):
+        clear = (True, ['No pending work'])
+        blocked = (False, ['Recovery required'])
+        result, _, _, confirm = self.tui_menu([0, 0, 2, 4, None],
+            recovery=[clear, clear, clear, clear, blocked, blocked])
+        self.assertIsNone(result)
+        confirm.assert_called_once()
+        self.prepare.assert_not_called()
+
+    def test_tui_refresh_invalidates_review(self):
+        result, choose, _, confirm = self.tui_menu([0, 0, 2, 6, None])
+        self.assertIsNone(result)
+        self.assertNotIn('Install reviewed next step', str(choose.call_args_list[-1].args[1]))
+        self.assertIn('Target release: ?', str(choose.call_args_list[-1].kwargs['overview']))
+        confirm.assert_not_called()
+        self.prepare.assert_not_called()
+
+    def test_tui_recovery_state_checks_markers_and_trusted_result(self):
+        t = Translator('en')
+        with (patch('netbox_ops.self_upgrade_ui.read_result', return_value=None) as read,
+              patch('netbox_ops.self_upgrade_handoff._pending', return_value=False) as pending,
+              patch('netbox_ops.self_upgrade_handoff._handoff') as handoff):
+            handoff.return_value.exists.return_value = False
+            handoff.return_value.is_symlink.return_value = False
+            self.assertTrue(tui_recovery_state(t)[0])
+            pending.return_value = True
+            self.assertFalse(tui_recovery_state(t)[0])
+            pending.return_value = False
+            handoff.return_value.is_symlink.return_value = True
+            self.assertFalse(tui_recovery_state(t)[0])
+            handoff.return_value.is_symlink.return_value = False
+            read.return_value = {'phase': 'applying', 'installed': 'v0.5.0',
+                                 'step': 'v0.6.0', 'target': 'v0.7.0'}
+            self.assertFalse(tui_recovery_state(t)[0])
+            read.return_value['phase'] = 'completed'
+            self.assertTrue(tui_recovery_state(t)[0])
+            read.side_effect = SwapError('invalid')
+            self.assertFalse(tui_recovery_state(t)[0])
