@@ -2393,7 +2393,7 @@ class CursesMenu:
                                           self.t('nbo_multi_restore_disabled')[:legend_width], 'warning')
                         else:
                             self._put(detail_y + 1, x, (disk_error or '—')[:panel_width],
-                                      'warning' if disk_error else 'muted')
+                                      'warning' if disk_error or inventory_error else 'muted')
                     else:
                         self._paint(storage_y, 2, w - 4, storage_rows)
                         label = self.t('nbo_storage_label')
@@ -2406,11 +2406,11 @@ class CursesMenu:
                         label += ' (B)'
                         if storage_rows == 1:
                             self._put(storage_y, 3, f'{label}: {storage_text}'[:w - 6],
-                                      'warning' if disk_error else 'muted')
+                                      'warning' if disk_error or inventory_error else 'muted')
                         else:
                             self._put(storage_y, 3, label[:w - 6], 'section')
                             self._put(storage_y + 1, 4, storage_text[:w - 8],
-                                      'warning' if disk_error else 'muted')
+                                      'warning' if disk_error or inventory_error else 'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
                 self._check_quit(key)
