@@ -129,6 +129,8 @@
   "nbo_main_hint": "1–5 Abrir | ↑↓ Seleccionar | Enter Abrir | F5 Actualizar | L Idioma | Q Sair",
   "nbo_menu_label": "MENU",
   "nbo_dashboard_label": "ESTADO DA PLATAFORMA",
+  "nbo_dashboard_failed": "Falhou",
+  "nbo_dashboard_transition": "Em curso",
   "nbo_columns": "SERVIÇO          CPU       RAM",
   "nbo_storage_label": "ARMAZENAMENTO DE BACKUPS",
   "nbo_storage_used": "Backups",

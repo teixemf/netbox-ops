@@ -89,3 +89,19 @@ clears the review. Check pending handoff/transaction and trusted result before
 offering installation and again before execution; the backend still owns the
 lock, archive verification, fresh plan validation and transactional handoff.
 Reopening the view shows the last recorded status, never an inferred success.
+
+## Main dashboard
+
+The platform table uses translated headings and content-sized columns with a
+three-cell gap when space permits, compact spacing otherwise, and right-aligned
+CPU/RAM values. On narrow terminals, omit Version first, then RAM and CPU;
+retain service identity and text state. An ellipsis indicates a version lookup
+in progress or a truncated long version; a dash means unavailable. Failed,
+inactive and transitioning services have distinct text states, without depending
+on colour. Refresh errors replace stale observations.
+
+A horizontal divider separates platform status from backup storage. The storage
+panel uses the existing disk chart only when it and its legend fit; otherwise
+show compact textual usage/count. Keep all dashboard rows above the footer, and
+reserve room for the latest-backup summary where possible. Do not change menu
+navigation or the existing refresh intervals.
