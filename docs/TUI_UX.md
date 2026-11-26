@@ -100,20 +100,30 @@ in progress or a truncated long version; a dash means unavailable. Failed,
 inactive and transitioning services have distinct text states, without depending
 on colour. Refresh errors replace stale observations.
 
-A horizontal divider separates platform status from backup storage. The storage
-panel uses the existing disk chart only when it and its legend fit; otherwise
-show compact textual usage/count. Keep all dashboard rows above the footer, and
-reserve room for the latest-backup summary where possible. Do not change menu
-navigation or the existing refresh intervals.
+Use three separate panel backgrounds (Menu, Platform Status, Backup Storage),
+with frame-background gaps, no internal border lines, and a shared lower edge
+for Menu and Backup Storage when space permits. Keep the live CPU/RAM note
+inside Platform Status below the table. The four numeric TUI menu entries are
+Services, Backups, Upgrade NetBox, Upgrade netbox-ops; leave one blank row before
+the last group (4, L, Q). CLI commands and menu numbering remain unchanged.
+Update discovery is available in the corresponding upgrade views.
 
-The latest local backup found is derived from the same filesystem inventory as
-storage usage/count. Display the timestamp in UTC, explicitly labeled as the
-name-derived date or filesystem modification date (fallback). Display the
-recognized archive kind (including historical full and legacy) and the
-filename-derived manual/pre-restore tag, or an unknown tag for imported names.
-The dashboard does not read manifests, decompress or verify archives; an
-observed filename/type/tag is not proof of successful creation, integrity or
-a complete recovery point. A refresh failure replaces the previous snapshot
-with an error. Refresh every 15 seconds, on F5/R and after returning from backup
-management. On the shortest terminals, keep the latest date/type/tag instead
-of the disk chart and, if necessary, the storage usage rows.
+The storage panel uses the existing disk chart only when its legend fits;
+otherwise show compact textual usage/count. The latest local backup section
+has aligned Date, Name, Type and Tag fields below the usage. It selects the
+newest recognized local archive using the same chronological inventory as
+backup management. For the selected file only, read a bounded regular JSON
+sidecar when available. Prefer its validated timezone-aware creation timestamp
+and recognized purpose; otherwise show the filename timestamp or filesystem
+modification time explicitly. Imported filenames without managed provenance
+have unknown tags. Escape non-ASCII/control characters in untrusted filenames
+for unambiguous terminal display. No archive contents are opened or verified.
+This is a local observation, not a guarantee of a successful backup or a
+complete recovery point.
+
+Refresh every 15 seconds, on F5/R and after returning from backup management.
+Clear the snapshot on refresh errors. Wrap long names without truncation on
+larger terminals; on compact terminals that cannot fit all fields, display
+B (Backup details) to open the full scrollable read-only summary. The menu,
+keyboard hints and footer remain accessible at 50x16. No new dependency or
+backup/restore behavior change.
