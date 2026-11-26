@@ -18,22 +18,22 @@ class MenuNavigationTests(unittest.TestCase):
     def test_all_actions_plus_language_and_exit(self):
         pt = make_main_items(Translator('pt'))
         en = make_main_items(Translator('en'))
-        self.assertEqual(len(pt), 7)
-        self.assertEqual(len(en), 7)
+        self.assertEqual(len(pt), 6)
+        self.assertEqual(len(en), 6)
         self.assertEqual(pt[0][2], ('services', 'manage'))
-        self.assertEqual(pt[3][2], ('upgrade', 'menu'))
-        self.assertEqual(pt[4][2], ('self-upgrade', ''))
+        self.assertEqual(pt[2][2], ('upgrade', 'menu'))
+        self.assertEqual(pt[3][2], ('self-upgrade', ''))
         self.assertEqual(pt[-1][1], 'exit')
         self.assertEqual(SECTIONS, {0: 'menu_services', 1: 'menu_backups',
-                                    2: 'menu_updates', 4: 'menu_maintenance'})
+                                    2: 'menu_updates', 3: 'menu_maintenance'})
         self.assertIn('Manage services', en[0][0])
         for items in (pt, en):
             self.assertEqual([item[0].split()[0] for item in items],
-                             ['1', '2', '3', '4', '5', 'L', 'Q'])
+                             ['1', '2', '3', '4', 'L', 'Q'])
 
     def test_numeric_shortcuts_open_main_menu_actions(self):
         for key, method, args in (('1', '_manage', ()), ('2', '_backups', ()),
-                                  ('4', '_upgrade_menu', ()), ('5', '_self_upgrade', ())):
+                                  ('3', '_upgrade_menu', ()), ('4', '_self_upgrade', ())):
             with self.subTest(key=key):
                 screen = FakeScreen([ord(key), ord('q')], dimensions=(16, 60))
                 menu = CursesMenu(screen, Translator('en'))
@@ -149,17 +149,23 @@ class RestartSafetyTests(unittest.TestCase):
         batch.assert_not_called()
         systemd.restart.assert_not_called()
 
-    def test_unimplemented_tui_item_never_runs_business_logic(self):
-        menu = CursesMenu(FakeScreen([curses.KEY_DOWN,curses.KEY_DOWN,curses.KEY_DOWN,10,ord('q')]), Translator('pt'))
+    def test_enter_opens_upgrade_and_removed_shortcut_does_not_dispatch(self):
+        menu = CursesMenu(FakeScreen([ord('5'), curses.KEY_DOWN, curses.KEY_DOWN,
+                                     curses.KEY_DOWN, 10, ord('q')]), Translator('pt'))
         systemd = MagicMock()
         systemd.status.return_value = []
-        with patch.object(menu,'_init_screen'), patch('netbox_ops.tui.SystemdServices', return_value=systemd), \
-             patch('netbox_ops.tui.load_config'), patch('netbox_ops.backups.BackupManager') as backups, \
-             patch.object(menu, '_show_lines') as show:
+        with (patch.object(menu, '_init_screen'),
+              patch('netbox_ops.tui.SystemdServices', return_value=systemd),
+              patch('netbox_ops.tui.load_config'),
+              patch('netbox_ops.backups.BackupManager') as backups,
+              patch.object(menu, '_upgrade_menu') as upgrade,
+              patch.object(menu, '_self_upgrade') as self_upgrade,
+              patch.object(menu, '_show_lines') as show):
             backups.return_value.dashboard_storage.return_value = ((0, 0, 0, 0, 0), None)
             self.assertEqual(menu.run(), 0)
-        self.assertEqual(show.call_count, 1)
-        self.assertIn('NÃO IMPLEMENTADO', show.call_args.args[1][0][0])
+        upgrade.assert_called_once_with()
+        self_upgrade.assert_not_called()
+        show.assert_not_called()
 
 
 class NewServiceTuiTests(unittest.TestCase):
