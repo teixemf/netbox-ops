@@ -90,6 +90,18 @@ offering installation and again before execution; the backend still owns the
 lock, archive verification, fresh plan validation and transactional handoff.
 Reopening the view shows the last recorded status, never an inferred success.
 
+## Backup inventory counters
+
+Available Backups is a standalone heading. An empty inventory displays only
+the empty message, not table headers. The read-only Selected counter follows
+Select all in the operation bar and counts marked entries, not keyboard focus.
+Backup Storage counts database, media and combined archives once each, with
+legacy and unclassified rows only when present. Total comes from the same
+in-memory list; the separate disk measurement supplies bytes, not inventory
+counts. An inventory refresh failure is reported separately from an empty list.
+Use B for full storage and inventory details, including multi-selection size
+and restore restrictions, on terminals where the counters do not fit.
+
 ## Main dashboard
 
 The platform table uses translated headings and content-sized columns with a
