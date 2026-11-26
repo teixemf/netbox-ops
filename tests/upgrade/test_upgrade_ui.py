@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from netbox_ops.cli import build_parser, dispatch
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 from netbox_ops.i18n import LANGUAGES, Translator
-from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview, ReleaseChoice
+from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview
 from netbox_ops.plugin_inventory import DeclaredRequirement, InstalledPackage, PinProposal, PluginInventory
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_discovery import GitNetBoxInstallation
@@ -94,6 +94,34 @@ class SharedInterfaceTests(InterfaceFixture):
             self.assertEqual(context.plugins, ())
             with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugins'):
                 make_plan(context, 'plugins', None, {'example-plugin': None})
+
+    def test_plugin_plan_fingerprint_matches_locked_rebuild_without_netbox_tags(self):
+        selection = {'example-plugin': '2.0.0'}
+        context = self.context
+        with patch('netbox_ops.upgrade_ui.build_upgrade_plan',
+                   side_effect=lambda *args, **kwargs: build_upgrade_plan(
+                       *args, **kwargs, reviewer=self.reviewer)):
+            reviewed = make_plan(context, 'plugins', None, selection)
+            fresh = replace(context, tags=())
+            with (patch('netbox_ops.upgrade_ui.discover_context', return_value=fresh) as discover,
+                  patch('netbox_ops.upgrade_ui.execute_plugin_upgrade') as executor):
+                execute_plan(self.cfg, 'plugins', reviewed, fingerprint=reviewed.fingerprint,
+                             acknowledge_unknowns=True, health_url='https://host/api/status/')
+                rebuilt = executor.call_args.kwargs['rebuild_plan']()
+                discover.assert_called_once_with(self.cfg, releases=False)
+            self.assertTrue(reviewed.can_execute)
+            self.assertEqual(reviewed.fingerprint, rebuilt.fingerprint)
+            self.assertEqual(reviewed.source.available_tags, ())
+            self.assertEqual(reviewed.selected_plugins, tuple(selection.items()))
+            changed = replace(fresh, inventory=replace(fresh.inventory, requirements_hash='changed'))
+            self.assertNotEqual(reviewed.fingerprint,
+                                make_plan(changed, 'plugins', None, selection).fingerprint)
+            # Real NetBox upgrades still bind verified release tags.
+            for operation, pins in (('netbox', {}), ('stack', selection)):
+                first = make_plan(context, operation, '4.4.2', pins)
+                later = make_plan(replace(context, tags=(*context.tags, 'v4.4.3')),
+                                  operation, '4.4.2', pins)
+                self.assertNotEqual(first.fingerprint, later.fingerprint)
 
     def test_plan_fingerprint_binds_runtime_and_inventory(self):
         first = self.build()
@@ -221,71 +249,221 @@ class UpgradeCliTests(InterfaceFixture):
 
 
 class UpgradeTuiTests(InterfaceFixture):
-    def run_menu(self, plan, choices, confirmations):
-        menu = CursesMenu(FakeScreen(), self.t)
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, patch(
-            'netbox_ops.upgrade_ui.execute_plan',
-            return_value=SimpleNamespace(directory=Path('/backup/pre-upgrade-test')),
-        ) as execute, patch.object(menu, '_upgrade_job',
-                                    side_effect=lambda title, worker: worker(Mock())), patch.object(
-            menu, '_choose', side_effect=choices,
-        ), patch.object(menu, '_show_lines'), patch.object(
-            menu, '_upgrade_input', side_effect=['https://host/api/status/', ''],
-        ), patch.object(menu, '_confirm_token', side_effect=confirmations) as confirm:
-            menu._upgrade('netbox')
-        return build, execute, confirm
+    def _target_model(self):
+        from netbox_ops.upgrade_targets import TargetModel
 
-    def test_tui_select_all_excludes_declared_non_plugin(self):
+        file = {'packagetype': 'bdist_wheel', 'requires_python': '>=3.12'}
+        def fetch(name, version=None):
+            self.assertEqual(name, 'example-plugin')
+            if version is None:
+                return {'releases': {v: [file] for v in ('1.0.0', '2.0.0')}}
+            return {'info': {'name': name, 'version': version, 'requires_python': '>=3.12',
+                             'requires_dist': ['netbox>=4.4,<4.5']}, 'urls': [file]}
+        return TargetModel(self.context, fetcher=fetch, docs_fetcher=lambda *_: None)
+
+    def _dashboard(self, keys=(), dimensions=(24, 100), language='en'):
+        from netbox_ops.upgrade_dashboard import UpgradeDashboard
+
+        menu = CursesMenu(FakeScreen(keys, dimensions=dimensions), Translator(language))
+        dashboard = UpgradeDashboard(menu)
+        dashboard.cfg = self.cfg
+        dashboard.model = self._target_model()
+        return dashboard, menu
+
+    def _run_dashboard(self, dashboard, menu):
+        from concurrent.futures import Future
+
+        def submit(fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        pool = Mock()
+        pool.submit.side_effect = submit
+        model = dashboard.model
+        dashboard.model = None
+        with (patch('netbox_ops.upgrade_dashboard.load_config', return_value=self.cfg),
+              patch('netbox_ops.upgrade_dashboard.discover_target_context', return_value=self.context),
+              patch('netbox_ops.upgrade_dashboard.TargetModel', return_value=model),
+              patch('netbox_ops.upgrade_dashboard.ThreadPoolExecutor', return_value=pool),
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()))):
+            dashboard.run()
+        pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    def test_dashboard_initial_targets_and_compact_table_in_both_languages(self):
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    dashboard, menu = self._dashboard([27], dimensions, language)
+                    self._run_dashboard(dashboard, menu)
+                    self.assertEqual(dashboard.model.selection.netbox, '4.4.2')
+                    self.assertEqual(dict(dashboard.model.selection.plugins), {'example-plugin': '2.0.0'})
+                    self.assertIsNone(dashboard.plan)
+                    self.assertFalse(dashboard._enabled('execute'))
+                    screen = menu.stdscr
+                    frame = screen.frames[-1]
+                    header = ' '.join(text for y, _, text, _ in frame if y == 4)
+                    for key in ('component', 'current', 'target', 'status'):
+                        self.assertIn(menu.t('ut_col_' + key), header)
+                    self.assertIn('*4.4.2', ' '.join(text for _, _, text, _ in frame))
+                    self.assertNotIn('django', ' '.join(text for _, _, text, _ in frame))
+                    self.assertTrue(any(attr == curses.A_REVERSE for _, _, _, attr in frame))
+                    self.assertEqual(screen.wait_ms, -1)
+
+    def test_dashboard_picker_cancel_and_confirm_preserve_other_targets(self):
+        for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, 10], '4.4.1')):
+            with self.subTest(expected=expected):
+                dashboard, menu = self._dashboard([10, *picker_keys, 27], (16, 50))
+                self._run_dashboard(dashboard, menu)
+                self.assertEqual(dashboard.model.selection.netbox, expected)
+                self.assertEqual(dict(dashboard.model.selection.plugins), {'example-plugin': '2.0.0'})
+                self.assertEqual(dashboard.cursor, 0)
+                self.assertIsNone(dashboard.plan)
+
+    def test_dashboard_reset_and_noop_disable_validation_and_execution(self):
+        dashboard, menu = self._dashboard([9, curses.KEY_RIGHT, 10, 27, 27])
+        self._run_dashboard(dashboard, menu)
+        self.assertEqual(dashboard.model.selection, dashboard.model.installed)
+        self.assertFalse(dashboard._enabled('validate'))
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertIsNone(dashboard.plan)
+        self.assertIn(menu.t('ut_no_changes'), [line for line, _ in dashboard._plan_lines()])
+
+    def test_dashboard_stale_worker_result_does_not_replace_reset_intent(self):
+        from concurrent.futures import Future
+
+        dashboard, _ = self._dashboard()
+        result = dashboard.model.evaluate(dashboard.model.request('suggest'))
+        dashboard.model.reset()
+        dashboard.future = Future()
+        dashboard.future.set_result(result)
+        dashboard._poll()
+        self.assertEqual(dashboard.model.selection, dashboard.model.installed)
+        self.assertIsNone(dashboard.snapshot)
+
+    def test_dashboard_validates_exact_modes_and_disables_stale_or_blocked_plan(self):
+        from netbox_ops.upgrade_targets import TargetSelection
+
+        for operation, target, pins in (
+            ('netbox', '4.4.2', {}), ('plugins', None, {'example-plugin': '2.0.0'}),
+            ('stack', '4.4.2', {'example-plugin': '2.0.0'}),
+        ):
+            with self.subTest(operation=operation):
+                dashboard, menu = self._dashboard()
+                dashboard.model.selection = TargetSelection(
+                    target or '4.4.0', (('example-plugin', pins.get('example-plugin', '1.0.0')),))
+                plan = self.build(operation, target, pins)
+                with (patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan) as build,
+                      patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()))):
+                    dashboard._validate()
+                build.assert_called_once_with(self.context, operation, target, pins)
+                self.assertEqual(dashboard._enabled('execute'), plan.can_execute)
+                dashboard.plan = replace(plan, blockers=('Blocked',))
+                self.assertFalse(dashboard._enabled('execute'))
+                dashboard.plan = plan
+                dashboard.model.reset()
+                self.assertFalse(dashboard._enabled('execute'))
+
+    def test_reviewed_execution_preserves_tokens_and_exact_fingerprint(self):
+        plan = replace(self.build('plugins', None, {'example-plugin': '2.0.0'}),
+                       requires_strong_confirmation=True)
         menu = CursesMenu(FakeScreen(), self.t)
-        plan = self.build('plugins', None, {'example-plugin': None})
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, patch.object(
+        for confirm, expected in (([True, False], False), ([True, True], True)):
+            with (self.subTest(confirm=confirm),
+                patch.object(menu, '_show_lines', return_value=True),
+                patch.object(menu, '_upgrade_input', side_effect=['https://netbox.example/api/status/', 'token']),
+                patch.object(menu, '_confirm_token', side_effect=confirm) as tokens,
+                patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+                patch('netbox_ops.upgrade_ui.execute_plan', return_value=SimpleNamespace(directory='/recovery')) as execute,
+            ):
+                self.assertEqual(menu._execute_reviewed_upgrade('Upgrade', self.cfg, 'plugins', plan), expected)
+                self.assertEqual([call.args[2] for call in tokens.call_args_list], ['UPGRADE', 'UNCERTAIN'])
+                if expected:
+                    self.assertEqual(execute.call_args.args, (self.cfg, 'plugins', plan))
+                    self.assertEqual(execute.call_args.kwargs['fingerprint'], plan.fingerprint)
+                    self.assertTrue(execute.call_args.kwargs['acknowledge_unknowns'])
+                else:
+                    execute.assert_not_called()
+
+    def run_menu(self, plan, confirmations):
+        menu = CursesMenu(FakeScreen(), self.t)
+        with (patch('netbox_ops.upgrade_ui.execute_plan',
+                    return_value=SimpleNamespace(directory=Path('/backup/pre-upgrade-test'))) as execute,
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch.object(menu, '_show_lines', return_value=True),
+              patch.object(menu, '_upgrade_input', side_effect=['https://host/api/status/', '']),
+              patch.object(menu, '_confirm_token', side_effect=confirmations) as confirm):
+            menu._execute_reviewed_upgrade('Upgrade', self.cfg, 'netbox', plan)
+        return execute, confirm
+
+    def test_tui_validation_uses_exact_eligible_plugin_target(self):
+        from netbox_ops.upgrade_dashboard import UpgradeDashboard
+        from netbox_ops.upgrade_targets import TargetModel, TargetSelection
+
+        menu = CursesMenu(FakeScreen(), self.t)
+        dashboard = UpgradeDashboard(menu)
+        dashboard.model = TargetModel(self.context)
+        dashboard.model.selection = TargetSelection('4.4.0', (('example-plugin', '2.0.0'),))
+        plan = self.build('plugins', None, {'example-plugin': '2.0.0'})
+        with patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan) as build, patch.object(
             menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
-        ), patch.object(menu, '_choose', side_effect=[0, 0, None, 1, None]), patch.object(menu, '_show_lines'):
-            menu._upgrade('plugins')
-        build.assert_called_once_with(self.context, 'plugins', None, {'example-plugin': None})
+        ):
+            dashboard._validate()
+        build.assert_called_once_with(self.context, 'plugins', None, {'example-plugin': '2.0.0'})
+        self.assertTrue(dashboard._enabled('execute'))
 
     def test_cancel_confirmation_never_executes(self):
-        _, execute, confirm = self.run_menu(self.build(), [1, 3, None], [False])
+        execute, confirm = self.run_menu(self.build(), [False])
         confirm.assert_called_once()
         execute.assert_not_called()
 
     def test_uncertain_plan_needs_second_confirmation(self):
         plan = replace(self.build(), requires_strong_confirmation=True)
-        _, execute, confirm = self.run_menu(plan, [1, 3, None], [True, False])
+        execute, confirm = self.run_menu(plan, [True, False])
         self.assertEqual([call.args[2] for call in confirm.call_args_list], ['UPGRADE', 'UNCERTAIN'])
         execute.assert_not_called()
 
     def test_approved_plan_executes_once(self):
         plan = replace(self.build(), requires_strong_confirmation=True)
-        _, execute, confirm = self.run_menu(plan, [1, 3], [True, True])
+        execute, confirm = self.run_menu(plan, [True, True])
         self.assertEqual(confirm.call_count, 2)
         execute.assert_called_once()
         self.assertEqual(execute.call_args.kwargs['fingerprint'], plan.fingerprint)
 
     def test_target_edit_invalidates_old_plan(self):
-        plan = self.build()
-        build, execute, _ = self.run_menu(plan, [1, 0, 1, 1, None], [])
+        from netbox_ops.upgrade_targets import TargetSelection
+
+        dashboard, menu = self._dashboard()
+        first = self.build()
+        second = self.build(target='4.4.1')
+        dashboard.model.selection = TargetSelection('4.4.2', dashboard.model.installed.plugins)
+        with (patch('netbox_ops.upgrade_dashboard.make_plan', side_effect=[first, second]) as build,
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch('netbox_ops.upgrade_ui.execute_plan') as execute):
+            dashboard._validate()
+            self.assertTrue(dashboard._enabled('execute'))
+            dashboard.model.select(None, '4.4.1')
+            self.assertFalse(dashboard._enabled('execute'))
+            dashboard._validate()
+            self.assertTrue(dashboard._enabled('execute'))
         self.assertEqual(build.call_count, 2)
         self.assertEqual(build.call_args.args[2], '4.4.1')
         execute.assert_not_called()
 
     def test_alternative_selection_rebuilds_plan(self):
-        menu = CursesMenu(FakeScreen(), self.t)
-        choices = (ReleaseChoice('1.8.0', '>=3.12', 'ok'),)
-        plan = self.build('plugins', None, {'example-plugin': '1.8.0'})
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, patch(
-            'netbox_ops.upgrade_ui.alternative_release_choices', return_value=choices,
-        ), patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())), patch.object(
-            menu, '_choose', side_effect=[0, 2, 3, 0, None, 1, None],
-        ), patch.object(menu, '_show_lines'):
-            menu._upgrade('plugins')
-        self.assertEqual(build.call_args.args[3], {'example-plugin': '1.8.0'})
+        dashboard, menu = self._dashboard([10])
+        dashboard.model.reset()
+        plan = self.build('plugins', None, {'example-plugin': '2.0.0'})
+        with (patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan) as build,
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()))):
+            target = dashboard._picker('example-plugin')
+            self.assertEqual(target, '2.0.0')
+            dashboard.model.select('example-plugin', target)
+            dashboard._validate()
+        build.assert_called_once_with(self.context, 'plugins', None, {'example-plugin': '2.0.0'})
 
     def test_overview_uses_actual_versions_and_explicit_unverified_states(self):
         for language in LANGUAGES:
@@ -314,62 +492,59 @@ class UpgradeTuiTests(InterfaceFixture):
                                     version=plan.stages[0].netbox_version), [line for line, _ in checked])
 
     def test_blocked_plan_never_offers_execute(self):
-        menu = CursesMenu(FakeScreen(), self.t)
+        dashboard, menu = self._dashboard()
         plan = replace(self.build(), blockers=('incompatible dependency',))
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan), patch.object(
-            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
-        ), patch.object(menu, '_choose', side_effect=[1, 2, None]) as choose, patch.object(
-            menu, '_show_lines',
-        ) as show, patch('netbox_ops.upgrade_ui.execute_plan') as execute:
-            menu._upgrade('netbox')
-        self.assertNotIn(self.t('upgrade_execute'), [label for label, _ in choose.call_args_list[1].args[1]])
-        self.assertIn(self.t('upgrade_status_blocked'), str(choose.call_args_list[1].kwargs['overview']))
+        with (patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan),
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch.object(menu, '_show_lines') as show,
+              patch('netbox_ops.upgrade_ui.execute_plan') as execute):
+            dashboard._validate()
+            self.assertFalse(dashboard._enabled('execute'))
+            self.assertIn(self.t('upgrade_status_blocked'), str(dashboard._plan_lines()))
+            dashboard._details(dashboard._rows()[0])
         self.assertIn('incompatible dependency', str(show.call_args_list))
         execute.assert_not_called()
 
     def test_refresh_invalidates_review_and_unavailable_target(self):
-        menu = CursesMenu(FakeScreen(), self.t)
+        dashboard, menu = self._dashboard()
         fresh = replace(self.context, tags=('v4.4.1',))
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', side_effect=[self.context, fresh],
-        ) as discover, patch('netbox_ops.upgrade_ui.make_plan', return_value=self.build()), patch.object(
-            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
-        ), patch.object(menu, '_choose', side_effect=[1, 5, None]) as choose, patch(
-            'netbox_ops.upgrade_ui.execute_plan',
-        ) as execute:
-            menu._upgrade('netbox')
-        self.assertEqual(discover.call_count, 2)
-        self.assertIn(self.t('upgrade_target', target='?'), [label for label, _ in choose.call_args.args[1]])
-        self.assertNotIn(self.t('upgrade_execute'), [label for label, _ in choose.call_args.args[1]])
+        with (patch('netbox_ops.upgrade_dashboard.load_config', return_value=self.cfg),
+              patch('netbox_ops.upgrade_dashboard.discover_target_context', return_value=fresh) as discover,
+              patch('netbox_ops.upgrade_dashboard.make_plan', return_value=self.build()),
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch('netbox_ops.upgrade_ui.execute_plan') as execute):
+            dashboard._validate()
+            self.assertTrue(dashboard._enabled('execute'))
+            self.assertTrue(dashboard._discover())
+            result = dashboard.model.evaluate(dashboard.model.request('assess'))
+            self.assertTrue(dashboard.model.accept(result))
+            dashboard.snapshot = result
+        discover.assert_called_once_with(self.cfg)
+        self.assertEqual(dashboard.model.selection.netbox, '4.4.2')
+        self.assertEqual(result.rows[0].assessment.availability, 'unavailable')
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._enabled('execute'))
         execute.assert_not_called()
 
     def test_failed_recalculation_does_not_reuse_previous_review(self):
-        menu = CursesMenu(FakeScreen(), self.t)
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', side_effect=[self.build(), None]), patch.object(
-            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
-        ), patch.object(menu, '_choose', side_effect=[1, 1, None]) as choose, patch(
-            'netbox_ops.upgrade_ui.execute_plan',
-        ) as execute:
-            menu._upgrade('netbox')
-        self.assertNotIn(self.t('upgrade_execute'), [label for label, _ in choose.call_args.args[1]])
+        dashboard, menu = self._dashboard()
+        with (patch('netbox_ops.upgrade_dashboard.make_plan', side_effect=[self.build(), None]),
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch('netbox_ops.upgrade_ui.execute_plan') as execute):
+            dashboard._validate()
+            self.assertTrue(dashboard._enabled('execute'))
+            dashboard._validate()
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._enabled('execute'))
         execute.assert_not_called()
 
     def test_escape_from_full_review_never_requests_token_or_url(self):
         menu = CursesMenu(FakeScreen(), self.t)
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=self.build()), patch.object(
-            menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
-        ), patch.object(menu, '_choose', side_effect=[1, 3, None]), patch.object(
-            menu, '_show_lines', return_value=False,
-        ) as show, patch.object(menu, '_upgrade_input') as prompt, patch.object(
-            menu, '_confirm_token',
-        ) as confirm, patch('netbox_ops.upgrade_ui.execute_plan') as execute:
-            menu._upgrade('netbox')
+        with (patch.object(menu, '_show_lines', return_value=False) as show,
+              patch.object(menu, '_upgrade_input') as prompt,
+              patch.object(menu, '_confirm_token') as confirm,
+              patch('netbox_ops.upgrade_ui.execute_plan') as execute):
+            self.assertFalse(menu._execute_reviewed_upgrade('Upgrade', self.cfg, 'netbox', self.build()))
         self.assertIn('manual recovery', str(show.call_args_list))
         prompt.assert_not_called()
         confirm.assert_not_called()

@@ -193,6 +193,41 @@ class BackupLayoutTests(unittest.TestCase):
         self.assertFalse(any(text.startswith('Total ') for _, _, text, _ in failed))
         self.assertTrue(any(text == 'Total    : 1' for _, _, text, _ in recovered))
 
+    def test_failed_refresh_discards_old_marks_and_requires_fresh_selection(self):
+        for language in ('en', 'pt'):
+            with self.subTest(language=language):
+                t = Translator(language)
+                screen = FakeScreen([curses.KEY_DOWN, 32, curses.KEY_F5,
+                                     ord('d'), ord('r'), ord('v'), curses.KEY_F5,
+                                     ord('d'), ord('r'), ord('v'), 27, 27],
+                                    dimensions=(36, 120))
+                menu = CursesMenu(screen, t)
+                manager = MagicMock()
+                manager.quick_list.side_effect = [self.entries[:1], OSError('Inventory read failed'),
+                                                  self.entries[:1]]
+                manager.storage_breakdown.return_value = (100, 100, 800, 1000, 1)
+                manager.describe_one.side_effect = lambda entry: entry
+                with (patch('netbox_ops.backups.BackupManager', return_value=manager),
+                      patch('netbox_ops.tui.load_config'),
+                      patch.object(menu, '_show_lines'),
+                      patch.object(menu, '_confirm_token') as confirm,
+                      patch.object(menu, '_run_backup_job') as job):
+                    menu._backups()
+                confirm.assert_not_called()
+                job.assert_not_called()
+                manager.quick_list.assert_called()
+                self.assertEqual(manager.quick_list.call_count, 3)
+                frames = screen.frames
+                self.assertTrue(any(text == f'{t("nbo_chosen")}: 1'
+                                    for _, _, text, _ in frames[2]))
+                for frame in frames[3:]:
+                    self.assertFalse(any(text.startswith('[x] ') for _, _, text, _ in frame))
+                    self.assertTrue(any(text == f'{t("nbo_chosen")}: 0'
+                                        for _, _, text, _ in frame))
+                self.assertTrue(any(text == t('nbo_inventory_unavailable')
+                                    for _, _, text, _ in frames[3]))
+                self.assertEqual(screen.wait_ms, -1)
+
     def test_select_all_remains_a_real_action_after_separator(self):
         frames = self.render('en', (30, 120),
                              [9] + [curses.KEY_RIGHT] * 4 + [10, 27, 27, 27])

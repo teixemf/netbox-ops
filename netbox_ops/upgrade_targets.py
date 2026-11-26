@@ -7,6 +7,7 @@ Neither suggestions nor preliminary support authorize execution.
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, replace
 from typing import Callable
 from urllib.error import URLError
@@ -32,11 +33,14 @@ class _BudgetExhausted(Exception):
 
 
 class _Budget:
-    def __init__(self, limit: int):
+    def __init__(self, limit: int, cancelled: Callable[[], bool] | None = None):
+        self.cancelled = cancelled
         self.remaining = limit
         self.failed = set()
 
     def take(self, cost: int) -> None:
+        if self.cancelled is not None and self.cancelled():
+            raise CancelledError
         if self.remaining < cost:
             raise _BudgetExhausted
         self.remaining -= cost
@@ -463,11 +467,13 @@ class TargetModel:
                     notes.append(f'{name}: no supported target found; suggested release remains uncertain')
         return replace(selection, plugins=tuple(sorted(proposed.items()))), notes, partial
 
-    def evaluate(self, request: TargetRequest) -> TargetSnapshot | TargetCatalogue:
+    def evaluate(self, request: TargetRequest, *, cancelled: Callable[[], bool] | None = None
+                 ) -> TargetSnapshot | TargetCatalogue:
         """Call in one worker; accept only on the UI thread for the active request."""
         if request.session is not self._session:
             raise ValueError('Request belongs to another inventory')
-        budget = _Budget(self._limit)
+        budget = _Budget(self._limit, cancelled)
+        budget.take(0)
         selection = request.selection
         notes = list(self._refresh_warnings)
         if not self.context.tags:

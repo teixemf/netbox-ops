@@ -130,7 +130,9 @@ def make_plan(context: UpgradeContext, operation: str, target: str | None,
         raise UpgradeExecutionError('Select only reliably mapped installed configured plugins')
     plan = build_upgrade_plan(
         context.installation, context.inventory, target_netbox=target,
-        selected_plugins=selected, available_tags=context.tags,
+        # Plugin-only plans do not use the NetBox release catalogue. Match
+        # CLI preview and locked rebuild even when the TUI has discovered tags.
+        selected_plugins=selected, available_tags=() if operation == 'plugins' else context.tags,
         postgres_version=context.postgres, redis_version=context.redis,
     )
     return review_plan_dependencies(plan, context.cfg)

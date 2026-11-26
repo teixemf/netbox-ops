@@ -32,34 +32,45 @@ other views should adopt these conventions incrementally, not via a rewrite.
   Self-upgrade submission is not installation success; show the recorded
   outcome and recovery state on reopening.
 
-## NetBox upgrades (all three modes)
+## Unified NetBox and plugin upgrades
 
-Illustrative terminal layout, not a fixed-width rendering:
+The main Upgrade NetBox entry opens a version-target dashboard. NetBox and
+reliably mapped configured plugins are the only rows. Runtime and database
+versions are prerequisites in details; self-upgrade remains separate.
 
 ```text
-NETBOX-OPS                     v0.6.1 EN
-Upgrade NetBox and plugins
-────────────────────────────────────────────────
-NetBox: 4.4.9 -> 4.7.6
-Plan: Requires additional confirmation
-Stages: 1 | Plugins: 1 selected / 2 configured
-... Full overview in Details
-────────────────────────────────────────────────
-  Target NetBox: 4.7.6
-  Select plugins (1 selected)
-  Build / recalculate plan
-  Compatibility details and recovery safeguards
-  Approve and execute
-  Review local plugin pins
-  Refresh installed versions and releases
-────────────────────────────────────────────────
-Q Quit | ↑↓ Select | Enter Open | Esc Back
+NETBOX-OPS                    v0.6.1 EN
+Upgrade management
+AVAILABLE UPGRADES
+COMPONENT            CURRENT    TARGET     STATUS
+NetBox               4.4.9      *4.7.6     OK
+example-plugin       1.0.0      *2.0.0     Warning
+Components: 2 | Changes: 2
+UPGRADE OPERATIONS
+[Suggest targets] [Reset targets] [Validate] [Refresh]
+ Review and execute
+COMPONENT DETAILS                 UPGRADE PLAN
+example-plugin                    Plan: Not checked
+1.0.0 -> 2.0.0                   NetBox: 4.4.9 -> 4.7.6
+Warning                           Stages: ?
+Q Quit | Esc Back | Enter Open | Tab Actions | D Details | P Pins | F5 Refresh
 ```
 
-Details show exact plugin versions, unchanged plugins, required stages,
-prerequisites, compatibility evidence, dependency and ltree checks (including
-skipped resolution and overlaps), release notes, downtime, backups and manual
-recovery. No execution action is present before a runnable plan exists.
+An asterisk marks a changed target, not a checkbox. Move with arrows/j/k,
+Home/End and Page Up/Down. Enter opens the version picker, D opens scrollable
+component evidence and the complete plan, P reviews local pins, and Tab or
+Shift+Tab switches between rows and actions. The paged picker assesses the
+candidate against the selected platform; D shows evidence and F5 retries the
+page. Enter selects, Esc cancels. Incomplete evidence is not approval.
+Initial suggestions and reassessment run in a single bounded read-only worker;
+while it runs, changes and execution are disabled. Suggest continues a partial
+search or explicitly recomputes plugin targets without changing NetBox.
+Reset restores installed versions; refresh preserves valid intent and clears
+review. Full validation derives the exact changed pins and existing operation.
+Only an executable plan matching the current selection enables review and
+execution. The existing exact fingerprint, confirmation, revalidation, health
+and recovery gates remain unchanged. On narrow terminals use D for full
+untruncated details. Q/Esc leave read-only navigation without executing.
 
 ## netbox-ops self-upgrade
 
@@ -139,3 +150,5 @@ larger terminals; on compact terminals that cannot fit all fields, display
 B (Backup details) to open the full scrollable read-only summary. The menu,
 keyboard hints and footer remain accessible at 50x16. No new dependency or
 backup/restore behavior change.
+
+If an inventory refresh fails, discard old marks, preview metadata and storage observations. Require a successful refresh and new selection before operating on existing backups; never show stale entries as current or count an unavailable inventory as zero.
