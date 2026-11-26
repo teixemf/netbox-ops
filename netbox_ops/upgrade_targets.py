@@ -164,7 +164,7 @@ class TargetModel:
                  docs_fetcher: Callable = fetch_release_declaration,
                  max_remote_lookups: int = MAX_REMOTE_LOOKUPS,
                  previous: TargetSelection | None = None):
-        if not 1 <= max_remote_lookups <= MAX_REMOTE_LOOKUPS:
+        if not 2 <= max_remote_lookups <= MAX_REMOTE_LOOKUPS:
             raise ValueError('Invalid metadata lookup budget')
         self.context = context
         self.installed = TargetSelection(context.installation.version, tuple(sorted(
@@ -433,15 +433,21 @@ class TargetModel:
                                                version if check.availability == 'verified' else None))
                     if version == installed:
                         progress = replace(progress, choice=progress.uncertain or installed)
-                self._cache_put(self._suggestions, key, progress, 64)
             if progress.choice is None:
+                self._cache_put(self._suggestions, key, progress, 64)
                 partial = True
                 notes.append(f'{name}: suggestion incomplete; target unchanged, continue to assess more releases')
             else:
-                proposed[name] = progress.choice
+                self._suggestions.pop(key, None)
                 selected = self._plugin(name, progress.choice, selection.netbox, budget)
                 if selected.pending:
                     partial = True
+                if progress.choice != installed and (
+                    selected.pending or selected.availability != 'verified' or selected.status == 'conflict'
+                ):
+                    notes.append(f'{name}: suggested release could not be reconfirmed; target unchanged')
+                    continue
+                proposed[name] = progress.choice
                 if selected.status == 'supported' and progress.unresolved_newer:
                     notes.append(f'{name}: supported target found, but newer releases were not fully assessed')
                 elif selected.status == 'warning' and progress.choice != installed:
