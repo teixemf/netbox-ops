@@ -464,5 +464,8 @@
   "ut_note_suggested": "Sugerida",
   "ut_note_target": "Alvo",
   "ut_unavailable": "Versão indisponível",
-  "ut_plan_mismatch": "O plano não corresponde às versões exatas selecionadas."
+  "ut_plan_mismatch": "O plano não corresponde às versões exatas selecionadas.",
+  "ut_no_changes": "Plano: Sem alterações",
+  "ut_preliminary_status": "Preliminar: {status}",
+  "ut_preliminary_short": "Preliminar"
 }

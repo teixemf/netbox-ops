@@ -13,6 +13,8 @@ from .upgrade_targets import (
     MAX_PICKER_ROWS, TargetAssessment, TargetCatalogue, TargetModel, TargetRow, TargetSnapshot,
     discover_target_context,
 )
+from .upgrade_plan import UpgradePlanError
+from .upgrade_tui import netbox_overview
 from .upgrade_ui import make_plan, summary_lines
 
 if TYPE_CHECKING:
@@ -116,7 +118,7 @@ class UpgradeDashboard:
             self.error = self.t('upgrade_discovery_error')
 
     def _status(self, assessment):
-        if assessment.pending:
+        if assessment.status == 'unchecked' and self.future is not None:
             return self.t('ut_checking')
         return self.t('ut_' + assessment.status)
 
@@ -128,16 +130,27 @@ class UpgradeDashboard:
 
     def _plan_lines(self):
         selection = self.model.selection
-        status = self.plan.status if self._plan_matches() else 'not_checked'
-        style = ('muted' if status == 'not_checked' else 'failure' if status == 'blocked'
-                 else 'warning' if status == 'needs_confirmation' else 'success')
-        return [
-            (self.t('upgrade_plan_status', status=self.t('upgrade_status_' + status)), style),
-            (self.t('upgrade_versions', current=self.model.installed.netbox, target=selection.netbox), ''),
-            (self.t('upgrade_overview_counts', stages=len(self.plan.stages) if self._plan_matches() else '?',
-                    selected=sum(v != dict(self.model.installed.plugins)[n] for n, v in selection.plugins),
-                    configured=len(selection.plugins)), 'muted'),
-        ]
+        operation, target, pins = selection.plan_arguments(self.model.installed)
+        plan = self.plan if self._plan_matches() else None
+        overview = netbox_overview(self.model.context, target, pins, plan, self.t,
+                                   operation=operation or 'plugins')
+        if operation is None:
+            overview[1] = (self.t('ut_no_changes'), 'muted')
+        preliminary = (self.snapshot.status if self.snapshot is not None else 'unchecked')
+        rows = [overview[1], (self.t('ut_preliminary_status', status=self.t('ut_' + preliminary)),
+                              _STYLES[preliminary]), overview[0], overview[2]]
+        if plan:
+            # Show actual stage and dependency outcomes, with the full evidence in D.
+            reviews = {review.version: review for review in plan.dependency_reviews}
+            for stage in plan.stages:
+                review = reviews.get(stage.netbox_version)
+                status = review.resolution.status if review else 'not-run'
+                if review and status == 'passed' and not review.resolution.checked_core:
+                    status = 'unknown'
+                rows.append((self.t('upgrade_dependency_status', version=stage.netbox_version,
+                                    status=self.t('upgrade_dependency_' + status)),
+                             {'passed': 'success', 'blocked': 'failure'}.get(status, 'warning')))
+        return rows
 
     def _component_lines(self, row):
         return [(self._name(row.component), 'title'),
@@ -209,7 +222,8 @@ class UpgradeDashboard:
                 if self.snapshot and self.snapshot.partial else t('ut_details_key')
                 if self.error or self.snapshot and self.snapshot.warnings else '')
         counts = t('ut_counts', count=len(rows), changed=count)
-        menu._put(counts_y, 3, _clip(f'{counts} {note}', width), 'muted')
+        note = note or t('ut_preliminary_short')
+        menu._put(counts_y, 3, _clip(f'{note} | {counts}', width), 'muted')
         menu._put(action_y, 3, t('ut_operations'), 'section')
         for i, (x, line) in enumerate(self.positions):
             enabled = self._enabled(_ACTIONS[i])
@@ -263,8 +277,9 @@ class UpgradeDashboard:
             if frame:
                 h, w = frame
                 width = w - 6
-                widths = (min(17, max(12, width // 3)), 13, 0)
-                widths = (widths[0], widths[1], width - widths[0] - widths[1] - 2)
+                first = min(17, max(12, width // 3))
+                compatibility = max(12, len(t('ut_col_compatibility')))
+                widths = (first, compatibility, width - first - compatibility - 2)
                 visible = max(1, h - 7)
                 scroll = max(0, min(scroll, len(catalogue.rows) - visible))
                 if cursor < scroll:
@@ -322,7 +337,11 @@ class UpgradeDashboard:
 
     def _validate(self):
         self._invalidate_plan()
-        operation, target, pins = self.model.selection.plan_arguments(self.model.installed)
+        try:
+            operation, target, pins = self.model.selection.plan_arguments(self.model.installed)
+        except UpgradePlanError as exc:
+            self.menu._show_lines(self.title, [(safe_text(exc), 'failure')])
+            return
         if operation is None:
             return
         selection = self.model.selection
@@ -375,7 +394,11 @@ class UpgradeDashboard:
                         component = self._rows()[self.cursor].component
                         version = self._picker(component)
                         if version is not None:
-                            self.model.select(component, version)
+                            try:
+                                self.model.select(component, version)
+                            except UpgradePlanError as exc:
+                                menu._show_lines(self.title, [(safe_text(exc), 'failure')])
+                                continue
                             self.suggested = None
                             self._start(pool, 'assess')
                     else:

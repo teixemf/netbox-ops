@@ -464,5 +464,8 @@
   "ut_note_suggested": "Suggested",
   "ut_note_target": "Target",
   "ut_unavailable": "Release unavailable",
-  "ut_plan_mismatch": "The plan does not match the selected exact targets."
+  "ut_plan_mismatch": "The plan does not match the selected exact targets.",
+  "ut_no_changes": "Plan: No changes",
+  "ut_preliminary_status": "Preliminary: {status}",
+  "ut_preliminary_short": "Preliminary"
 }
