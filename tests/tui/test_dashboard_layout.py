@@ -126,7 +126,7 @@ class DashboardLayoutTests(unittest.TestCase):
             self.assertFalse(any('KiB' in text for _, _, text, _ in screen.writes))
             self.assertTrue(any('storage unavailable' in text for _, _, text, _ in screen.writes))
 
-    def test_main_resize_and_refresh_keep_separator_and_footer_clear(self):
+    def test_main_resize_and_refresh_keep_panels_and_footer_clear(self):
         for language in LANGUAGES:
             with self.subTest(language=language):
                 screen = ResizeScreen([curses.KEY_RESIZE, curses.KEY_F5, ord('q')],
@@ -150,44 +150,102 @@ class DashboardLayoutTests(unittest.TestCase):
                 for frame, width, height in zip(screen.frames, (140, 50, 50), (34, 16, 16)):
                     split = max(22, width * 35 // 100)
                     x = split + 2
-                    self.assertIn((10, x, '─' * (width - split - 4), 0), frame)
-                    label = menu.t('nbo_storage_label' if frame is not screen.frames[1]
-                                   else 'nbo_latest_filename')[:width - split - 4]
-                    self.assertTrue(any(y == 11 and col == x and text == label
-                                        for y, col, text, _ in frame))
+                    self.assertFalse(any(3 <= y < height - 2 and ('│' in text or '─' in text)
+                                         for y, _, text, _ in frame))
+                    self.assertTrue(any(col == x and text == menu.t('nbo_storage_label')[:width-split-5]
+                                        for _, col, text, _ in frame))
                     self.assertFalse(any(y >= height - 2 and col >= x and 'KiB' in text
                                          for y, col, text, _ in frame))
-                final = ' '.join(text for _, _, text, _ in screen.frames[-1])
+                wide, narrow, final = [' '.join(text for _, _, text, _ in f) for f in screen.frames]
+                self.assertIn('2026-11-25 12:34 UTC', wide)
+                self.assertIn(menu.t('nbo_latest_heading'), narrow)
+                self.assertIn(menu.t('nbo_latest_details_hint'), narrow)
                 self.assertIn('systemd unavailable', final)
                 self.assertIn('storage unavailable', final)
                 self.assertNotIn('1.0 KiB', final)
                 self.assertNotIn('2026-11-25 12:34 UTC', final)
-                for frame in screen.frames[:2]:
-                    self.assertTrue(any('2026-11-25 12:34 UTC' in text for _, _, text, _ in frame))
-                    self.assertTrue(any('db / ' + menu.t('nbo_manual_short') in text
-                                        for _, _, text, _ in frame))
                 self.assertEqual(screen.wait_ms, -1)
 
-    def test_latest_lines_show_utc_source_and_unknown_tag_in_both_languages(self):
+    def test_panels_content_height_group_spacing_and_note(self):
+        from netbox_ops.tui import make_main_items
+        for language in LANGUAGES:
+            menu, screen = self.menu(language, dimensions=(45, 140))
+            latest = BackupSummary(Path('/backup/netbox-db-pre-restore-20261123T174229Z-29ff6d.dump'),
+                                   'db', dt.datetime(2026, 11, 23, 17, 42, tzinfo=dt.timezone.utc),
+                                   'metadata', 'pre_restore')
+            menu._draw_main_dashboard(45, 140, make_main_items(menu.t), None,
+                                      service_states(), {}, '', (1024, 4096, 2),
+                                      (1024, 3072, 4096, 8192, 2), latest, '')
+            left, platform, storage = menu._panels
+            self.assertEqual(left[3], storage[3])
+            self.assertEqual(platform[0] - left[2], 2)
+            self.assertEqual(storage[1] - platform[3], 1)
+            self.assertLess(storage[3], 43)
+            self.assertTrue(any(platform[1] < y < platform[3] and
+                                menu.t('nbo_live_note') == text for y, _, text, _ in screen.writes))
+            self.assertFalse(any(y >= storage[1] and menu.t('nbo_live_note') == text
+                                 for y, _, text, _ in screen.writes))
+            menu_rows = [y for y, x, text, _ in screen.writes if x == 4 and text.strip()]
+            self.assertEqual(menu_rows, [4, 5, 6, 8, 9, 10])
+
+    def test_latest_lines_show_utc_source_fields_and_unknown_tag_in_both_languages(self):
         stamp = dt.datetime(2026, 11, 26, 2, 5, tzinfo=dt.timezone(dt.timedelta(hours=1)))
         for language in LANGUAGES:
             menu, _ = self.menu(language)
             for kind, source, purpose, tag in (
-                ('combined', 'filename', 'manual', 'nbo_manual_short'),
-                ('full', 'filename', 'pre_restore', 'nbo_pre_restore_short'),
+                ('combined', 'metadata', 'manual', 'nbo_manual_short'),
+                ('full', 'filename', 'pre_restore', 'nbo_latest_pre_restore'),
                 ('legacy', 'mtime', 'unknown', 'nbo_latest_unknown_tag'),
             ):
-                latest = BackupSummary(Path('/backup/archive'), kind, stamp, source, purpose)
+                name = 'netbox-' + 'x' * 100 + '.tar.gz'
+                latest = BackupSummary(Path('/backup') / name, kind, stamp, source, purpose)
                 for width in (24, 85):
                     with self.subTest(language=language, kind=kind, width=width):
                         rows = menu._latest_backup_lines(latest, width)
                         self.assertTrue(all(len(line) <= width for line, _ in rows))
-                        text = ' '.join(line for line, _ in rows)
-                        self.assertIn(menu.t('nbo_latest_' + source), text)
-                        self.assertIn('2026-11-26 01:05 UTC', text)
-                        self.assertIn(kind + ' / ' + menu.t(tag), text)
+                        self.assertEqual(rows[0], (menu.t('nbo_latest_heading'), 'section'))
+                        labels = [menu.t('nbo_latest_' + field)
+                                  for field in ('date', 'name', 'type', 'tag')]
+                        size = max(map(len, labels)) + 3
+                        fields = {}
+                        current = None
+                        for line, _ in rows[1:]:
+                            if line[:size].strip():
+                                current = line[:size].split(':')[0].strip()
+                                fields[current] = ''
+                            fields[current] += line[size:]
+                        self.assertEqual(list(fields), labels)
+                        self.assertIn(menu.t('nbo_latest_source_' + source), fields[labels[0]])
+                        self.assertIn('2026-11-26 01:05 UTC', fields[labels[0]])
+                        self.assertEqual(fields[labels[1]], name)
+                        self.assertEqual(fields[labels[2]], menu.t('nbo_kind_' + kind))
+                        self.assertEqual(fields[labels[3]], menu.t(tag))
             self.assertEqual(menu._latest_backup_lines(None, 24),
-                             [(menu.t('nbo_latest_none'), 'muted')])
+                             [(menu.t('nbo_latest_heading'), 'section'),
+                              (menu.t('nbo_latest_none'), 'muted')])
+
+    def test_compact_details_action_exposes_all_fields(self):
+        screen = FakeScreen([ord('b'), ord('q')], dimensions=(16, 50))
+        menu, _ = self.menu('en', screen=screen)
+        latest = BackupSummary(Path('/backup/long-' + 'x' * 120 + '.dump'), 'db',
+                               dt.datetime(2026, 11, 26, tzinfo=dt.timezone.utc),
+                               'metadata', 'manual')
+        systemd = MagicMock()
+        systemd.status.return_value = service_states()
+        manager = MagicMock()
+        manager.dashboard_storage.return_value = ((1024, 3072, 4096, 8192, 1), latest)
+        with (patch('netbox_ops.tui.load_config'),
+              patch('netbox_ops.tui.SystemdServices', return_value=systemd),
+              patch('netbox_ops.backups.BackupManager', return_value=manager),
+              patch.object(menu, '_show_lines') as details):
+            self.assertEqual(menu._main(), 0)
+        details.assert_called_once()
+        lines = dict(details.call_args.args[1])
+        self.assertIn('Name : ' + latest.path.name, lines)
+        self.assertIn('Type : Database', lines)
+        self.assertIn('Tag  : MANUAL', lines)
+        self.assertEqual(manager.dashboard_storage.call_count, 2)
+        self.assertEqual(screen.wait_ms, -1)
 
     def test_dashboard_refresh_cadence_return_and_f5_replace_latest_snapshot(self):
         screen = FakeScreen([-1, -1, ord('2'), curses.KEY_F5, ord('q')], dimensions=(34, 140))
@@ -221,6 +279,7 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn(menu.t('nbo_latest_none'), frames[2])
         self.assertNotIn('2026-11-25 12:00 UTC', frames[2])
         self.assertIn('2026-11-26 01:00 UTC', frames[3])
-        self.assertIn('media / ' + menu.t('nbo_pre_restore_short'), frames[3])
+        self.assertIn('Type : ' + menu.t('nbo_kind_media'), frames[3])
+        self.assertIn('Tag  : ' + menu.t('nbo_latest_pre_restore'), frames[3])
         self.assertIn('backup inventory unavailable', frames[4])
         self.assertNotIn('2026-11-26 01:00 UTC', frames[4])
