@@ -133,6 +133,104 @@ case "$scenario" in
   combined) args=(upgrade stack --netbox-version "$target" --plugin "$plugin==$new_plugin") ;;
   *) args=(upgrade netbox --version "$target") ;;
 esac
+# Exercise the new TUI against real inventory and release evidence before
+# retaining the existing CLI execution and recovery checks below. Only the
+# screen is synthetic; discovery, candidate assessment and planning are real.
+if [[ "$scenario" == netbox || "$scenario" == plugins || "$scenario" == combined ]]; then
+  python3 - "$scenario" "$target" "$plugin" "$new_plugin" "$status_url" <<'PY'
+import curses
+import sys
+from unittest.mock import Mock, patch
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.config import load_config
+from netbox_ops.i18n import Translator
+from netbox_ops.tui import CursesMenu
+from netbox_ops.upgrade_dashboard import UpgradeDashboard
+from netbox_ops.upgrade_plan import UpgradePlanError
+from netbox_ops.upgrade_targets import MAX_PICKER_ROWS, TargetModel, discover_target_context
+from tests.helpers.fake_screen import FakeScreen
+
+scenario, target, plugin, plugin_target, status_url = sys.argv[1:]
+cfg = load_config()
+context = discover_target_context(cfg)
+screen = FakeScreen(dimensions=(34, 140))
+menu = CursesMenu(screen, Translator('en'))
+dashboard = UpgradeDashboard(menu)
+dashboard.cfg = cfg
+dashboard.model = model = TargetModel(context)
+model.reset()
+assert not dashboard._enabled('validate') and not dashboard._enabled('execute')
+try:
+    model.select('tomli-w', '1.2.0')
+except UpgradePlanError:
+    pass
+else:
+    raise AssertionError('Non-plugin accepted as target')
+
+def choose(component, version):
+    # Find the pinned fixture version using the public paged catalogue,
+    # then drive the actual picker with navigation keys, not private caches.
+    offset = 0
+    while True:
+        result = model.evaluate(model.request('catalogue', component, offset=offset))
+        assert model.accept(result)
+        positions = [i for i, row in enumerate(result.rows) if row.target == version]
+        if positions:
+            screen.keys = iter([curses.KEY_NPAGE] * (offset // MAX_PICKER_ROWS)
+                               + [curses.KEY_DOWN] * positions[0] + [10])
+            assert dashboard._picker(component) == version
+            model.select(component, version)
+            return
+        offset += MAX_PICKER_ROWS
+        if offset >= result.total:
+            raise AssertionError('Pinned fixture release missing from catalogue')
+
+with patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())):
+    if scenario != 'plugins':
+        choose(None, target)
+    if scenario != 'netbox':
+        choose(plugin, plugin_target)
+    operation, netbox, pins = model.selection.plan_arguments(model.installed)
+    assert operation == {'netbox': 'netbox', 'plugins': 'plugins', 'combined': 'stack'}[scenario]
+    assert netbox == (None if scenario == 'plugins' else target)
+    assert pins == ({} if scenario == 'netbox' else {plugin: plugin_target})
+    result = model.evaluate(model.request('assess'))
+    assert model.accept(result)
+    dashboard.snapshot = result
+    dashboard._validate()
+    assert dashboard._enabled('execute'), 'Fixture plan is not executable'
+    plan = dashboard.plan
+    assert plan.target_netbox == target and dict(plan.selected_plugins) == pins
+
+    # Render both supported languages and representative terminal sizes.
+    for language in ('en', 'pt'):
+        for size in ((16, 50), (34, 140)):
+            menu.t = dashboard.t = Translator(language)
+            screen.dimensions = size
+            assert dashboard._draw()
+            frame = screen.frames[-1]
+            headers = ' '.join(text for y, _, text, _ in frame if y == 4)
+            for name in ('component', 'current', 'target', 'status'):
+                assert menu.t('ut_col_' + name) in headers, headers
+            print(f'PASS: {scenario} dashboard {language} {size[1]}x{size[0]}: {headers}')
+
+    # Actual review, URL input and literal-token prompt; Esc must cancel
+    # before the execution boundary. Guard against accidental mutation.
+    screen.dimensions = (34, 140)
+    screen.keys = iter([10, *map(ord, status_url), 10, 10, 27])
+    with patch('netbox_ops.upgrade_ui.execute_plan',
+               side_effect=AssertionError('Cancelled review attempted execution')) as execute:
+        assert not menu._execute_reviewed_upgrade('Upgrade', cfg, operation, plan)
+        execute.assert_not_called()
+    model.reset()
+    assert not dashboard._enabled('execute')
+print(f'PASS: {scenario} real TUI discovery, exact picker, validation and cancellation')
+PY
+  [[ $(git -C "$root" rev-parse HEAD) == "$commit" && ! -e "$marker" ]]
+  [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
+  wait_health "$old"
+fi
+
 "${cli[@]}" "${args[@]}" --details | tee "$scratch/plan"
 if [[ -n "$overlap_pin" ]]; then
   grep -F 'Redundant identical pin; retained, not edited.' "$scratch/plan" | grep -Fq "$overlap_pin"
