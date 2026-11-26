@@ -442,13 +442,18 @@ class TargetModel:
                 partial = True
                 notes.append(f'{name}: suggestion incomplete; target unchanged, continue to assess more releases')
             else:
-                self._suggestions.pop(key, None)
+                # Retain completed searches until the entire suggestion request
+                # finishes. Otherwise a later plugin can force an evicted long
+                # catalogue to be scanned again on every continuation.
+                self._cache_put(self._suggestions, key, progress, 64)
                 selected = self._plugin(name, progress.choice, selection.netbox, budget)
                 if selected.pending:
                     partial = True
                 if progress.choice != installed and (
                     selected.pending or selected.availability != 'verified' or selected.status == 'conflict'
                 ):
+                    if not selected.pending:
+                        self._suggestions.pop(key, None)
                     notes.append(f'{name}: suggested release could not be reconfirmed; target unchanged')
                     continue
                 proposed[name] = progress.choice
@@ -477,6 +482,11 @@ class TargetModel:
             notes.extend(warnings)
         rows = self._rows(selection, budget)
         partial = partial or any(row.assessment.pending for row in rows)
+        if request.action == 'suggest' and not partial:
+            # A subsequent explicit suggestion can retry uncertain evidence;
+            # only continuations reuse the completed search decisions.
+            for name, _ in self.installed.plugins:
+                self._suggestions.pop((name, selection.netbox), None)
         return TargetSnapshot(request, selection, rows,
                               _status(row.assessment.status for row in rows),
                               tuple(dict.fromkeys(notes)), partial)

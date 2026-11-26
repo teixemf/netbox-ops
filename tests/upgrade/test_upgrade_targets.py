@@ -217,6 +217,31 @@ class TargetModelTests(unittest.TestCase):
         self.run_request(model)
         self.assertEqual(self.fetcher.call_count + self.docs.call_count, calls)
 
+    def test_long_completed_search_is_not_replayed_during_other_plugin_continuation(self):
+        inventory = replace(self.context.inventory, enabled=('demo_plugin', 'other_plugin'),
+                            packages=self.context.inventory.packages + (
+                                InstalledPackage('other-plugin', '1.0.0', ('other_plugin',)),))
+        self.context = replace(self.context, inventory=inventory)
+        # More candidates than the exact assessment LRU can retain.
+        for name, count in (('demo-plugin', 140), ('other-plugin', 16)):
+            self.versions[name] = {
+                f'{major}.0.0': ('netbox<4.6', published())
+                for major in range(2, count + 2)
+            }
+            self.versions[name]['1.0.0'] = ('netbox>=4.6,<4.7', published())
+        model = self.model()
+        for _ in range(60):
+            before = self.fetcher.call_count + 2 * self.docs.call_count
+            result = self.run_request(model, 'suggest')
+            self.assertLessEqual(self.fetcher.call_count + 2 * self.docs.call_count - before, 12)
+            if not result.partial:
+                break
+        self.assertFalse(result.partial)
+        self.assertEqual(result.selection.plugins, model.installed.plugins)
+        first = [call.args for call in self.fetcher.call_args_list
+                 if call.args == ('demo-plugin', '141.0.0')]
+        self.assertEqual(len(first), 1)
+
     def test_failed_listing_retry_and_unknown_mapping(self):
         context = replace(self.context, inventory=replace(
             self.context.inventory, enabled=('demo_plugin', 'unmapped_plugin')))

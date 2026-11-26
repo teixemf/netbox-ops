@@ -38,7 +38,9 @@ the existing eight-second per-request timeout and fixed hosts. Picker pages
 have at most eight rows. Raw responses use small bounded LRU caches; completed
 exact assessments are keyed by package, version, NetBox target and Python in
 one inventory session. Partial suggestion progress avoids rescanning earlier
-candidates. Refresh invalidates all cached evidence.
+candidates, including completed searches while other plugins are still being
+assessed. A completed suggestion allows a subsequent explicit retry. Refresh
+invalidates all cached evidence.
 
 Suggestions inspect newer stable published releases in descending order,
 stop at preliminary support and include the installed version as an unchanged
