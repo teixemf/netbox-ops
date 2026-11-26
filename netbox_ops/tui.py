@@ -803,6 +803,115 @@ class CursesMenu:
                     self._put(y + row, x + col, glyph, style)
         self._put(y + 4, x + 6, f'{100 * backups / total:.1f}%'[:7], 'title')
 
+    def _draw_platform_status(self, x: int, y: int, width: int,
+                              states: Sequence[ServiceState], metrics: dict[str, str],
+                              error: str) -> int:
+        """Render a content-sized table; return the first row below the table."""
+        headers = (self.t('tui_col_service'), self.t('tui_col_state'),
+                   self.t('nbo_service_version').upper(), 'CPU', 'RAM')
+        indexed = {state.name: state for state in states}
+        rows = []
+        for name in SERVICE_NAMES:
+            state = indexed.get(name)
+            label, style, mark = '—', 'muted', '?'
+            version, cpu, ram = '—', '—', '—'
+            if state is not None and not error:
+                if state.healthy:
+                    label, style, mark = self.t('tui_active'), 'success', '●'
+                elif state.loaded != 'loaded':
+                    label, style, mark = '—', 'warning', '?'
+                elif state.active == 'failed':
+                    label, style, mark = self.t('nbo_dashboard_failed'), 'failure', '○'
+                elif state.active == 'inactive':
+                    label, style, mark = self.t('tui_inactive'), 'failure', '○'
+                elif state.active in ('activating', 'deactivating', 'reloading', 'refreshing'):
+                    label, style, mark = self.t('nbo_dashboard_transition'), 'warning', '○'
+                cached = self.versions.get(name)
+                version = cached if cached is not None else '…'
+                cpu = metrics.get(name, '—')
+                ram = self._human_size(state.memory_current)
+            rows.append(((f'{mark} {name}', label, safe_text(version), cpu, ram), style))
+
+        def fit(value: str, size: int) -> str:
+            return value if len(value) <= size else value[:size - 1] + '…'
+
+        widths = [max(len(header), *(len(values[i]) for values, _ in rows))
+                  for i, header in enumerate(headers)]
+        widths[2] = min(widths[2], 16)
+        # Prefer all five columns. Drop version before live metrics and never
+        # squeeze numeric values into unreadable fragments.
+        candidates = ((0, 1, 2, 3, 4), (0, 1, 3, 4), (0, 1, 3), (0, 1))
+        columns, gap = candidates[-1], 1
+        for candidate in candidates:
+            total = sum(widths[i] for i in candidate)
+            if total + 3 * (len(candidate) - 1) <= width:
+                columns, gap = candidate, 3
+                break
+            if total + len(candidate) - 1 <= width:
+                columns, gap = candidate, 1
+                break
+        positions = []
+        offset = x
+        for i in columns:
+            size = min(widths[i], max(0, x + width - offset))
+            if size < 1:
+                break
+            positions.append((i, offset, size))
+            self._put(y, offset, fit(headers[i], size), 'muted')
+            offset += size + gap
+        if error:
+            self._put(y + 1, x, fit(error, width), 'failure')
+        else:
+            for row, (values, style) in enumerate(rows, y + 1):
+                for i, col, size in positions:
+                    value = fit(values[i], size)
+                    if i in (3, 4):
+                        value = value.rjust(size)
+                    self._put(row, col, value, style if i in (0, 1) else 'muted')
+        return y + 1 + len(rows)
+
+    def _draw_dashboard_storage(self, x: int, y: int, width: int, bottom: int,
+                                storage: tuple[int, int, int],
+                                disk: tuple[int, int, int, int, int],
+                                error: str) -> int:
+        """Keep storage within its panel and return the next available row."""
+        if y > bottom:
+            return y
+        self._put(y, x, self.t('nbo_storage_label')[:width], 'section')
+        y += 1
+        if y > bottom:
+            return y
+        if error:
+            self._put(y, x, error[:width], 'failure')
+            return y + 1
+        occupied, free, count = storage
+        used = f'{self.t("nbo_storage_used")}: {self._human_size(occupied)}'
+        other = f'{self.t("nbo_storage_other")}: {self._human_size(disk[1])}'
+        available = f'{self.t("nbo_storage_free")}: {self._human_size(free)}'
+        count_label = f'{self.t("nbo_storage_count")}: {count}'
+        legend = [(used, 'disk_backup'), (other, 'disk_other'),
+                  (available, 'disk_free'), (count_label, 'muted')]
+        remaining = bottom - y + 1
+        # The donut is nine rows high. Reserve two more rows for the latest
+        # backup summary planned in #171; compact text is always available.
+        if disk[3] and remaining >= 11 and width >= 20 + max(len(label) + 2 for label, _ in legend):
+            self._draw_storage_ring(x, y, disk)
+            for row, (label, style) in enumerate(legend, y):
+                self._put(row, x + 20, f'● {label}' if style != 'muted' else label, style)
+            return y + 9
+        if remaining >= 3:
+            for row, label in enumerate((used, available, count_label), y):
+                self._put(row, x, label[:width], 'muted')
+            return y + 3
+        # On the minimum terminal, prioritize backup count and bytes. Free
+        # space remains visible when the second line fits.
+        summary = f'{count_label} / {self._human_size(occupied)}'
+        self._put(y, x, summary[:width], 'muted')
+        if remaining >= 2:
+            self._put(y + 1, x, available[:width], 'muted')
+            return y + 2
+        return y + 1
+
     def _main(self) -> int:
         """Main screen: compact menu and live service/storage dashboard."""
         from .backups import BackupManager
@@ -856,7 +965,7 @@ class CursesMenu:
                 if frame:
                     h, w = frame
                     split = max(22, w * 35 // 100)
-                    panel_height = min(h - 5, 23)
+                    panel_height = min(h - 5, 27)
                     self._paint(3, 2, split - 3, panel_height)
                     self._paint(3, split + 1, w - split - 4, panel_height)
                     self._put(3, 3, self.t('nbo_menu_label'), 'section')
@@ -870,50 +979,18 @@ class CursesMenu:
                         if cursor == idx:
                             self._put(row, 3, ' ' * (split - 5), 'selected')
                         self._put(row, 4, text[:split-7], 'selected' if cursor == idx else '')
+                    dashboard_x = split + 2
                     dashboard_width = w - split - 4
-                    if dashboard_width >= 64:
-                        self._put(5, split+2, self.t('nbo_columns_v032'), 'muted')
-                    elif dashboard_width >= 48:
-                        self._put(5, split+2, self.t('nbo_columns_v031'), 'muted')
-                    if service_error:
-                        self._put(7, split+2, service_error[:w-split-5], 'failure')
-                    else:
-                        for i, state in enumerate(states):
-                            y = 6+i
-                            mark = '●' if state.healthy else '○'
-                            name = f'{mark} {state.name:<11}'
-                            self._put(y, split+2, name, 'success' if state.healthy else 'failure')
-                            self._put(y, split+16, (self.t('tui_active') if state.healthy else self.t('tui_inactive'))[:9],
-                                      'success' if state.healthy else 'failure')
-                            if dashboard_width >= 64:
-                                version = self.versions.get(state.name)
-                                self._put(y, split+27, f'{(version if version is not None else "…")[:12]:<12}', 'muted')
-                                self._put(y, split+41, f'{metrics.get(state.name, "—"):>6}', 'muted')
-                                self._put(y, split+51, self._human_size(state.memory_current), 'muted')
-                            elif dashboard_width >= 48:
-                                self._put(y, split+28, f'{metrics.get(state.name, "—"):>6}', 'muted')
-                                self._put(y, split+38, self._human_size(state.memory_current), 'muted')
-                    line = 12
-                    self._put(line, split+2, self.t('nbo_storage_label'), 'section')
-                    if h < 19:
-                        pass  # Keep the footer clear on short terminals.
-                    elif storage_error:
-                        self._put(line+2, split+2, storage_error, 'failure')
-                    else:
-                        occupied, free, count = storage
-                        if disk[3] and w-split >= 65 and h >= 25:
-                            self._draw_storage_ring(split+3, line+2, disk)
-                            bx = split + 23
-                            self._put(line+2,bx, f'● {self.t("nbo_storage_used")}: {self._human_size(occupied)}','disk_backup')
-                            self._put(line+3,bx, f'● {self.t("nbo_storage_other")}: {self._human_size(disk[1])}','disk_other')
-                            self._put(line+4,bx, f'● {self.t("nbo_storage_free")}: {self._human_size(free)}','disk_free')
-                            self._put(line+5,bx, f'{self.t("nbo_storage_count")}: {count}', 'muted')
-                        else:
-                            self._put(line+2, split+2, f'{self.t("nbo_storage_used")}: {self._human_size(occupied)}', 'muted')
-                            self._put(line+3, split+2, f'{self.t("nbo_storage_free")}: {self._human_size(free)}', 'muted')
-                            self._put(line+4, split+2, f'{self.t("nbo_storage_count")}: {count}', 'muted')
-                    if h > 31:
-                        self._put(24, split+2, self.t('nbo_live_note'), 'muted')
+                    bottom = 3 + panel_height - 1
+                    separator = self._draw_platform_status(
+                        dashboard_x, 4, dashboard_width, states, metrics, service_error)
+                    if separator <= bottom:
+                        self._put(separator, dashboard_x, '─' * dashboard_width, 'muted')
+                    next_row = self._draw_dashboard_storage(
+                        dashboard_x, separator + 1, dashboard_width, bottom,
+                        storage, disk, storage_error)
+                    if next_row <= bottom and h > 31:
+                        self._put(next_row, dashboard_x, self.t('nbo_live_note')[:dashboard_width], 'muted')
                     self.stdscr.refresh()
                 key = self.stdscr.getch()
                 if key == -1:
