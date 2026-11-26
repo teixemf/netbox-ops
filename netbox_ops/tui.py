@@ -932,7 +932,7 @@ class CursesMenu:
                       'unknown': 'nbo_latest_unknown_tag'}[latest.purpose])
         labels = [self.t('nbo_latest_' + field) for field in ('date', 'name', 'type', 'tag')]
         size = max(map(len, labels))
-        values = [f'{stamp} ({provenance})', safe_text(latest.path.name),
+        values = [f'{stamp} ({provenance})', latest.path.name.encode('unicode_escape').decode('ascii'),
                   self.t('nbo_kind_' + latest.kind), tag]
         for label, value in zip(labels, values):
             prefix = f'{label:<{size}} : '
@@ -1044,7 +1044,8 @@ class CursesMenu:
                         latest = None
                         storage_error = safe_text(exc)[:90] or self.t('nbo_latest_unavailable')
                 items = make_main_items(self.t)
-                frame = self._frame(self.t('tui_main_title'), self.t('nbo_main_hint'))
+                hint = self.t('nbo_main_hint' if self.stdscr.getmaxyx()[1] >= 85 else 'nbo_main_hint_compact')
+                frame = self._frame(self.t('tui_main_title'), hint)
                 if frame:
                     h, w = frame
                     self._draw_main_dashboard(h, w, items, cursor, states, metrics, service_error,
