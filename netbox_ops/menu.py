@@ -21,5 +21,6 @@ MENU_ACTIONS = tuple(
 )
 TUI_MENU_ACTIONS = tuple(
     (str(index), *entry) for index, entry in enumerate(
-        (*_COMMON_ACTIONS, ('upgrade', 'menu', 'menu_10'), _SELF_UPGRADE), 1)
+        (*_COMMON_ACTIONS[:2], ('upgrade', 'menu', 'tui_main_upgrade'),
+         ('self-upgrade', '', 'tui_main_self_upgrade')), 1)
 )

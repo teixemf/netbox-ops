@@ -17,7 +17,7 @@ class UpgradeSubmenuTests(unittest.TestCase):
             ('5', 'upgrade', 'plugins'), ('6', 'upgrade', 'stack'),
             ('7', 'self-upgrade', ''),
         ])
-        self.assertEqual(TUI_MENU_ACTIONS[-1][:3], ('5', 'self-upgrade', ''))
+        self.assertEqual(TUI_MENU_ACTIONS[-1][:3], ('4', 'self-upgrade', ''))
 
     def test_numeric_selection_routes_to_each_existing_upgrade_view(self):
         for language in LANGUAGES:
