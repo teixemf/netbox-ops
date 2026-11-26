@@ -101,6 +101,8 @@ class PluginCompatibility:
     status: str  # compatible, uncertain, blocked
     evidence: tuple[CompatibilityEvidence, ...]
     alternatives: tuple[str, ...]
+    # Preliminary evidence never authorizes execution; status still requires core-aware preflight.
+    preliminary_status: str = 'unchecked'  # supported, warning, conflict, unchecked
 
     @property
     def requires_strong_confirmation(self) -> bool:
@@ -118,7 +120,7 @@ def _validate_package(value: str) -> str:
 
 
 def _release_key(version: str) -> tuple[tuple[int, ...], int] | None:
-    if not isinstance(version, str) or not _STABLE.fullmatch(version):
+    if not isinstance(version, str) or len(version) > 128 or not _STABLE.fullmatch(version):
         return None
     before, _, post = version.partition('.post')
     parts = [int(item) for item in before.split('.')]
@@ -126,7 +128,7 @@ def _release_key(version: str) -> tuple[tuple[int, ...], int] | None:
 
 
 def _number_version(version: str) -> tuple[int, ...] | None:
-    if not isinstance(version, str) or not re.fullmatch(r'\d+(?:\.\d+){0,4}', version):
+    if not isinstance(version, str) or len(version) > 128 or not re.fullmatch(r'\d+(?:\.\d+){0,4}', version):
         return None
     values = [int(p) for p in version.split('.')]
     return tuple((values + [0] * (5 - len(values)))[:5])
@@ -134,7 +136,7 @@ def _number_version(version: str) -> tuple[int, ...] | None:
 
 def _check_specifiers(specifiers: str | None, actual: str) -> bool | None:
     """Conservative subset of PEP 440; unsupported clauses return unknown."""
-    if specifiers is None or not specifiers.strip():
+    if not isinstance(specifiers, str) or len(specifiers) > 1024 or not specifiers.strip():
         return None
     actual_parts = _number_version(actual)
     if actual_parts is None:
@@ -199,7 +201,7 @@ def fetch_pypi_json(package: str, version: str | None = None,
         raise CompatibilityError('PyPI response exceeded size limit')
     try:
         result = json.loads(raw)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise CompatibilityError('Invalid PyPI JSON metadata') from exc
     if not isinstance(result, dict):
         raise CompatibilityError('Invalid PyPI JSON object')
@@ -384,6 +386,16 @@ def assess_compatibility(package: str, version: str, netbox_version: str,
         else:
             evidence.append(CompatibilityEvidence(item.source,
                              'Declared range differs from target; not proof of a technical conflict', 'warns'))
+    # Record the same preliminary checks without changing the existing
+    # full-compatibility contract. A missing resolver is never a pass.
+    material_warning = any(
+        item.status == 'unknown' or
+        (item.status == 'warns' and item.detail != 'No explicit NetBox distribution dependency')
+        for item in evidence
+    )
+    preliminary = ('conflict' if any(item.status == 'blocks' for item in evidence)
+                   else 'supported' if confirmed_python and confirmed_netbox and not material_warning
+                   else 'warning')
     if preflight:
         outcome = {'passed': 'supports', 'blocked': 'blocks', 'unknown': 'unknown'}.get(preflight.status, 'unknown')
         evidence.append(CompatibilityEvidence('Isolated pip resolver', preflight.detail, outcome))
@@ -394,7 +406,7 @@ def assess_compatibility(package: str, version: str, netbox_version: str,
                                         else 'uncertain')
     candidates = tuple(x for x in dict.fromkeys(alternatives) if _release_key(x) is not None and x != version)
     return PluginCompatibility(package, version, netbox_version, python_version,
-                               status, tuple(evidence), candidates)
+                               status, tuple(evidence), candidates, preliminary)
 
 
 def assess_upgrade_stages(package: str, version: str, netbox_steps: Sequence[str],
