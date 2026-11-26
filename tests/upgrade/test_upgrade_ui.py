@@ -237,16 +237,21 @@ class UpgradeTuiTests(InterfaceFixture):
             menu._upgrade('netbox')
         return build, execute, confirm
 
-    def test_tui_select_all_excludes_declared_non_plugin(self):
+    def test_tui_validation_uses_exact_eligible_plugin_target(self):
+        from netbox_ops.upgrade_dashboard import UpgradeDashboard
+        from netbox_ops.upgrade_targets import TargetModel, TargetSelection
+
         menu = CursesMenu(FakeScreen(), self.t)
-        plan = self.build('plugins', None, {'example-plugin': None})
-        with patch('netbox_ops.tui.load_config', return_value=self.cfg), patch(
-            'netbox_ops.upgrade_ui.discover_context', return_value=self.context,
-        ), patch('netbox_ops.upgrade_ui.make_plan', return_value=plan) as build, patch.object(
+        dashboard = UpgradeDashboard(menu)
+        dashboard.model = TargetModel(self.context)
+        dashboard.model.selection = TargetSelection('4.4.0', (('example-plugin', '2.0.0'),))
+        plan = self.build('plugins', None, {'example-plugin': '2.0.0'})
+        with patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan) as build, patch.object(
             menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()),
-        ), patch.object(menu, '_choose', side_effect=[0, 0, None, 1, None]), patch.object(menu, '_show_lines'):
-            menu._upgrade('plugins')
-        build.assert_called_once_with(self.context, 'plugins', None, {'example-plugin': None})
+        ):
+            dashboard._validate()
+        build.assert_called_once_with(self.context, 'plugins', None, {'example-plugin': '2.0.0'})
+        self.assertTrue(dashboard._enabled('execute'))
 
     def test_cancel_confirmation_never_executes(self):
         _, execute, confirm = self.run_menu(self.build(), [1, 3, None], [False])

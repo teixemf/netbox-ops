@@ -17,7 +17,7 @@ from . import __version__
 from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
 from .journal import JournalPanel, JournalViewport
-from .menu import TUI_MENU_ACTIONS, UPGRADE_ACTIONS
+from .menu import TUI_MENU_ACTIONS
 from .services import (ServiceError, ServiceState, SystemdServices, ServiceVersionCache,
                        challenge, order_services, perform_service_batch)
 
@@ -1118,17 +1118,10 @@ class CursesMenu:
             self.stdscr.timeout(-1)
 
     def _upgrade_menu(self) -> None:
-        """Group NetBox upgrade modes without changing their execution paths."""
-        entries = [(f'{i}  {self.t(label)}', '')
-                   for i, (_, label) in enumerate(UPGRADE_ACTIONS, 1)]
-        while True:
-            choice = self._choose(
-                self.t('menu_10'), entries, self.t('upgrade_submenu_hint'),
-                numeric_shortcuts=True, escape_clears_selection=False,
-            )
-            if not isinstance(choice, int):
-                return
-            self._upgrade(UPGRADE_ACTIONS[choice][0])
+        """Open the unified version-target management screen."""
+        from .upgrade_dashboard import UpgradeDashboard
+
+        UpgradeDashboard(self).run()
 
     def _upgrade_input(self, title: str, prompt: str, *, initial: str = '',
                        secret: bool = False) -> str | None:
@@ -1154,164 +1147,35 @@ class CursesMenu:
             elif 32 <= key <= 126 and len(typed) < 2048:
                 typed += chr(key)
 
-    def _upgrade(self, operation: str) -> None:
-        """Edit a shared plan and require explicit confirmation before execution."""
-        from .upgrade_ui import discover_context, make_plan, summary_lines, execute_plan, alternative_release_choices
-        from .upgrade_execution import UpgradeExecutionError
-        from .upgrade_tui import netbox_overview
+    def _execute_reviewed_upgrade(self, title, cfg, operation, plan) -> bool:
+        """Use only the exact reviewed plan; return True after an execution attempt."""
+        from .upgrade_ui import execute_plan, summary_lines
 
-        title = self.t({'netbox': 'menu_10', 'plugins': 'menu_11', 'stack': 'menu_12'}[operation])
-        hint = self.t('upgrade_overview_hint')
-        try:
-            cfg = load_config(self.config_path)
-            context = self._upgrade_job(title, lambda _: discover_context(cfg, releases=operation != 'plugins'))
-            if context is None:
-                return
-            target = context.targets[0] if operation != 'plugins' and context.targets else None
-            selected = {}
-            plan = None
-            while True:
-                entries = []
-                actions = []
-                if operation != 'plugins':
-                    entries.append((self.t('upgrade_target', target=target or '?'), ''))
-                    actions.append('target')
-                if operation != 'netbox':
-                    entries.append((self.t('upgrade_select_plugins', count=len(selected)), ''))
-                    actions.append('plugins')
-                entries.append((self.t('upgrade_preview'), ''))
-                actions.append('preview')
-                if plan is not None:
-                    entries.append((self.t('upgrade_details'), ''))
-                    actions.append('details')
-                    if plan.can_execute:
-                        entries.append((self.t('upgrade_execute'), 'warning'))
-                        actions.append('execute')
-                entries.append((self.t('upgrade_pins'), ''))
-                actions.append('pins')
-                if plan is None:
-                    entries.append((self.t('upgrade_overview_details'), ''))
-                    actions.append('details')
-                entries.append((self.t('upgrade_refresh'), ''))
-                actions.append('refresh')
-                overview = netbox_overview(context, target, selected, plan, self.t, operation=operation)
-                choice = self._choose(title, entries, hint, overview=overview,
-                                      escape_clears_selection=False)
-                if not isinstance(choice, int):
-                    return
-                action = actions[choice]
-                if action == 'target':
-                    choice = self._choose(title, [(v, '') for v in context.targets], hint)
-                    if isinstance(choice, int):
-                        target = context.targets[choice]
-                        plan = None
-                elif action == 'refresh':
-                    plan = None
-                    refreshed = self._upgrade_job(title, lambda _: discover_context(
-                        cfg, releases=operation != 'plugins'))
-                    if refreshed is None:
-                        # Do not keep a stale catalogue or executable review.
-                        return
-                    context = refreshed
-                    if target not in context.targets:
-                        target = None
-                    selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
-                elif action == 'pins':
-                    if self._review_plugin_pins(title, context.inventory):
-                        plan = None
-                        context = self._upgrade_job(title, lambda _: discover_context(cfg, releases=operation != 'plugins'))
-                        if context is None:
-                            return
-                        selected = {name: version for name, version in selected.items() if name in dict(context.plugins)}
-                        if target not in context.targets:
-                            target = None
-                    continue
-                elif action == 'plugins':
-                    if context.plugin_selection_incomplete:
-                        self._show_lines(title, [(self.t('upgrade_plugin_selection_warning'), 'warning')])
-                    if not context.plugins:
-                        self._show_lines(title, [(self.t('upgrade_no_eligible_plugins'), 'warning')])
-                        continue
-                    while True:
-                        packages = context.plugins
-                        items = [(self.t('upgrade_select_all'), ''), (self.t('upgrade_clear_all'), '')]
-                        items.extend((f'[{"x" if name in selected else " "}] {name}: {version}'
-                                      + (f' -> {selected[name] or self.t("upgrade_latest")}'
-                                         if name in selected else ''), '') for name, version in packages)
-                        choice = self._choose(title, items, hint)
-                        if not isinstance(choice, int):
-                            break
-                        if choice == 0:
-                            selected = dict.fromkeys(name for name, _ in packages)
-                        elif choice == 1:
-                            selected = {}
-                        else:
-                            name, _ = packages[choice - 2]
-                            mode = self._choose(name, [(self.t('upgrade_latest'), ''),
-                                                (self.t('upgrade_explicit'), ''),
-                                                (self.t('upgrade_remove'), ''),
-                                                (self.t('upgrade_alternatives'), '')], hint)
-                            if mode == 0:
-                                selected[name] = None
-                            elif mode == 1:
-                                value = self._upgrade_input(name, self.t('upgrade_version_prompt'))
-                                if value:
-                                    selected[name] = value.strip()
-                            elif mode == 2:
-                                selected.pop(name, None)
-                            elif mode == 3:
-                                choices = self._upgrade_job(name, lambda _: alternative_release_choices(context, name))
-                                if choices:
-                                    candidates = self._choose(name, [
-                                        (f'{item.version} — {self.t("upgrade_python_" + item.status)}', '')
-                                        for item in choices
-                                    ], self.t('upgrade_alternative_hint'))
-                                    if isinstance(candidates, int):
-                                        selected[name] = choices[candidates].version
-                        plan = None
-                elif action == 'preview':
-                    plan = None
-                    plan = self._upgrade_job(title, lambda _: make_plan(context, operation, target, selected))
-                elif action == 'details':
-                    details = overview if plan is None else [
-                        *overview, (self.t('upgrade_details'), 'section'),
-                        *((line, '') for line in summary_lines(plan, self.t, details=True)),
-                    ]
-                    self._show_lines(title, details, allow_quit=True)
-                elif action == 'execute':
-                    if not plan.can_execute:
-                        self._show_lines(title, [(self.t('upgrade_blocked'), 'failure')])
-                        continue
-                    # Display the full exact plan, including recovery safeguards,
-                    # again immediately before approval.
-                    if self._show_lines(title, [(line, '') for line in summary_lines(
-                            plan, self.t, details=True)], self.t('upgrade_review_hint'),
-                            allow_quit=True) is False:
-                        continue
-                    url = self._upgrade_input(title, self.t('upgrade_url_prompt'))
-                    if not url:
-                        continue
-                    auth = self._upgrade_input(title, self.t('upgrade_auth_prompt'), secret=True)
-                    if auth is None:
-                        continue
-                    if not self._confirm_token(title, self.t('upgrade_confirm'), 'UPGRADE'):
-                        continue
-                    unknowns = plan.requires_strong_confirmation
-                    if unknowns and not self._confirm_token(title, self.t('upgrade_confirm_unknowns'), 'UNCERTAIN'):
-                        continue
-                    approved = plan
-                    result = self._upgrade_job(title, lambda report: execute_plan(
-                        cfg, operation, approved, fingerprint=approved.fingerprint,
-                        acknowledge_unknowns=unknowns, health_url=url, authorization=auth or None,
-                        progress=report,
-                    ))
-                    if result is not None:
-                        self._show_lines(title, [(self.t('upgrade_success', recovery=result.directory), 'success')])
-                    return
-        except UpgradeExecutionError as exc:
-            self._show_lines(title, [(self.t('upgrade_error', message=str(exc)), 'failure')])
-        except Exception:
-            self._show_lines(title, [(self.t('upgrade_discovery_error'), 'failure')])
+        if not plan.can_execute:
+            self._show_lines(title, [(self.t('upgrade_blocked'), 'failure')])
+            return False
+        if not self._show_lines(title, [(line, '') for line in summary_lines(plan, self.t, details=True)],
+                                self.t('upgrade_review_hint'), allow_quit=True):
+            return False
+        url = self._upgrade_input(title, self.t('upgrade_url_prompt'))
+        if not url:
+            return False
+        auth = self._upgrade_input(title, self.t('upgrade_auth_prompt'), secret=True)
+        if auth is None:
+            return False
+        if not self._confirm_token(title, self.t('upgrade_confirm'), 'UPGRADE'):
+            return False
+        unknowns = plan.requires_strong_confirmation
+        if unknowns and not self._confirm_token(title, self.t('upgrade_confirm_unknowns'), 'UNCERTAIN'):
+            return False
+        result = self._upgrade_job(title, lambda report: execute_plan(
+            cfg, operation, plan, fingerprint=plan.fingerprint,
+            acknowledge_unknowns=unknowns, health_url=url, authorization=auth or None,
+            progress=report,
+        ))
+        if result is not None:
+            self._show_lines(title, [(self.t('upgrade_success', recovery=result.directory), 'success')])
+        return True
 
     def _review_plugin_pins(self, title, inventory) -> bool:
         """Select, display and explicitly approve exact pin corrections."""
