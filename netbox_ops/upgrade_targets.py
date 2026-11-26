@@ -74,6 +74,7 @@ class TargetAssessment:
     status: str  # supported | warning | conflict | unchecked
     availability: str  # installed | verified | unavailable | unknown
     evidence: tuple[CompatibilityEvidence, ...] = ()
+    pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,14 @@ class TargetCatalogue:
     partial: bool
 
 
+@dataclass(frozen=True)
+class _SuggestionProgress:
+    offset: int = 0
+    uncertain: str | None = None
+    unresolved_newer: bool = False
+    choice: str | None = None
+
+
 def discover_target_context(cfg: Configuration) -> UpgradeContext:
     """Keep installed inventory available if official release discovery fails."""
     context = discover_context(cfg, releases=False)
@@ -141,7 +150,7 @@ def _status(items) -> str:
 
 
 def _unchecked(detail='Metadata lookup budget reached; continue or retry') -> TargetAssessment:
-    return TargetAssessment('unchecked', 'unknown', (_evidence('Discovery', detail, 'unknown'),))
+    return TargetAssessment('unchecked', 'unknown', (_evidence('Discovery', detail, 'unknown'),), True)
 
 
 class TargetModel:
@@ -193,6 +202,7 @@ class TargetModel:
         self._documents = OrderedDict()
         self._assessments = OrderedDict()
         self._catalogues: dict[str, ReleaseCatalog] = {}
+        self._suggestions = OrderedDict()
 
     def refreshed(self, context: UpgradeContext) -> TargetModel:
         return TargetModel(context, fetcher=self._fetcher, docs_fetcher=self._docs_fetcher,
@@ -326,11 +336,11 @@ class TargetModel:
             status = 'warning'
         if status != 'conflict' and availability not in ('verified', 'installed'):
             status = 'warning'
-        if status == 'supported' and review.warnings:
-            status = 'warning'
         result = TargetAssessment(status, availability, tuple(evidence))
-        # Never pin a transient discovery failure as a permanent assessment.
-        if review.release_status in ('verified', 'unavailable') and not review.warnings:
+        # Cache completed evidence, but allow network failures to be retried.
+        if review.release_status in ('verified', 'unavailable') and not any(
+            'Cannot retrieve' in item or 'Cannot verify' in item for item in review.warnings
+        ):
             self._cache_put(self._assessments, key, result, 128)
         return result
 
@@ -376,7 +386,8 @@ class TargetModel:
         if self.context.plugin_selection_incomplete:
             statuses.append('warning')
             evidence.append(_evidence('Inventory', 'Some configured plugins could not be reliably mapped', 'unknown'))
-        return TargetAssessment(_status(statuses), availability, tuple(evidence))
+        return TargetAssessment(_status(statuses), availability, tuple(evidence),
+                                any(row.assessment.pending for row in (*plugin_rows, *earlier)))
 
     def _rows(self, selection, budget):
         current = dict(self.installed.plugins)
@@ -402,30 +413,39 @@ class TargetModel:
                 continue
             notes.extend(f'{name}: {note}' for note in listing.warnings)
             versions = self._plugin_versions(name, listing)
-            uncertain = None
-            unresolved_newer = bool(listing.warnings)
-            complete = True
-            for version in versions:
-                check = self._plugin(name, version, selection.netbox, budget)
-                if check.status == 'unchecked':
-                    complete = False
-                    partial = True
-                    break
-                if check.status == 'supported' and check.availability in ('verified', 'installed'):
-                    proposed[name] = version
-                    if unresolved_newer:
-                        notes.append(f'{name}: supported target found, but newer releases were not fully assessed')
-                    break
-                if version != installed and check.status == 'warning':
-                    unresolved_newer = True
-                    if uncertain is None and check.availability == 'verified':
-                        uncertain = version
-                if version == installed:
-                    proposed[name] = uncertain or installed
-                    if uncertain is not None:
-                        notes.append(f'{name}: no supported target found; suggested release remains uncertain')
-            if not complete:
+            key = (name, selection.netbox)
+            progress = self._suggestions.get(key, _SuggestionProgress(unresolved_newer=bool(listing.warnings)))
+            # Continue after previous completed candidates instead of replaying
+            # the first page after the bounded metadata cache has evicted it.
+            if progress.choice is None:
+                for index in range(progress.offset, len(versions)):
+                    version = versions[index]
+                    check = self._plugin(name, version, selection.netbox, budget)
+                    if check.pending:
+                        break
+                    progress = replace(progress, offset=index + 1)
+                    if check.status == 'supported' and check.availability in ('verified', 'installed'):
+                        progress = replace(progress, choice=version)
+                        break
+                    if version != installed and check.status == 'warning':
+                        progress = replace(progress, unresolved_newer=True,
+                                           uncertain=progress.uncertain or (
+                                               version if check.availability == 'verified' else None))
+                    if version == installed:
+                        progress = replace(progress, choice=progress.uncertain or installed)
+                self._cache_put(self._suggestions, key, progress, 64)
+            if progress.choice is None:
+                partial = True
                 notes.append(f'{name}: suggestion incomplete; target unchanged, continue to assess more releases')
+            else:
+                proposed[name] = progress.choice
+                selected = self._plugin(name, progress.choice, selection.netbox, budget)
+                if selected.pending:
+                    partial = True
+                if selected.status == 'supported' and progress.unresolved_newer:
+                    notes.append(f'{name}: supported target found, but newer releases were not fully assessed')
+                elif selected.status == 'warning' and progress.choice != installed:
+                    notes.append(f'{name}: no supported target found; suggested release remains uncertain')
         return replace(selection, plugins=tuple(sorted(proposed.items()))), notes, partial
 
     def evaluate(self, request: TargetRequest) -> TargetSnapshot | TargetCatalogue:
@@ -446,7 +466,7 @@ class TargetModel:
             selection, warnings, partial = self._suggest(selection, budget)
             notes.extend(warnings)
         rows = self._rows(selection, budget)
-        partial = partial or any(row.assessment.status == 'unchecked' for row in rows)
+        partial = partial or any(row.assessment.pending for row in rows)
         return TargetSnapshot(request, selection, rows,
                               _status(row.assessment.status for row in rows),
                               tuple(dict.fromkeys(notes)), partial)
@@ -481,4 +501,4 @@ class TargetModel:
             rows.append(TargetRow(name, current, version, assessment))
         return TargetCatalogue(request, tuple(rows), len(versions), latest,
                                tuple(dict.fromkeys(notes)),
-                               any(row.assessment.status == 'unchecked' for row in rows))
+                               any(row.assessment.pending for row in rows))
