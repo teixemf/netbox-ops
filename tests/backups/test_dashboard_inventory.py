@@ -1,5 +1,6 @@
 """The dashboard inventory is read-only and never reads archive contents."""
 import datetime as dt
+import json
 import os
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from netbox_ops.backups import BackupError, BackupManager
+from netbox_ops.backups import MAX_MANIFEST_BYTES, BackupError, BackupManager
 from netbox_ops.config import Configuration, DEFAULT_UNITS
 
 
@@ -23,8 +24,8 @@ class DashboardInventoryTests(unittest.TestCase):
         self.archive = self.enterContext(patch('netbox_ops.backups._read_archive_metadata',
                                               side_effect=AssertionError('no archive reads')))
         self.sidecar = self.enterContext(patch('netbox_ops.backups._read_sidecar_metadata',
-                                              side_effect=AssertionError('no sidecar reads')))
-        self.enterContext(patch.object(Path, 'read_text', side_effect=AssertionError('no manifest reads')))
+                                              side_effect=AssertionError('no unbounded sidecar reads')))
+        self.enterContext(patch.object(Path, 'read_text', side_effect=AssertionError('no unbounded manifest reads')))
 
     def add(self, name, mtime=0, size=4):
         path = self.store / name
@@ -93,3 +94,57 @@ class DashboardInventoryTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 self.manager.dashboard_storage()
         self.assertIsNone(self.manager.dashboard_storage()[1])
+
+    def test_only_latest_sidecar_is_read_and_reliable_metadata_preferred(self):
+        first = self.add('netbox-db-20261125T120000Z-abcdef.dump')
+        older = self.add('netbox-media-20261124T120000Z-abcdef.media.tar.gz')
+        for path, kind, date in ((first, 'db', '2026-11-25T14:22:00+01:00'),
+                                 (older, 'media', '2026-11-26T15:00:00Z')):
+            Path(str(path) + '.json').write_bytes(json.dumps({
+                'tool': 'netbox-ops', 'format': 1, 'kind': kind,
+                'created_utc': date, 'purpose': 'pre_restore',
+            }).encode())
+        with patch.object(self.manager, '_dashboard_metadata',
+                          wraps=self.manager._dashboard_metadata) as metadata:
+            _, latest = self.manager.dashboard_storage()
+        metadata.assert_called_once_with(first, 'db')
+        self.assertEqual(latest.path, first)
+        self.assertEqual(latest.timestamp, dt.datetime(2026, 11, 25, 13, 22, tzinfo=dt.timezone.utc))
+        self.assertEqual((latest.source, latest.purpose), ('metadata', 'pre_restore'))
+
+    def test_malformed_or_unsafe_metadata_falls_back_without_archive_read(self):
+        path = self.add('netbox-db-20261125T120000Z-abcdef.dump')
+        sidecar = Path(str(path) + '.json')
+        for invalid in (
+            b'not json', b'[' * 5000, b'x' * (MAX_MANIFEST_BYTES + 1),
+            json.dumps({'tool': 'other', 'format': 1, 'kind': 'db',
+                        'created_utc': '2026-11-26T00:00:00Z'}).encode(),
+            json.dumps({'tool': 'netbox-ops', 'format': 1, 'kind': 'db',
+                        'created_utc': '2026-11-26T00:00:00', 'purpose': 'other'}).encode(),
+        ):
+            with self.subTest(length=len(invalid)):
+                sidecar.write_bytes(invalid)
+                _, latest = self.manager.dashboard_storage()
+                self.assertEqual((latest.source, latest.purpose), ('filename', 'manual'))
+                self.assertEqual(latest.timestamp, dt.datetime(2026, 11, 25, 12, tzinfo=dt.timezone.utc))
+        sidecar.unlink()
+        sidecar.symlink_to(self.add('external.json'))
+        self.assertEqual(self.manager.dashboard_storage()[1].source, 'filename')
+        sidecar.unlink()
+        os.mkfifo(sidecar)
+        self.assertEqual(self.manager.dashboard_storage()[1].source, 'filename')
+        self.archive.assert_not_called()
+
+    def test_archive_replaced_while_reading_metadata_is_rejected(self):
+        path = self.add('netbox-db-20261125T120000Z-abcdef.dump')
+        def change(*args):
+            path.write_bytes(b'changed')
+            return {}
+        with patch.object(self.manager, '_dashboard_metadata', side_effect=change):
+            with self.assertRaisesRegex(BackupError, 'changed during refresh'):
+                self.manager.dashboard_storage()
+
+    def test_import_with_similar_prefix_but_no_managed_date_has_unknown_tag(self):
+        path = self.add('netbox-db-imported.dump')
+        _, latest = self.manager.dashboard_storage()
+        self.assertEqual((latest.path, latest.purpose, latest.source), (path, 'unknown', 'mtime'))
