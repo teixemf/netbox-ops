@@ -95,6 +95,34 @@ class SharedInterfaceTests(InterfaceFixture):
             with self.assertRaisesRegex(UpgradeExecutionError, 'configured plugins'):
                 make_plan(context, 'plugins', None, {'example-plugin': None})
 
+    def test_plugin_plan_fingerprint_matches_locked_rebuild_without_netbox_tags(self):
+        selection = {'example-plugin': '2.0.0'}
+        context = self.context
+        with patch('netbox_ops.upgrade_ui.build_upgrade_plan',
+                   side_effect=lambda *args, **kwargs: build_upgrade_plan(
+                       *args, **kwargs, reviewer=self.reviewer)):
+            reviewed = make_plan(context, 'plugins', None, selection)
+            fresh = replace(context, tags=())
+            with (patch('netbox_ops.upgrade_ui.discover_context', return_value=fresh) as discover,
+                  patch('netbox_ops.upgrade_ui.execute_plugin_upgrade') as executor):
+                execute_plan(self.cfg, 'plugins', reviewed, fingerprint=reviewed.fingerprint,
+                             acknowledge_unknowns=True, health_url='https://host/api/status/')
+                rebuilt = executor.call_args.kwargs['rebuild_plan']()
+                discover.assert_called_once_with(self.cfg, releases=False)
+            self.assertTrue(reviewed.can_execute)
+            self.assertEqual(reviewed.fingerprint, rebuilt.fingerprint)
+            self.assertEqual(reviewed.source.available_tags, ())
+            self.assertEqual(reviewed.selected_plugins, tuple(selection.items()))
+            changed = replace(fresh, inventory=replace(fresh.inventory, requirements_hash='changed'))
+            self.assertNotEqual(reviewed.fingerprint,
+                                make_plan(changed, 'plugins', None, selection).fingerprint)
+            # Real NetBox upgrades still bind verified release tags.
+            for operation, pins in (('netbox', {}), ('stack', selection)):
+                first = make_plan(context, operation, '4.4.2', pins)
+                later = make_plan(replace(context, tags=(*context.tags, 'v4.4.3')),
+                                  operation, '4.4.2', pins)
+                self.assertNotEqual(first.fingerprint, later.fingerprint)
+
     def test_plan_fingerprint_binds_runtime_and_inventory(self):
         first = self.build()
         self.context = replace(self.context, installation=replace(
