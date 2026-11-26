@@ -1016,6 +1016,10 @@ class CursesMenu:
                             next_row = self._draw_dashboard_storage(
                                 dashboard_x, next_row, dashboard_width, storage_bottom,
                                 storage, disk, '')
+                        elif storage_bottom == next_row:
+                            summary = f'{self.t("nbo_storage_count")}: {storage[2]} / {self._human_size(storage[0])}'
+                            self._put(next_row, dashboard_x, summary[:dashboard_width], 'muted')
+                            next_row += 1
                         for label, style in latest_lines:
                             if next_row > bottom:
                                 break
