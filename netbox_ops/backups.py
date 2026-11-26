@@ -67,7 +67,7 @@ class BackupSummary:
     path: Path
     kind: str
     timestamp: dt.datetime
-    source: str  # filename | mtime
+    source: str  # metadata | filename | mtime
     purpose: str  # manual | pre_restore | unknown
 
 
@@ -873,8 +873,34 @@ class BackupManager:
                 occupied += sidecar.stat().st_size
         return occupied
 
+    @staticmethod
+    def _dashboard_metadata(path: Path, kind: str) -> dict:
+        """Read only the selected bounded sidecar; never open the archive.
+
+        Reject symlinks/nonregular files, including a FIFO swapped in after
+        listing. Metadata is display evidence, not archive verification.
+        """
+        try:
+            fd = os.open(str(path) + '.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'rb') as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_MANIFEST_BYTES:
+                    return {}
+                raw = source.read(MAX_MANIFEST_BYTES + 1)
+            if len(raw) > MAX_MANIFEST_BYTES:
+                return {}
+            meta = json.loads(raw)
+            expected = 'files' if kind == 'legacy' else kind
+            if (isinstance(meta, dict) and meta.get('tool') == 'netbox-ops'
+                    and type(meta.get('format')) is int and meta['format'] == FORMAT
+                    and meta.get('kind') == expected):
+                return meta
+        except (OSError, ValueError, RecursionError):
+            pass
+        return {}
+
     def dashboard_storage(self) -> tuple[tuple[int, int, int, int, int], BackupSummary | None]:
-        """One chronological inventory and disk measurement; no archive/manifest reads."""
+        """One chronological inventory, disk measurement and at most one sidecar."""
         try:
             info = self.directory.lstat()
         except FileNotFoundError:
@@ -900,8 +926,25 @@ class BackupManager:
         if timestamp is None:
             timestamp = dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc)
         prefix = 'netbox-' + ('files' if kind == 'legacy' else kind) + '-'
-        # Do not infer a manual backup from an arbitrary imported archive name.
-        purpose = self.backup_purpose(path) if path.name.startswith(prefix) else 'unknown'
+        # Require the managed naming shape, not just a familiar prefix.
+        managed = re.match(re.escape(prefix) + r'(?:pre-restore-)?\d{8}T\d{6}Z-', path.name)
+        purpose = self.backup_purpose(path) if managed and source == 'filename' else 'unknown'
+        meta = self._dashboard_metadata(path, kind)
+        created = meta.get('created_utc')
+        if isinstance(created, str):
+            try:
+                parsed = dt.datetime.fromisoformat(created.replace('Z', '+00:00'))
+                if parsed.utcoffset() is not None:
+                    timestamp, source = parsed.astimezone(dt.timezone.utc), 'metadata'
+            except (ValueError, OverflowError):
+                pass
+        if meta.get('purpose') in ('manual', 'pre_restore'):
+            purpose = meta['purpose']
+        final = path.lstat()
+        if (not stat.S_ISREG(final.st_mode) or
+                (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) !=
+                (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)):
+            raise BackupError('Latest backup changed during refresh')
         return disk, BackupSummary(path, kind, timestamp, source, purpose)
 
     def storage_breakdown(self) -> tuple[int, int, int, int, int]:
