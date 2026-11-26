@@ -127,6 +127,7 @@
   "backup_restore_cli_hint": "For external files use: sudo netbox-ops restore <kind> --file PATH",
   "menu_backup_manage": "Backup management",
   "nbo_main_hint": "1–4 Open | ↑↓ Select | Enter Open | B Details | F5 Refresh | L Language | Q Quit",
+  "nbo_main_hint_compact": "1–4 | ↑↓ Enter | B Info | F5 | L | Q",
   "nbo_menu_label": "MENU",
   "nbo_dashboard_label": "PLATFORM STATUS",
   "nbo_dashboard_failed": "Failed",
