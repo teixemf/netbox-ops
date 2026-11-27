@@ -7,12 +7,17 @@ are advisory; a confirmed Python or package dependency conflict is blocking.
 from __future__ import annotations
 
 import ast
+import gzip
+import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
+import zipfile
 from urllib.error import HTTPError, URLError
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -675,6 +680,89 @@ class _NoReleaseRedirect(HTTPRedirectHandler):
         return None
 
 
+def _distribution_gate(metadata: dict, version: str, opener: Callable) -> CompatibilityDeclaration | None:
+    """Bounded static fallback for a small universal wheel and matching sdist.
+
+    Require agreement across every published non-yanked distribution. Never
+    install, import, extract to disk, execute build hooks or follow redirects.
+    Missing, ambiguous or oversized artifacts remain unknown.
+    """
+    info = metadata.get('info', {})
+    package = info.get('name')
+    if not isinstance(package, str) or not _PACKAGE.fullmatch(package):
+        return None
+    module = normalize_name(package).replace('-', '_')
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', module):
+        return None
+    files = _published_files(metadata.get('urls'))
+    if len(files) != 2 or {f['packagetype'] for f in files} != {'bdist_wheel', 'sdist'}:
+        return None
+    prefix = f'{module}-{version}'
+    limit = 2 * 1024 * 1024
+    source_limit = 128 * 1024
+    gates = []
+    for entry in files:
+        wheel = entry['packagetype'] == 'bdist_wheel'
+        filename = prefix + ('-py3-none-any.whl' if wheel else '.tar.gz')
+        url = entry.get('url')
+        size = entry.get('size')
+        digests = entry.get('digests')
+        digest = digests.get('sha256') if isinstance(digests, dict) else None
+        if (entry.get('filename') != filename or not isinstance(url, str)
+                or type(size) is not int or not 0 < size <= limit
+                or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            return None
+        # Fixed PyPI file host, exact filename, no URL parameters or credentials.
+        if not re.fullmatch(r'https://files\.pythonhosted\.org/packages/[a-zA-Z0-9/]+/'
+                            + re.escape(filename), url):
+            return None
+        try:
+            request = Request(url, headers={'User-Agent': 'netbox-ops-upgrade-check'})
+            with opener(request, timeout=8) as response:
+                if hasattr(response, 'geturl') and response.geturl() != url:
+                    return None
+                data = response.read(limit + 1)
+            if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+                return None
+            if wheel:
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    matches = [item for item in archive.infolist()
+                               if item.filename == module + '/__init__.py']
+                    if len(matches) != 1 or not 0 < matches[0].file_size <= source_limit:
+                        return None
+                    with archive.open(matches[0]) as stream:
+                        source = stream.read(source_limit + 1)
+            else:
+                with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
+                    unpacked = stream.read(8 * 1024 * 1024 + 1)
+                if len(unpacked) > 8 * 1024 * 1024:
+                    return None
+                with tarfile.open(fileobj=io.BytesIO(unpacked), mode='r:') as archive:
+                    matches = [item for item in archive
+                               if item.name == prefix + '/' + module + '/__init__.py']
+                    if (len(matches) != 1 or not matches[0].isfile()
+                            or not 0 < matches[0].size <= source_limit):
+                        return None
+                    stream = archive.extractfile(matches[0])
+                    if stream is None:
+                        return None
+                    with stream:
+                        source = stream.read(source_limit + 1)
+            if len(source) > source_limit:
+                return None
+            gate = parse_plugin_config(source.decode('utf-8'), module, version, url)
+            if gate is None:
+                return None
+            gates.append(gate)
+        except (OSError, ValueError, EOFError, RuntimeError, zipfile.BadZipFile,
+                tarfile.TarError, URLError, TimeoutError, UnicodeError):
+            return None
+    first, second = gates
+    if (first.min_netbox, first.max_netbox) != (second.min_netbox, second.max_netbox):
+        return None
+    return first
+
+
 def fetch_release_declaration(metadata: dict, version: str, *,
                               opener: Callable | None = None) -> CompatibilityDeclaration | None:
     """Use only bounded exact-tag files from an unambiguous publisher repository."""
@@ -682,15 +770,17 @@ def fetch_release_declaration(metadata: dict, version: str, *,
         raise CompatibilityError('Invalid plugin version')
     repo = _github_source_repo(metadata)
     info = metadata.get('info', {})
-    if repo is None or not isinstance(info, dict) or info.get('version') != version:
+    if not isinstance(info, dict) or info.get('version') != version:
         return None
     package = info.get('name')
     if not isinstance(package, str) or not _PACKAGE.fullmatch(package):
         return None
+    opener = opener or build_opener(_NoReleaseRedirect()).open
+    if repo is None:
+        return _distribution_gate(metadata, version, opener)
     owner, name = repo
     module = normalize_name(package).replace('-', '_')
     mapped = normalize_name(name) == normalize_name(package) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', module)
-    opener = opener or build_opener(_NoReleaseRedirect()).open
 
     def read(url):
         request = Request(url, headers={'User-Agent': 'netbox-ops-upgrade-check'})
@@ -720,10 +810,10 @@ def fetch_release_declaration(metadata: dict, version: str, *,
             if source_text is not None:
                 gate = parse_plugin_config(source_text, module, version, url)
         if declaration is not None:
-            return replace(declaration, runtime_gate=gate)
+            return replace(declaration, runtime_gate=gate or _distribution_gate(metadata, version, opener))
         if gate is not None:
             return gate
-    return None
+    return _distribution_gate(metadata, version, opener)
 
 
 def review_plugin_upgrade(package: str, netbox_steps: Sequence[str],
