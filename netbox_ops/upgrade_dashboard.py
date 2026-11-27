@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import curses
+from queue import SimpleQueue
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextvars import copy_context
 from threading import Event
@@ -51,11 +52,24 @@ class UpgradeDashboard:
         self.cursor = self.scroll = self.action = 0
         self.actions_focused = False
         self.positions = []
+        self._inventory_valid = True
+        self._discovery_action = None
+        self._discovery_states = {}
+        self._discovery_events = SimpleQueue()
+        self._preview_context = None
 
     def _invalidate_plan(self):
         self.plan = self.plan_selection = None
 
     def _rows(self):
+        if not self._inventory_valid or self.model is None:
+            assessment = TargetAssessment('unchecked', 'unknown', pending=self.future is not None)
+            context = self._preview_context
+            if context is None:
+                return (TargetRow(None, '?', '?', assessment),)
+            return (TargetRow(None, context.installation.version, '?', assessment),
+                    *(TargetRow(name, version, '?', assessment)
+                      for name, version in sorted(context.plugins) if isinstance(version, str)))
         if self.snapshot is not None and self.snapshot.selection == self.model.selection:
             return self.snapshot.rows
         current = dict(self.model.installed.plugins)
@@ -65,7 +79,8 @@ class UpgradeDashboard:
                 *(TargetRow(name, current[name], version, unchecked) for name, version in selection.plugins))
 
     def _plan_matches(self):
-        if self.plan is None or self.plan_selection != self.model.selection:
+        if (not self._inventory_valid or self.model is None or self.plan is None
+                or self.plan_selection != self.model.selection):
             return False
         operation, target, pins = self.model.selection.plan_arguments(self.model.installed)
         return (operation is not None
@@ -76,46 +91,104 @@ class UpgradeDashboard:
     def _enabled(self, action):
         if self.future is not None:
             return False
+        if self.model is None or not self._inventory_valid:
+            return action == 'refresh'
         if action == 'execute':
             return self._plan_matches() and self.plan.can_execute
         if action == 'validate':
             return self.model.selection != self.model.installed
         return True
 
-    def _discover(self):
+    def _discover(self, pool, action='assess'):
+        """Start read-only discovery without leaving the management dashboard."""
         self._invalidate_plan()
         self.snapshot = self.suggested = None
-        self.cfg = load_config(self.menu.config_path)
-        context = self.menu._upgrade_job(self.title, lambda _: discover_target_context(self.cfg))
-        if context is None:
-            return False
-        self.model = self.model.refreshed(context) if self.model else TargetModel(context)
-        self.cursor = min(self.cursor, len(self.model.installed.plugins))
+        self._inventory_valid = False
+        self._preview_context = None
         self.error = ''
-        return True
+        self._discovery_action = action
+        self._discovery_states = {'inventory': 'pending', 'releases': 'pending',
+                                  'suggestions': 'pending' if action == 'suggest' else 'not_applicable',
+                                  'assessment': 'pending'}
+        self._discovery_events = SimpleQueue()
+
+        def worker():
+            cfg = load_config(self.menu.config_path)
+            context = discover_target_context(cfg, progress=self._discovery_event,
+                                              cancelled=self.cancel.is_set)
+            return cfg, context
+
+        self.future = pool.submit(copy_context().run, worker)
+
+    def _discovery_event(self, task, state, context):
+        # Only the UI thread consumes these events or updates the model.
+        self._discovery_events.put((task, state, context))
+
+    def _drain_discovery(self):
+        while not self._discovery_events.empty():
+            task, state, context = self._discovery_events.get_nowait()
+            self._discovery_states[task] = state
+            if context is not None:
+                self._preview_context = context
 
     def _start(self, pool, action):
         self._invalidate_plan()
         self.snapshot = None
         self.error = ''
         request = self.model.request(action)
+        if not self._discovery_states:
+            self._discovery_states = {'suggestions': 'pending' if action == 'suggest' else 'not_applicable',
+                                      'assessment': 'pending'}
+        else:
+            self._discovery_states.update(suggestions='pending' if action == 'suggest' else 'not_applicable',
+                                          assessment='pending')
         self.future = pool.submit(copy_context().run, self.model.evaluate, request,
-                                  cancelled=self.cancel.is_set)
+                                  cancelled=self.cancel.is_set, progress=self._discovery_event)
 
-    def _poll(self):
-        if self.future is None or not self.future.done():
-            return
-        future, self.future = self.future, None
-        try:
-            result = future.result()
-            if isinstance(result, TargetSnapshot) and self.model.accept(result):
-                self.snapshot = result
-                if result.request.action == 'suggest':
-                    self.suggested = result.selection
-        except CancelledError:
-            pass
-        except Exception:
-            self.error = self.t('upgrade_discovery_error')
+    def _poll(self, pool=None):
+        self._drain_discovery()
+        while self.future is not None and self.future.done():
+            future, self.future = self.future, None
+            discovering = self._discovery_action is not None
+            try:
+                result = future.result()
+                self._drain_discovery()
+                if discovering:
+                    self.cfg, context = result
+                    action, self._discovery_action = self._discovery_action, None
+                    self._discovery_states.update(inventory='done', releases='done' if context.tags else 'failed')
+                    self.model = self.model.refreshed(context) if self.model else TargetModel(context)
+                    self._inventory_valid = True
+                    self._preview_context = None
+                    self.cursor = min(self.cursor, len(self.model.installed.plugins))
+                    self._start(pool, action)
+                elif isinstance(result, TargetSnapshot) and self.model.accept(result):
+                    self.snapshot = result
+                    if result.request.action == 'suggest':
+                        self.suggested = result.selection
+                    if (not result.partial and not result.warnings
+                            and all(state in ('done', 'not_applicable')
+                                    for state in self._discovery_states.values())):
+                        self._discovery_states.clear()
+                    elif result.partial and self._discovery_states.get('assessment') == 'pending':
+                        self._discovery_states['assessment'] = 'partial'
+                else:
+                    self._discovery_states.clear()
+            except CancelledError:
+                self._discovery_action = None
+                self.error = self.t('upgrade_discovery_error')
+                for task, state in self._discovery_states.items():
+                    if state in ('running', 'pending'):
+                        self._discovery_states[task] = 'not_run'
+            except Exception:
+                self._discovery_action = None
+                self.error = self.t('upgrade_discovery_error')
+                running = [task for task, state in self._discovery_states.items() if state == 'running']
+                for task in running or ['inventory' if discovering else 'assessment']:
+                    self._discovery_states[task] = 'failed'
+                for task, state in self._discovery_states.items():
+                    if state == 'pending':
+                        self._discovery_states[task] = 'not_run'
 
     def _status(self, assessment):
         if assessment.status == 'unchecked' and self.future is not None:
@@ -129,6 +202,8 @@ class UpgradeDashboard:
         return ' '.join(_clip(value, width).ljust(width) for value, width in zip(values, widths))
 
     def _plan_lines(self):
+        if self.model is None or not self._inventory_valid:
+            return [(self.t('upgrade_plan_status', status=self.t('upgrade_status_not_checked')), 'muted')]
         selection = self.model.selection
         operation, target, pins = selection.plan_arguments(self.model.installed)
         plan = self.plan if self._plan_matches() else None
@@ -249,7 +324,10 @@ class UpgradeDashboard:
         action_height = 2 + self.positions[-1][1]
         gap = 1 if h >= 22 else 0
         side_by_side = w >= 82 and h >= 21
-        detail_height = min(12, max(5, (h - 12) // 2)) if side_by_side else 2
+        discovery = bool(self._discovery_states)
+        discovery_lines = self._discovery_lines(width, compact=h < 21 or width < 74) if discovery else []
+        detail_height = (len(discovery_lines) + 1 if discovery else
+                         min(12, max(5, (h - 12) // 2)) if side_by_side else 2)
         budget = max(1, h - 2 - 3 - 3 - action_height - detail_height - 2 * gap)
         self.scroll = max(0, min(self.scroll, self.cursor, len(rows) - 1))
         visible = self._visible_components(rows, self.scroll, budget)
@@ -287,7 +365,7 @@ class UpgradeDashboard:
                 menu._put(y, 3, t('ut_group_plugins'), 'section')
                 y += 1
             selected = index == self.cursor and not self.actions_focused
-            target = ('*' if row.target != row.current else '') + row.target
+            target = ('*' if row.target != '?' and row.target != row.current else '') + row.target
             values = ('  ' + self._name(row.component), row.current, target, self._status(row.assessment))
             if selected:
                 menu._put(y, 3, ' ' * table_width, 'selected')
@@ -297,11 +375,13 @@ class UpgradeDashboard:
                     style = _STYLES[row.assessment.status]
                 menu._put(y, 3 + offsets[i], _clip(value, widths[i]), style)
             y += 1
-        count = sum(row.current != row.target for row in rows)
-        note = (t('ut_checking') if self.future is not None else t('ut_partial')
+        count = sum(row.target != '?' and row.current != row.target for row in rows)
+        note = (t('ut_checking') if self.future is not None else t('ut_discovery_retry_short')
+                if discovery else t('ut_partial')
                 if self.snapshot and self.snapshot.partial else t('ut_details_key')
                 if self.error or self.snapshot and self.snapshot.warnings else t('ut_preliminary_short'))
-        counts = t('ut_counts', count=len(rows), changed=count)
+        counts = (t('ut_counts', count=len(rows), changed=count) if self._inventory_valid and self.model
+                  else t('ut_inventory_pending'))
         menu._put(counts_y, 3, _clip(f'{counts} | {note}', width), 'muted')
         menu._put(action_y, 3, t('ut_operations'), 'section')
         for i, (x, line) in enumerate(self.positions):
@@ -312,7 +392,13 @@ class UpgradeDashboard:
                       'selected' if focused else 'title' if enabled else 'muted')
         row = rows[self.cursor]
         if detail_y < h - 2:
-            if side_by_side:
+            if discovery:
+                menu._paint(detail_y, 2, w - 4, min(detail_height, h - 2 - detail_y))
+                menu._put(detail_y, 3, t('ut_discovery_heading'), 'section')
+                for y, (line, style) in enumerate(discovery_lines, detail_y + 1):
+                    if y < h - 2:
+                        menu._put(y, 3, _clip(line, width), style)
+            elif side_by_side:
                 split = w // 2
                 component = self._compact_component_lines(row, split - 5)
                 plan = self._plan_lines()
@@ -329,10 +415,28 @@ class UpgradeDashboard:
                 menu._paint(detail_y, 2, w - 4, min(2, h - 2 - detail_y))
                 menu._put(detail_y, 3, _clip(t('ut_details_key') + ': ' + self._name(row.component), width), 'section')
                 if detail_y + 1 < h - 2:
-                    line, style = self._plan_lines()[3]
+                    line, style = self._plan_lines()[-1]
                     menu._put(detail_y + 1, 3, _clip(line, width), style)
         menu.stdscr.refresh()
         return True
+
+    def _discovery_lines(self, width, *, compact):
+        styles = {'done': 'success', 'running': 'title', 'failed': 'failure',
+                  'partial': 'warning'}
+        if not compact:
+            labels = [(self.t('nbo_task_state_' + state) if state != 'partial' else self.t('ut_discovery_partial'),
+                       self.t('ut_discovery_' + task), styles.get(state, 'muted'))
+                      for task, state in self._discovery_states.items()]
+            state_width = max(len(state) for state, _, _ in labels)
+            lines = [(f'{state:<{state_width}}  {task}', style) for state, task, style in labels]
+            if self.future is None:
+                lines.append((self.t('ut_discovery_retry'), 'warning'))
+            return lines
+        # Two short labels per row fit the minimum 50x16 terminal.
+        labels = [(self.t('ut_discovery_state_' + state), self.t('ut_discovery_short_' + task))
+                  for task, state in self._discovery_states.items()]
+        return [(' | '.join(f'{state} {task}' for state, task in labels[i:i + 2]), 'muted')
+                for i in range(0, len(labels), 2)]
 
     def _picker(self, component):
         menu, t = self.menu, self.t
@@ -437,11 +541,10 @@ class UpgradeDashboard:
         menu = self.menu
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='nbo-upgrade-targets')
         try:
-            if not self._discover():
-                return
-            self._start(pool, 'suggest')
+            self._discover(pool, 'suggest')
+            self._draw()
             while True:
-                self._poll()
+                self._poll(pool)
                 menu.stdscr.timeout(150 if self.future is not None else -1)
                 frame = self._draw()
                 key = menu.stdscr.getch()
@@ -460,19 +563,18 @@ class UpgradeDashboard:
                     if self.future is None:
                         self._details(self._rows()[self.cursor])
                 elif key in (ord('p'), ord('P')):
-                    if self.future is None and menu._review_plugin_pins(self.title, self.model.context.inventory):
-                        if not self._discover():
-                            return
-                        self._start(pool, 'assess')
+                    if (self.future is None and self._inventory_valid and self.model is not None
+                            and menu._review_plugin_pins(self.title, self.model.context.inventory)):
+                        self._discover(pool)
                 elif key == curses.KEY_F5:
                     if self.future is None:
-                        if not self._discover():
-                            return
-                        self._start(pool, 'assess')
+                        self._discover(pool, 'assess' if self.model else 'suggest')
                 elif key in _ENTER:
                     if self.future is not None:
                         continue
                     if not self.actions_focused:
+                        if not self._inventory_valid or self.model is None:
+                            continue
                         component = self._rows()[self.cursor].component
                         version = self._picker(component)
                         if version is not None:
@@ -496,9 +598,7 @@ class UpgradeDashboard:
                         elif action == 'validate':
                             self._validate()
                         elif action == 'refresh':
-                            if not self._discover():
-                                return
-                            self._start(pool, 'assess')
+                            self._discover(pool, 'assess' if self.model else 'suggest')
                         elif action == 'execute':
                             operation, _, _ = self.model.selection.plan_arguments(self.model.installed)
                             if menu._execute_reviewed_upgrade(self.title, self.cfg, operation, self.plan):

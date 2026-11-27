@@ -365,6 +365,78 @@ class UpgradeTuiTests(InterfaceFixture):
                 self.assertFalse(any(text == menu.t('ut_group_plugins')
                                      for _, _, text, _ in menu.stdscr.frames[-1]))
 
+    def test_initial_discovery_panel_keeps_unknown_versions_and_disabled_actions(self):
+        from concurrent.futures import Future
+
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    dashboard, menu = self._dashboard(dimensions=dimensions, language=language)
+                    dashboard.model = None
+                    pool = Mock()
+                    pool.submit.return_value = Future()
+                    dashboard._discover(pool, 'suggest')
+                    self.assertTrue(dashboard._draw())
+                    frame = menu.stdscr.frames[-1]
+                    self.assertTrue(any(text == menu.t('ut_discovery_heading')
+                                        for _, _, text, _ in frame))
+                    self.assertNotIn('0/0', ' '.join(text for _, _, text, _ in frame))
+                    self.assertEqual(dashboard._rows()[0].current, '?')
+                    self.assertEqual(dashboard._rows()[0].target, '?')
+                    self.assertFalse(any(dashboard._enabled(action)
+                                         for action in ('suggest', 'reset', 'validate', 'refresh', 'execute')))
+                    dashboard._discovery_event('inventory', 'done', self.context)
+                    dashboard._discovery_event('releases', 'running', None)
+                    dashboard._poll(pool)
+                    self.assertEqual(dashboard._rows()[0].current, '4.4.0')
+                    self.assertEqual(dashboard._rows()[0].target, '?')
+                    self.assertEqual(dashboard._rows()[1].component, 'example-plugin')
+                    self.assertEqual(dashboard._discovery_states['inventory'], 'done')
+                    self.assertEqual(dashboard._discovery_states['releases'], 'running')
+
+    def test_failed_inventory_refresh_disables_stale_targets_and_allows_retry(self):
+        from concurrent.futures import Future
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        dashboard.plan = self.build()
+        dashboard.plan_selection = dashboard.model.selection
+        old = dashboard.model
+        pool = Mock()
+        future = Future()
+        pool.submit.return_value = future
+        dashboard._discover(pool)
+        future.set_exception(UpgradeExecutionError('inventory unavailable'))
+        dashboard._poll(pool)
+        self.assertIs(dashboard.model, old)
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._inventory_valid)
+        self.assertEqual(dashboard._rows()[0].current, '?')
+        self.assertEqual(dashboard._discovery_states['inventory'], 'failed')
+        self.assertTrue(dashboard._enabled('refresh'))
+        self.assertFalse(dashboard._enabled('validate'))
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertTrue(dashboard._draw())
+        self.assertTrue(any('Failed' in text for _, _, text, _ in menu.stdscr.frames[-1]))
+
+    def test_completed_discovery_hides_panel_but_partial_discovery_does_not(self):
+        from concurrent.futures import Future
+        from netbox_ops.upgrade_targets import TargetSnapshot
+
+        dashboard, menu = self._dashboard()
+        for partial in (False, True):
+            request = dashboard.model.request('assess')
+            result = TargetSnapshot(request, request.selection, dashboard._rows(), 'supported', (), partial)
+            dashboard._discovery_states = {'inventory': 'done', 'releases': 'done',
+                                           'suggestions': 'not_applicable', 'assessment': 'done'}
+            dashboard.future = Future()
+            dashboard.future.set_result(result)
+            dashboard._poll()
+            self.assertEqual(bool(dashboard._discovery_states), partial)
+            self.assertTrue(dashboard._draw())
+            self.assertEqual(any(text == menu.t('ut_discovery_heading')
+                                 for _, _, text, _ in menu.stdscr.frames[-1]), partial)
+            self.assertFalse(dashboard._enabled('execute'))
+
     def test_dashboard_picker_cancel_and_confirm_preserve_other_targets(self):
         for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, 10], '4.4.1')):
             with self.subTest(expected=expected):
@@ -567,11 +639,19 @@ class UpgradeTuiTests(InterfaceFixture):
               patch('netbox_ops.upgrade_ui.execute_plan') as execute):
             dashboard._validate()
             self.assertTrue(dashboard._enabled('execute'))
-            self.assertTrue(dashboard._discover())
-            result = dashboard.model.evaluate(dashboard.model.request('assess'))
-            self.assertTrue(dashboard.model.accept(result))
-            dashboard.snapshot = result
-        discover.assert_called_once_with(self.cfg)
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                dashboard._discover(pool)
+                self.assertFalse(dashboard._enabled('execute'))
+                dashboard.future.result()
+                dashboard._poll(pool)
+                if dashboard.future is not None:
+                    dashboard.future.result()
+                    dashboard._poll(pool)
+            result = dashboard.snapshot
+        discover.assert_called_once()
+        self.assertEqual(discover.call_args.args, (self.cfg,))
         self.assertEqual(dashboard.model.selection.netbox, '4.4.2')
         self.assertEqual(result.rows[0].assessment.availability, 'unavailable')
         self.assertIsNone(dashboard.plan)
