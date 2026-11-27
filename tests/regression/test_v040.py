@@ -252,7 +252,8 @@ class Ui040Tests(unittest.TestCase):
     def test_full_restore_scope_menu_uses_arrows_and_no_implicit_default(self):
         from netbox_ops.backups import BackupEntry
         item=BackupEntry(Path('/tmp/backup.full.tar.gz'),'full','2026-11-20T18:00:00+00:00',11,'4.4.1')
-        screen=FakeScreen([10,curses.KEY_DOWN,curses.KEY_DOWN,10],dimensions=(26,105))
+        screen=FakeScreen([10,curses.KEY_DOWN,curses.KEY_DOWN,curses.KEY_DOWN,
+                           curses.KEY_UP,10],dimensions=(26,105))
         menu=CursesMenu(screen,Translator('en'))
         self.assertEqual(menu._choose_restore_scope(item),'media')
         text=' '.join(t for _,_,t,_ in screen.writes)

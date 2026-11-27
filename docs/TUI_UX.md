@@ -186,6 +186,22 @@ offering installation and again before execution; the backend still owns the
 lock, archive verification, fresh plan validation and transactional handoff.
 Reopening the view shows the last recorded status, never an inferred success.
 
+## Selection menus
+
+Simple selectors share a content-sized panel, a section heading, a consistent
+selection highlight and the standard keyboard footer. They do not arm a
+selection until the operator navigates; Enter alone cannot choose a default.
+The backup type selector aligns the type and short description and shows
+contextual details below. Database and media-only backups do not stop NetBox;
+combined backups temporarily stop active NetBox and RQ writers. None includes
+configuration. Restore scope keeps its selected backup and precautionary backup
+warning visible and Esc cancels immediately. Other selectors retain their
+existing Esc behavior, scrolling and confirmation gates. For real offline
+curses captures, run `python -m tests.tui.terminal_selector_capture /tmp/selectors.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite exercises actual curses at 50x16 and 140x34 without
+performing backups or restores.
+
 ## Backup task progress
 
 Backup create, restore, verify and delete show planned tasks before starting.
