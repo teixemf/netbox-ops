@@ -255,11 +255,101 @@ class OrchestrationTests(unittest.TestCase):
 
         def opener(request, timeout):
             requested.append(request.full_url)
-            return FakeResponse(b'| Plugin version | Min NetBox | Max NetBox |\n|2.0.0|4.5.0|4.6.x|')
+            if request.full_url.endswith('/COMPATIBILITY.md'):
+                return FakeResponse(b'| Plugin version | Min NetBox | Max NetBox |\n|2.0.0|4.5.0|4.6.x|')
+            return FakeResponse(b'')
 
         declaration = fetch_release_declaration(self.metadata(), '2.0.0', opener=opener)
         self.assertEqual(declaration.max_netbox, '4.6.x')
-        self.assertEqual(requested, ['https://raw.githubusercontent.com/example/netbox-plugin-demo/v2.0.0/COMPATIBILITY.md'])
+        self.assertEqual(requested, [
+            'https://raw.githubusercontent.com/example/netbox-plugin-demo/v2.0.0/COMPATIBILITY.md',
+            'https://raw.githubusercontent.com/example/netbox-plugin-demo/v2.0.0/netbox_plugin_demo/__init__.py',
+        ])
+
+    def test_reorder_rack_release_matrix_and_runtime_gate(self):
+        from netbox_ops.plugin_compatibility import fetch_release_declaration
+
+        # Minimal deterministic fixtures of the reported upstream declaration;
+        # not a vendored copy of the package or an execution of its source.
+        for version, minimum, maximum in (('1.1.4', '4.3.0', '4.6.99'), ('1.1.5', '4.7.0', '4.7.99')):
+            with self.subTest(version=version):
+                metadata = {'info': {'name': 'netbox-reorder-rack', 'version': version,
+                                     'requires_python': '>=3.12', 'requires_dist': None,
+                                     'project_urls': {'Homepage':
+                                                      'https://github.com/netbox-community/netbox-reorder-rack'}}}
+                matrix = ('| Release | Minimum NetBox Version | Maximum NetBox Version |\n'
+                          f'| [v{version}](https://example.com/tag) | {minimum} | {maximum} |')
+                source = ('from netbox.plugins import PluginConfig\n'
+                          'class RackConfig(PluginConfig):\n'
+                          '    name = "netbox_reorder_rack"\n'
+                          f'    version = "{version}"\n'
+                          f'    min_version = "{minimum}"\n'
+                          f'    max_version = "{maximum}"\n'
+                          'config = RackConfig\n')
+
+                def opener(request, timeout):
+                    self.assertIn('/v' + version + '/', request.full_url)
+                    return FakeResponse((matrix if request.full_url.endswith('.md') else source).encode())
+
+                declaration = fetch_release_declaration(metadata, version, opener=opener)
+                self.assertEqual(declaration.min_netbox, minimum)
+                self.assertTrue(declaration.runtime_gate.enforced)
+                result = assess_compatibility('netbox-reorder-rack', version, '4.4.9', '3.12.3',
+                                              metadata, declaration=declaration)
+                self.assertEqual(result.preliminary_status, 'conflict' if version == '1.1.5' else 'supported')
+                if version == '1.1.5':
+                    self.assertTrue(any(e.status == 'blocks' and '4.7.0' in e.detail for e in result.evidence))
+                    result = assess_compatibility('netbox-reorder-rack', version, '4.7.1', '3.12.3',
+                                                  metadata, declaration=declaration)
+                    self.assertEqual(result.preliminary_status, 'supported')
+                    self.assertEqual(result.status, 'uncertain')  # still needs core resolver
+
+    def test_dynamic_or_mismapped_plugin_config_is_not_enforced(self):
+        from netbox_ops.plugin_compatibility import parse_plugin_config
+
+        source = ('from netbox.plugins import PluginConfig\n'
+                  'class Config(PluginConfig):\n'
+                  '    name = "demo"\n'
+                  '    version = "2.0.0"\n'
+                  '    min_version = "4.7.0"\n'
+                  'config = Config\n')
+        for text in (source.replace('"4.7.0"', 'get_version()'),
+                     source.replace('"demo"', '"other"'),
+                     source.replace('"2.0.0"', '"1.0.0"'),
+                     source + 'Config.min_version = "4.0.0"\n',
+                     source + 'setattr(Config, "min_version", "4.0.0")\n',
+                     source.replace('config = Config', 'config = Other')):
+            self.assertIsNone(parse_plugin_config(text, 'demo', '2.0.0', 'https://example.com/tag'))
+        self.assertIsNotNone(parse_plugin_config(source, 'demo', '2.0.0', 'https://example.com/tag'))
+
+    def test_readme_fallback_and_ambiguous_repository(self):
+        from netbox_ops.plugin_compatibility import fetch_release_declaration
+
+        metadata = self.metadata()
+        calls = []
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if request.full_url.endswith('/README.md'):
+                return FakeResponse(b'|Release|Minimum NetBox Version|Maximum NetBox Version|\n|2.0.0|4.5.0|4.6.x|')
+            return FakeResponse(b'')
+        declaration = fetch_release_declaration(metadata, '2.0.0', opener=opener)
+        self.assertTrue(declaration.source.endswith('/v2.0.0/README.md'))
+        self.assertTrue(all('/v2.0.0/' in url for url in calls))
+        calls.clear()
+        metadata['info']['project_urls']['Homepage'] = 'https://github.com/other/other'
+        self.assertIsNone(fetch_release_declaration(metadata, '2.0.0', opener=opener))
+        self.assertEqual(calls, [])
+
+    def test_release_response_redirect_and_oversize_rejected(self):
+        from netbox_ops.plugin_compatibility import fetch_release_declaration
+
+        class Redirected(FakeResponse):
+            def geturl(self):
+                return 'https://raw.githubusercontent.com/example/netbox-plugin-demo/main/README.md'
+
+        for opener in (lambda *a, **kw: Redirected(b'|Release|Minimum NetBox Version|\n|2.0.0|4.5.0|'),
+                       lambda *a, **kw: FakeResponse(b'x' * (128 * 1024 + 1))):
+            self.assertIsNone(fetch_release_declaration(self.metadata(), '2.0.0', opener=opener))
 
     def test_no_untrusted_project_url_fetch(self):
         from netbox_ops.plugin_compatibility import fetch_release_declaration
