@@ -827,6 +827,49 @@ class UpgradeTuiTests(InterfaceFixture):
             self.assertTrue(dashboard._revalidate_after_pins)
         self.assertFalse(dashboard._enabled('execute'))
 
+    def test_ltree_contextual_action_requires_verified_admin_and_explicit_confirmation(self):
+        from netbox_ops.plugin_compatibility import DependencyPreflight
+        from netbox_ops.upgrade_ltree import LtreeInstallReview
+        from netbox_ops.upgrade_plan import StageDependencyReview
+        from netbox_ops.upgrade_runtime import LtreeEvidence
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        report = StageDependencyReview('4.7.3', 'b' * 40, 'hash', (),
+                                       DependencyPreflight('not-run', 'Blocked'), (), 'permission',
+                                       ltree_details=('role lacks permission',), ltree_identity='db',
+                                       ltree_admin_port=5432)
+        plan = replace(self.build(), blockers=('ltree permission',), dependency_reviews=(report,))
+        dashboard.plan = plan
+        dashboard.plan_selection = dashboard.model.selection
+        self.assertTrue(dashboard._enabled('ltree'))
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertIn('ltree', dashboard._actions())
+        review = LtreeInstallReview(self.installation,
+                                   LtreeEvidence('permission', report.ltree_details, 'db', 5432),
+                                   'netbox', Path('/backup'), 'fingerprint')
+        pool = Mock()
+        with (patch('netbox_ops.upgrade_ltree.build_ltree_review', return_value=review),
+              patch('netbox_ops.upgrade_ltree.apply_ltree_review', return_value=Path('/backup/db.dump')) as apply,
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch.object(menu, '_show_lines', return_value=True),
+              patch.object(menu, '_confirm_token', return_value=False) as confirm,
+              patch.object(dashboard, '_discover') as discover):
+            dashboard._review_ltree(pool)
+            apply.assert_not_called()
+            discover.assert_not_called()
+            self.assertIs(dashboard.plan, plan)
+            confirm.return_value = True
+            dashboard._review_ltree(pool)
+            self.assertEqual(confirm.call_args.args[2], 'INSTALL LTREE')
+            apply.assert_called_once()
+            discover.assert_called_once_with(pool)
+            self.assertIsNone(dashboard.plan)
+            self.assertTrue(dashboard._revalidate_after_pins)
+        dashboard.plan = replace(plan, dependency_reviews=(replace(report, ltree_admin_port=None),))
+        dashboard.plan_selection = dashboard.model.selection
+        self.assertNotIn('ltree', dashboard._actions())
+        self.assertFalse(dashboard._enabled('ltree'))
+
     def test_plan_review_prioritizes_blockers_and_keeps_evidence_separate(self):
         for language in LANGUAGES:
             for dimensions in ((16, 50), (34, 140)):

@@ -299,3 +299,17 @@ keyboard hints and footer remain accessible at 50x16. No new dependency or
 backup/restore behavior change.
 
 If an inventory refresh fails, discard old marks, preview metadata and storage observations. Require a successful refresh and new selection before operating on existing backups; never show stale entries as current or count an unavailable inventory as zero.
+
+### PostgreSQL ltree prerequisite
+
+For NetBox 4.7+ the read-only plan matches the database against the backup target and distinguishes installed/usable, available/installable, missing files, insufficient migration privileges, unusable schema, mismatched runtime and unverified connections. Detailed review shows role, server version, schema and search path without credentials. Native NetBox migrations create the extension when permitted; execution verifies usability before restarting writers. No extension is created by plan review. Unverified peer/OS-user-dependent migration authentication and unresolved prerequisites require DBA review.
+
+When the migration role cannot install ltree, the contextual Install ltree
+action is available only for a verified local loopback connection matching the
+configured backup database, a peer-authenticated postgres administrator and
+a protected public schema. The CLI equivalent is `upgrade ltree` followed by
+`upgrade ltree --install --approve-ltree <fingerprint>`. Both require explicit
+review, the operation lock, a verified database backup and a fresh identity
+check inside the fixed CREATE EXTENSION transaction. Revalidate the upgrade
+plan afterwards. Never grant privileges, drop/relocate extensions or restart
+services; remote, ambiguous or writable schemas require DBA intervention.

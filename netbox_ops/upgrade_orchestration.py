@@ -21,7 +21,7 @@ from .plugin_upgrade import preflight_plugin_upgrade, run_plugin_stage
 from .upgrade_maintenance import begin_maintenance, finish_maintenance
 from .upgrade_plan import UpgradePlan
 from .upgrade_recovery import UpgradeRecovery, _capture_quiesced_recovery, _private_directory
-from .upgrade_runtime import validate_upgrade_runtime
+from .upgrade_runtime import probe_ltree, validate_upgrade_runtime
 from .upgrade_services import (
     require_quiesced_writers, start_upgrade_writers, stop_upgrade_writers,
 )
@@ -51,6 +51,8 @@ _SAFE_STAGE_ERRORS = frozenset({
     'Installed plugin or core versions differ from approved pins',
     'Plugin dependency check failed',
     'Cannot verify the configured plugin registry',
+    'PostgreSQL ltree prerequisites changed after approval',
+    'PostgreSQL ltree not usable after migrations',
     *(
         f'NetBox {label} {reason}'
         for label in ('upgrade script', 'Django system check', 'migration check')
@@ -136,6 +138,20 @@ def _execute_upgrade(
             )
         base_python = resolve_base_python(live)
         validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
+        def verify_ltree(index: int, *, after_migration: bool = False) -> None:
+            planned = plan.stages[index]
+            if tuple(map(int, planned.netbox_version.split('.')[:2])) < (4, 7):
+                return
+            review = plan.dependency_reviews[index]
+            evidence = probe_ltree(cfg, live)
+            allowed = ('installed',) if after_migration or review.ltree == 'installed' or operation == 'plugins' else ('installed', 'available')
+            if evidence.status not in allowed or evidence.identity != review.ltree_identity:
+                raise UpgradeExecutionError(
+                    'PostgreSQL ltree not usable after migrations' if after_migration
+                    else 'PostgreSQL ltree prerequisites changed after approval'
+                )
+        if operation == 'plugins':
+            verify_ltree(0)
         _private_directory(cfg.backup_directory)
         baseline = read_netbox_health(health_url, authorization=authorization)
         if baseline.version != plan.current_netbox:
@@ -168,6 +184,7 @@ def _execute_upgrade(
                 if prepared is None:
                     raise UpgradeExecutionError('Plugin preflight was not completed')
                 loaded = run_plugin_stage(live, plan, prepared, base_python, systemd=systemd)
+                verify_ltree(0, after_migration=True)
                 if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
                     raise UpgradeExecutionError('Configured plugin registry changed during installation')
                 expected_health = replace(baseline, plugins=loaded)
@@ -182,6 +199,7 @@ def _execute_upgrade(
                 phase = f'stage {index} preflight'
                 require_quiesced_writers(systemd)
                 validate_upgrade_runtime(cfg, live, base_python, plan.source.inventory.enabled)
+                verify_ltree(index - 1)
                 recheck_combined_stage(
                     cfg, live, planned, combined[index - 1], approval,
                     approved_warnings=plan.warnings,
@@ -193,6 +211,7 @@ def _execute_upgrade(
                 live, loaded = run_combined_stage(
                     live, plan, combined[index - 1], base_python, systemd=systemd,
                 )
+                verify_ltree(index - 1, after_migration=True)
                 if {name for name, _ in loaded} != {name for name, _ in baseline.plugins}:
                     raise UpgradeExecutionError('Configured plugin registry changed during upgrade')
                 if (operation == 'netbox' or index < len(stages)) and loaded != baseline.plugins:
