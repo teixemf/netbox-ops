@@ -162,9 +162,9 @@ class UpgradeDashboard:
                 selection, self._validation_selection = self._validation_selection, None
                 try:
                     self._accept_validation(future.result(), selection)
-                except Exception as exc:
+                except Exception:
                     self._invalidate_plan()
-                    self.error = f'{self.t("ut_validation_error")} {safe_text(exc)}'
+                    self.error = self.t('ut_validation_error')
                 continue
             try:
                 result = future.result()
@@ -310,9 +310,10 @@ class UpgradeDashboard:
         t = self.t
         lines = [self._readiness()]
         if self.error:
-            lines.append((self.error, 'failure'))
-            if self._discovery_incomplete():
-                lines.append((t('ut_discovery_retry'), 'warning'))
+            if self._discovery_incomplete() and self.error == t('upgrade_discovery_error'):
+                lines.append((t('ut_discovery_failed_retry'), 'failure'))
+            else:
+                lines.append((self.error, 'failure'))
         elif self._plan_matches():
             plan = self.plan
             if plan.blockers:
@@ -575,9 +576,9 @@ class UpgradeDashboard:
         count = sum(row.target != '?' and row.current != row.target for row in rows)
         note = (t('ut_checking') if self.future is not None else t('ut_discovery_retry_short')
                 if self._discovery_incomplete() else t('ut_partial')
-                if self.snapshot and self.snapshot.partial else t('ut_no_changes')
-                if self._no_changes() else t('ut_details_key')
-                if self.error or self.snapshot and self.snapshot.warnings else t('ut_preliminary_short'))
+                if self.snapshot and self.snapshot.partial else t('ut_details_key')
+                if self._no_changes() or self.error or self.snapshot and self.snapshot.warnings
+                else t('ut_preliminary_short'))
         if self._validation_selection is not None:
             note = t('ut_validating')
         counts = (t('ut_counts', count=len(rows), changed=count) if self._inventory_valid and self.model

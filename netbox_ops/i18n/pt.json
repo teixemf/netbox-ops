@@ -572,5 +572,6 @@
   "ut_validation_error": "A validação falhou. Repita ou reveja os alvos.",
   "ut_review_next": "Próximo passo: Rever e executar",
   "ut_unchanged": "Sem alteração",
-  "ut_discovery_incomplete_retry": "Descoberta incompleta — D detalhes / F5 repetir"
+  "ut_discovery_incomplete_retry": "Descoberta parcial — D detalhes / F5 repetir",
+  "ut_discovery_failed_retry": "Falha na descoberta — D detalhes / F5 repetir"
 }

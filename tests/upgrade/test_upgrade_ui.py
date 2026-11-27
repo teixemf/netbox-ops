@@ -433,7 +433,7 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('validate'))
         self.assertFalse(dashboard._enabled('execute'))
         self.assertTrue(dashboard._draw())
-        self.assertTrue(any(menu.t('upgrade_discovery_error') in text
+        self.assertTrue(any(menu.t('ut_discovery_failed_retry') in text
                             for _, _, text, _ in menu.stdscr.frames[-1]))
         self.assertFalse(any(text == menu.t('ut_discovery_heading')
                              for _, _, text, _ in menu.stdscr.frames[-1]))
@@ -562,6 +562,15 @@ class UpgradeTuiTests(InterfaceFixture):
             self.assertEqual(dashboard._row_status(blocked)[1], 'failure')
             self.assertTrue(any(style == 'failure' and 'Known incompatibility' in line
                                 for line, style in dashboard._overview_lines()))
+            prereq = SimpleNamespace(status='unknown')
+            core = replace(rows[0], assessment=replace(warning, prerequisites=(('4.4.0', prereq),)))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(core, rows[1]), status='warning')
+            self.assertEqual(dashboard._row_status(core)[1], 'warning')
+            advisory = replace(rows[1], assessment=replace(warning, evidence=(
+                CompatibilityEvidence('publisher', 'Outside declared range', 'warns'),)))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(rows[0], advisory))
+            self.assertEqual(dashboard._row_status(advisory)[1], 'warning')
+            self.assertEqual(dashboard._row_status(rows[0])[1], 'warning')
             dashboard.snapshot = replace(dashboard.snapshot, rows=rows, status='warning')
             dashboard.model.selection = replace(dashboard.model.selection, netbox='4.4.2')
             self.assertEqual(dashboard._row_status(rows[1])[1], 'warning')
