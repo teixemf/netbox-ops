@@ -573,5 +573,6 @@
   "ut_review_next": "Next: Review and execute",
   "ut_unchanged": "Unchanged",
   "ut_discovery_incomplete_retry": "Discovery incomplete — D details / F5 retry",
-  "ut_discovery_failed_retry": "Discovery failed — D details / F5 retry"
+  "ut_discovery_failed_retry": "Discovery failed — D details / F5 retry",
+  "upgrade_overlap_review": "  {name}: local {local}; core {core}. Local declaration retained; resolve together with the exact core pin."
 }

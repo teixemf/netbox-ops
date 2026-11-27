@@ -573,5 +573,6 @@
   "ut_review_next": "Próximo passo: Rever e executar",
   "ut_unchanged": "Sem alteração",
   "ut_discovery_incomplete_retry": "Descoberta parcial — D detalhes / F5 repetir",
-  "ut_discovery_failed_retry": "Falha na descoberta — D detalhes / F5 repetir"
+  "ut_discovery_failed_retry": "Falha na descoberta — D detalhes / F5 repetir",
+  "upgrade_overlap_review": "  {name}: local {local}; core {core}. Declaração local mantida; resolver em conjunto com o pin core exato."
 }

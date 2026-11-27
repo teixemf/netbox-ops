@@ -9,7 +9,7 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 from .config import load_config
-from .plugin_inventory import PluginInventoryError, inventory_plugins
+from .plugin_inventory import PluginInventoryError, configured_plugin_packages, inventory_plugins
 from .tui import move_action_focus, move_selection, safe_text
 from .upgrade_targets import (
     MAX_PICKER_ROWS, TargetAssessment, TargetCatalogue, TargetModel, TargetRow, TargetSnapshot,
@@ -439,7 +439,8 @@ class UpgradeDashboard:
             return set()
         diagnostics = [item for review in self.plan.dependency_reviews for item in review.local_diagnostics]
         manual = {item.name for item in diagnostics if item.action != 'review-pin'}
-        return {item.name for item in diagnostics if item.action == 'review-pin'} - manual
+        eligible = set(dict(configured_plugin_packages(self.model.context.inventory)))
+        return ({item.name for item in diagnostics if item.action == 'review-pin'} - manual) & eligible
 
     def _review_plan_pins(self, pool):
         menu = self.menu
