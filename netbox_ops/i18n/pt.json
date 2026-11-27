@@ -569,5 +569,13 @@
   "nbo_create_downtime_live": "Os serviços NetBox não são parados.",
   "nbo_create_downtime_combined": "Pára temporariamente os serviços NetBox e RQ activos.",
   "nbo_restore_downtime_short": "Pára temporariamente NetBox/RQ activos.",
-  "nbo_restore_safety_short": "Confirmação e backup de segurança."
+  "nbo_restore_safety_short": "Confirmação e backup de segurança.",
+  "ut_action_ltree": "Instalar ltree",
+  "ut_action_ltree_short": "ltree",
+  "ut_ltree_review_from_plan": "Rever Instalar ltree; administrador local verificado disponível.",
+  "upgrade_ltree_admin_review": "Base de dados {database}, PostgreSQL local porta {port}, esquema public. Criar backup verificado em {backup} e instalar apenas ltree. Sem reiniciar serviços nem alterar papéis.",
+  "upgrade_ltree_admin_fingerprint": "Impressão digital da revisão ltree: {fingerprint}",
+  "upgrade_ltree_admin_unavailable": "Instalação automática indisponível para esta base de dados/esquema ou permissões; consultar o DBA.",
+  "upgrade_ltree_admin_confirm": "Confirmar instalação de ltree na base de dados revista.",
+  "upgrade_ltree_admin_success": "ltree instalada e utilizável; backup da base de dados: {backup}"
 }

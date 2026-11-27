@@ -270,16 +270,17 @@ class LtreeProbeTests(unittest.TestCase):
             with self.subTest(status=status):
                 identity = 'netbox|5432|1234'
                 row = [identity, '160015', 'netbox', 'netbox', 'public',
-                       'public', 'public' if values[0] else '', *values, True]
+                       'public', 'public' if values[0] else '', *values, True, '127.0.0.1']
                 runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(row))
                 self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
-                                             discover=discover, sql=Mock(return_value=identity)).status, status)
+                                             discover=discover, sql=Mock(return_value=identity),
+                                             admin_probe=Mock(return_value=False)).status, status)
                 self.assertNotEqual(runner.call_args.kwargs['user'], 0)
                 self.assertEqual(runner.call_args.kwargs['cwd'], root / 'netbox')
                 self.assertNotIn('CREATE EXTENSION', runner.call_args.args[0][-1])
                 self.assertIn('SET TRANSACTION READ ONLY', runner.call_args.args[0][-1])
         runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(
             ['other|5432|1234', '160015', 'netbox', 'netbox', 'public', 'public', '',
-             False, False, True, True, True]))
+             False, False, True, True, True, '127.0.0.1']))
         self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
                                      discover=discover, sql=Mock(return_value=identity)).status, 'mismatch')
