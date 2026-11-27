@@ -16,7 +16,6 @@ from .upgrade_targets import (
     discover_target_context,
 )
 from .upgrade_plan import UpgradePlanError
-from .upgrade_tui import netbox_overview
 from .upgrade_ui import make_plan, summary_lines
 
 if TYPE_CHECKING:
@@ -90,6 +89,9 @@ class UpgradeDashboard:
                 and self.plan.target_netbox == (target or self.model.installed.netbox)
                 and dict(self.plan.selected_plugins) == pins)
 
+    def _actions(self):
+        return (*_ACTIONS[:-1], 'pins', _ACTIONS[-1]) if self._correctable_pins() else _ACTIONS
+
     def _enabled(self, action):
         if self.future is not None:
             return False
@@ -97,6 +99,8 @@ class UpgradeDashboard:
             return action == 'refresh'
         if action == 'execute':
             return self._plan_matches() and self.plan.can_execute
+        if action == 'pins':
+            return bool(self._correctable_pins())
         if action == 'validate':
             return self.model.selection != self.model.installed
         return True
@@ -209,31 +213,50 @@ class UpgradeDashboard:
     def _row_text(self, values, widths):
         return ' '.join(_clip(value, width).ljust(width) for value, width in zip(values, widths))
 
+    def _readiness(self):
+        if self.model is not None and self._inventory_valid:
+            if self.model.selection == self.model.installed:
+                return self.t('ut_no_changes'), 'muted'
+            if self._plan_matches():
+                status = self.plan.status
+                if not self.plan.can_execute:
+                    status = 'blocked'
+                return (self.t('upgrade_plan_status', status=self.t('upgrade_status_' + status)),
+                        {'ready': 'success', 'blocked': 'failure', 'needs_confirmation': 'warning'}[status])
+        return self.t('upgrade_plan_status', status=self.t('upgrade_status_not_checked')), 'muted'
+
     def _plan_lines(self):
-        if self.model is None or not self._inventory_valid:
-            return [(self.t('upgrade_plan_status', status=self.t('upgrade_status_not_checked')), 'muted')]
-        selection = self.model.selection
-        operation, target, pins = selection.plan_arguments(self.model.installed)
-        plan = self.plan if self._plan_matches() else None
-        overview = netbox_overview(self.model.context, target, pins, plan, self.t,
-                                   operation=operation or 'plugins')
-        if operation is None:
-            overview[1] = (self.t('ut_no_changes'), 'muted')
-        preliminary = (self.snapshot.status if self.snapshot is not None else 'unchecked')
-        rows = [overview[1], (self.t('ut_preliminary_status', status=self.t('ut_' + preliminary)),
-                              _STYLES[preliminary]), overview[0], overview[2]]
-        if plan:
-            # Show actual stage and dependency outcomes, with the full evidence in D.
-            reviews = {review.version: review for review in plan.dependency_reviews}
-            for stage in plan.stages:
-                review = reviews.get(stage.netbox_version)
-                status = review.resolution.status if review else 'not-run'
-                if review and status == 'passed' and not review.resolution.checked_core:
-                    status = 'unknown'
-                rows.append((self.t('upgrade_dependency_status', version=stage.netbox_version,
-                                    status=self.t('upgrade_dependency_' + status)),
-                             {'passed': 'success', 'blocked': 'failure'}.get(status, 'warning')))
-        return [rows[1], rows[2], rows[3], rows[0], *rows[4:]]
+        t = self.t
+        lines = [self._readiness()]
+        if not self._plan_matches():
+            if self._enabled('validate'):
+                lines.append((t('ut_validate_next'), 'muted'))
+            return lines
+        plan = self.plan
+        if plan.blockers or plan.warnings:
+            lines.append((t('ut_required_actions'), 'section'))
+            lines.extend((blocker, 'failure') for blocker in dict.fromkeys(plan.blockers))
+            if self._correctable_pins():
+                lines.append((t('ut_pin_review_from_plan'), 'title'))
+            lines.extend((warning, 'warning') for warning in dict.fromkeys(plan.warnings))
+        lines.append((t('ut_validation'), 'section'))
+        reviews = {review.version: review for review in plan.dependency_reviews}
+        for stage in plan.stages:
+            review = reviews.get(stage.netbox_version)
+            status = review.resolution.status if review else 'not-run'
+            if review and status == 'passed' and not review.resolution.checked_core:
+                status = 'unknown'
+            lines.append((t('upgrade_dependency_status', version=stage.netbox_version,
+                            status=t('upgrade_dependency_' + status)),
+                          {'passed': 'success', 'blocked': 'failure', 'unknown': 'warning'}.get(status, 'muted')))
+            for item in stage.prerequisites:
+                lines.append((f'{stage.netbox_version}: {item.name}: {item.installed or "?"} / {item.required} '
+                              f'[{t("ut_check_" + item.status)}]',
+                              {'ok': 'success', 'blocked': 'failure', 'unknown': 'warning'}[item.status]))
+            if review and review.ltree != 'not-required':
+                lines.append((t('upgrade_ltree_status', status=t('upgrade_ltree_' + review.ltree)),
+                              'success' if review.ltree in ('installed', 'available') else 'warning'))
+        return lines
 
     def _component_lines(self, row):
         return [(self._name(row.component), 'title'),
@@ -275,19 +298,36 @@ class UpgradeDashboard:
         return result
 
     def _details(self, row):
-        lines = [(self.t('ut_preliminary'), 'section'), *self._component_lines(row)]
+        t = self.t
+        lines = [(t('ut_available'), 'section')]
+        for component in self._rows():
+            if component.current != component.target:
+                lines.append((f'{self._name(component.component)}: {component.current} → {component.target} '
+                              f'[{self._status(component.assessment)}]', _STYLES[component.assessment.status]))
+        lines.extend([(t('ut_plan'), 'section'), *self._plan_lines()])
+        if self._plan_matches():
+            for review in self.plan.dependency_reviews:
+                for item in review.local_diagnostics:
+                    lines.append((t('upgrade_local_diagnostic', name=item.name, declared=item.declaration,
+                                    installed=item.installed or '?', stage=item.stage,
+                                    reason=t('upgrade_local_' + item.reason),
+                                    action=t('upgrade_local_action_' + item.action.replace('-', '_'))), 'failure'))
         if self.snapshot:
             lines.extend((warning, 'warning') for warning in self.snapshot.warnings)
         if self.error:
             lines.append((self.error, 'failure'))
-        lines.extend([(self.t('ut_plan'), 'section'), *self._plan_lines()])
-        if self._plan_matches():
-            lines.extend((line, '') for line in summary_lines(self.plan, self.t, details=True))
+        lines.append((t('ut_evidence_next'), 'muted'))
         if self._correctable_pins():
-            lines.append((self.t('ut_pin_review_from_plan'), 'title'))
-            return self.menu._show_lines(self.title, lines, self.t('ut_pin_details_hint'), allow_quit=True)
+            return self.menu._show_lines(self.title, lines, t('ut_pin_details_hint'), allow_quit=True)
         self.menu._show_lines(self.title, lines, allow_quit=True)
         return False
+
+    def _evidence(self, row):
+        lines = [(self.t('ut_preliminary'), 'section'), *self._component_lines(row)]
+        if self._plan_matches():
+            lines.extend([(self.t('ut_plan'), 'section'),
+                          *((line, '') for line in summary_lines(self.plan, self.t, details=True))])
+        self.menu._show_lines(self.title, lines, allow_quit=True)
 
     def _correctable_pins(self):
         if not self._plan_matches():
@@ -365,7 +405,9 @@ class UpgradeDashboard:
         rows = self._rows()
         self.cursor = min(self.cursor, len(rows) - 1)
         compact = w < 76
-        labels = [t('ut_action_' + a + ('_short' if compact else '')) for a in _ACTIONS]
+        actions = self._actions()
+        self.action = min(self.action, len(actions) - 1)
+        labels = [t('ut_action_' + a + ('_short' if compact else '')) for a in actions]
         self.positions = menu._backup_action_positions(labels, width)
         action_height = 2 + self.positions[-1][1]
         gap = 1 if h >= 22 else 0
@@ -426,12 +468,14 @@ class UpgradeDashboard:
                 if discovery else t('ut_partial')
                 if self.snapshot and self.snapshot.partial else t('ut_details_key')
                 if self.error or self.snapshot and self.snapshot.warnings else t('ut_preliminary_short'))
+        if self._plan_matches():
+            note = self._readiness()[0]
         counts = (t('ut_counts', count=len(rows), changed=count) if self._inventory_valid and self.model
                   else t('ut_inventory_pending'))
         menu._put(counts_y, 3, _clip(f'{counts} | {note}', width), 'muted')
         menu._put(action_y, 3, t('ut_operations'), 'section')
         for i, (x, line) in enumerate(self.positions):
-            enabled = self._enabled(_ACTIONS[i])
+            enabled = self._enabled(actions[i])
             label = f'[{labels[i]}]' if enabled else f' {labels[i]} '
             focused = self.actions_focused and i == self.action
             menu._put(action_y + 1 + line, 3 + x, label,
@@ -461,7 +505,7 @@ class UpgradeDashboard:
                 menu._paint(detail_y, 2, w - 4, min(2, h - 2 - detail_y))
                 menu._put(detail_y, 3, _clip(t('ut_details_key') + ': ' + self._name(row.component), width), 'section')
                 if detail_y + 1 < h - 2:
-                    line, style = self._plan_lines()[-1]
+                    line, style = self._readiness()
                     menu._put(detail_y + 1, 3, _clip(line, width), style)
         menu.stdscr.refresh()
         return True
@@ -730,6 +774,9 @@ class UpgradeDashboard:
                 elif key in (ord('d'), ord('D')):
                     if self.future is None and self._details(self._rows()[self.cursor]):
                         self._review_plan_pins(pool)
+                elif key in (ord('e'), ord('E')):
+                    if self.future is None:
+                        self._evidence(self._rows()[self.cursor])
                 elif key in (ord('p'), ord('P')):
                     if self.future is None and self._inventory_valid and self.model is not None:
                         self._review_plan_pins(pool)
@@ -753,7 +800,7 @@ class UpgradeDashboard:
                             self.suggested = None
                             self._start(pool, 'assess')
                     else:
-                        action = _ACTIONS[self.action]
+                        action = self._actions()[self.action]
                         if not self._enabled(action):
                             continue
                         if action == 'suggest':
@@ -766,6 +813,8 @@ class UpgradeDashboard:
                             self._validate()
                         elif action == 'refresh':
                             self._discover(pool, 'assess' if self.model else 'suggest')
+                        elif action == 'pins':
+                            self._review_plan_pins(pool)
                         elif action == 'execute':
                             operation, _, _ = self.model.selection.plan_arguments(self.model.installed)
                             if menu._execute_reviewed_upgrade(self.title, self.cfg, operation, self.plan):
@@ -775,7 +824,7 @@ class UpgradeDashboard:
                     if key == curses.KEY_HOME:
                         self.action = 0
                     elif key == curses.KEY_END:
-                        self.action = len(_ACTIONS) - 1
+                        self.action = len(self._actions()) - 1
                 elif key in _MOVE:
                     self.cursor = move_selection(self.cursor, key, len(self._rows()))
         except Exception:

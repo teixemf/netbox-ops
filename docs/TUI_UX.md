@@ -54,7 +54,7 @@ versions are prerequisites in details; self-upgrade remains separate.
 ```text
 NETBOX-OPS                    v0.6.1 EN
 Upgrade management
-AVAILABLE UPGRADES
+PLANNED CHANGES
 Core                 CURRENT    TARGET     STATUS
   NetBox             4.4.9      *4.7.6     OK
 
@@ -68,7 +68,7 @@ COMPONENT DETAILS                 UPGRADE PLAN
 example-plugin                    Plan: Not checked
 1.0.0 -> 2.0.0                   NetBox: 4.4.9 -> 4.7.6
 Warning                           Stages: ?
-Q Quit | Esc Back | Enter Open | Tab Actions | D Details | P Pins | F5 Refresh
+Q Quit | Esc Back | Enter Open | Tab Actions | D Plan | E Evidence | P Pins | F5 Refresh
 ```
 
 The aligned table sizes columns to content and groups Core and Plugins without
@@ -77,8 +77,13 @@ above the scroll window. Counts and operations follow the visible rows; details
 remain accessible with D, including complete prerequisite reasons and stage evidence.
 An asterisk marks a changed target, not a checkbox. Move with arrows/j/k,
 Home/End and Page Up/Down. Enter opens the version picker, D opens scrollable
-component evidence and the complete plan, P reviews local pins, and Tab or
-Shift+Tab switches between rows and actions.
+the plan overview, E opens complete technical evidence (including the fingerprint),
+P reviews local pins, and Tab or Shift+Tab switches between rows and actions.
+The plan overview prioritizes readiness, blockers and required actions ahead of
+warnings and stage validation. A contextual Review pins action appears only for
+correctable diagnostics. Unrun checks never appear as passed. On compact
+screens the readiness is retained in the overview and D provides scrollable
+untruncated reasons; the full execution review and approval are unchanged.
 
 The version picker opens with Keep installed version first, followed by all
 eligible discovered releases in descending order. It uses the available screen
@@ -94,8 +99,13 @@ where publisher repository/package/module identity and a literal exported
 PluginConfig can be mapped, explicit runtime minimum/maximum NetBox versions.
 Out-of-range documentation is a warning; a recognized runtime gate or
 declared dependency conflict blocks the target. Tagged README tables are a
-fallback only; remote source is parsed, never imported or executed. Missing,
-ambiguous or dynamic declarations remain uncertain. The core-aware dependency
+fallback only; remote source is parsed, never imported or executed. If the
+publisher link is missing or stale, a bounded static fallback can check a
+small universal wheel and matching source distribution from the exact PyPI
+release. Both must match the published SHA256 digests and agree on the literal
+runtime limits. Downloads use the fixed PyPI file host without redirects; no
+installation, build hooks or on-disk archive extraction is performed. Other
+artifact layouts, missing, ambiguous or dynamic declarations remain uncertain. The core-aware dependency
 resolver and execution-time review remain mandatory.
 D opens complete evidence, F5 retries release metadata and assessments within
 the inventory session (dashboard F5 refreshes official NetBox releases), Enter
@@ -119,7 +129,7 @@ Reset restores installed versions; refresh preserves valid intent and clears
 review. Full validation derives the exact changed pins and existing operation.
 A failed local requirements check names the affected package, declaration,
 installed version, stage, reason and next action in both CLI and TUI.
-Use D then Enter Review pins (or P in the dashboard) for correctable exact
+Use D then Enter Review pins (or P / Review pins in the dashboard) for correctable exact
 pins. Bare, uniquely installed local dependencies may be reviewed in this
 context without becoming plugin upgrade targets. Existing mismatched pins,
 missing packages, complex declarations and local/core overlaps require

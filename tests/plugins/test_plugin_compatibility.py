@@ -313,6 +313,73 @@ class OrchestrationTests(unittest.TestCase):
                     self.assertEqual(newer.preliminary_status, 'warning')
                     self.assertFalse(any(e.status == 'blocks' for e in newer.evidence))
 
+    def test_published_artifact_fallback_requires_matching_verified_gates(self):
+        import hashlib
+        import tarfile
+        import zipfile
+        from netbox_ops.plugin_compatibility import fetch_release_declaration
+
+        module, version = 'netbox_reorder_rack', '1.1.5'
+        prefix = f'{module}-{version}'
+        source = ('from netbox.plugins import PluginConfig\n'
+                  'class RackConfig(PluginConfig):\n'
+                  f'    name = "{module}"\n'
+                  f'    version = "{version}"\n'
+                  '    min_version = "4.7.0"\n'
+                  'config = RackConfig\n').encode()
+        wheel = io.BytesIO()
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            archive.writestr(module + '/__init__.py', source)
+        def sdist(content):
+            data = io.BytesIO()
+            with tarfile.open(fileobj=data, mode='w:gz') as archive:
+                item = tarfile.TarInfo(prefix + '/' + module + '/__init__.py')
+                item.size = len(content)
+                archive.addfile(item, io.BytesIO(content))
+            return data.getvalue()
+
+        for case in ('matching', 'different', 'bad-digest', 'untrusted-url', 'malformed', 'oversized'):
+            with self.subTest(case=case):
+                files = []
+                payloads = {}
+                for name, kind, data in (
+                    (prefix + '-py3-none-any.whl', 'bdist_wheel', wheel.getvalue()),
+                    (prefix + '.tar.gz', 'sdist',
+                     sdist(source.replace(b'4.7.0', b'4.6.0') if case == 'different' else source)),
+                ):
+                    url = 'https://files.pythonhosted.org/packages/ab/cd/123/' + name
+                    if case == 'untrusted-url':
+                        url = url.replace('files.pythonhosted.org', 'example.org')
+                    if case == 'malformed':
+                        data = b'not an archive'
+                    if case == 'oversized':
+                        data = b'x' * (2 * 1024 * 1024 + 1)
+                    payloads[url] = data
+                    files.append(dict(filename=name, packagetype=kind, url=url, size=len(data),
+                                      digests={'sha256': '0' * 64 if case == 'bad-digest'
+                                               else hashlib.sha256(data).hexdigest()}))
+                metadata = {'info': {'name': module, 'version': version,
+                                     'home_page': 'https://github.com/minitriga/netbox-reorder-rack/',
+                                     'project_urls': {'Bug Tracker':
+                                                      'https://github.com/minitriga/netbox-reorder-rack/issues'}},
+                            'urls': files}
+                calls = []
+                def opener(request, timeout):
+                    calls.append(request.full_url)
+                    return FakeResponse(payloads[request.full_url])
+                gate = fetch_release_declaration(metadata, version, opener=opener)
+                if case == 'matching':
+                    self.assertTrue(gate.enforced)
+                    self.assertEqual(gate.min_netbox, '4.7.0')
+                    self.assertEqual(len(calls), 2)
+                    result = assess_compatibility(module, version, '4.4.10', '3.12.3',
+                                                  metadata, declaration=gate)
+                    self.assertEqual(result.status, 'blocked')
+                else:
+                    self.assertIsNone(gate)
+                    if case in ('untrusted-url', 'oversized'):
+                        self.assertEqual(calls, [])
+
     def test_dynamic_or_mismapped_plugin_config_is_not_enforced(self):
         from netbox_ops.plugin_compatibility import parse_plugin_config
 

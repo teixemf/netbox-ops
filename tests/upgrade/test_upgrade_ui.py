@@ -739,6 +739,8 @@ class UpgradeTuiTests(InterfaceFixture):
         dashboard.plan = replace(plan, blockers=('Review requirements',), dependency_reviews=(report,))
         dashboard.plan_selection = dashboard.model.selection
         self.assertEqual(dashboard._correctable_pins(), {'example-plugin'})
+        self.assertIn('pins', dashboard._actions())
+        self.assertTrue(dashboard._enabled('pins'))
         inventory = replace(self.inventory, local_pin_names=('example-plugin',))
         pool = Mock()
         with (patch('netbox_ops.upgrade_dashboard.inventory_plugins', return_value=inventory) as read,
@@ -754,6 +756,31 @@ class UpgradeTuiTests(InterfaceFixture):
             discover.assert_called_once_with(pool)
             self.assertTrue(dashboard._revalidate_after_pins)
         self.assertFalse(dashboard._enabled('execute'))
+
+    def test_plan_review_prioritizes_blockers_and_keeps_evidence_separate(self):
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                dashboard, menu = self._dashboard(dimensions=dimensions, language=language)
+                dashboard.plan = replace(self.build(), blockers=('Incompatible plugin',),
+                                         warnings=('Advisory range',))
+                dashboard.plan_selection = dashboard.model.selection
+                self.assertTrue(dashboard._plan_matches())
+                lines = dashboard._plan_lines()
+                self.assertEqual(lines[0][1], 'failure')
+                self.assertLess(lines.index(('Incompatible plugin', 'failure')),
+                                lines.index(('Advisory range', 'warning')))
+                self.assertFalse(dashboard._enabled('execute'))
+                self.assertTrue(dashboard._draw())
+                with patch.object(menu, '_show_lines', return_value=False) as show:
+                    dashboard._details(dashboard._rows()[0])
+                    overview = show.call_args.args[1]
+                    self.assertIn(('Incompatible plugin', 'failure'), overview)
+                    self.assertNotIn(dashboard.plan.fingerprint, str(overview))
+                    dashboard._evidence(dashboard._rows()[0])
+                    self.assertIn(dashboard.plan.fingerprint, str(show.call_args.args[1]))
+                dashboard.model.reset()
+                self.assertFalse(dashboard._enabled('execute'))
+                self.assertNotIn(('Incompatible plugin', 'failure'), dashboard._plan_lines())
 
     def test_failed_recalculation_does_not_reuse_previous_review(self):
         dashboard, menu = self._dashboard()
