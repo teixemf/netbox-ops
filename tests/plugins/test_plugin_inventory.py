@@ -210,6 +210,19 @@ class PluginInventoryTests(unittest.TestCase):
         inventory = inventory_plugins(self.installation, local_pin_names=('local-extra',))
         self.assertFalse(inventory.proposals)
 
+    def test_pin_backup_initializes_missing_state_directory(self):
+        from netbox_ops.plugin_inventory import _save_pin_backup
+
+        state = self.root.parent / 'new-state'
+        recovery = state / 'pin-recovery'
+        original = b'sample-plugin\n'
+        self.assertFalse(state.exists())
+        with patch('netbox_ops.plugin_inventory._PIN_RECOVERY_DIRECTORY', recovery):
+            directory = _save_pin_backup(self.root, original, 0o640, 0)
+        self.assertEqual((directory / 'local_requirements.txt').read_bytes(), original)
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(recovery.stat().st_mode & 0o777, 0o700)
+
     def test_backup_failure_prevents_pin_replacement(self):
         inventory = self.inventory()
         original = self.requirements.read_bytes()
