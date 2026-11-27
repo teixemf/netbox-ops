@@ -41,12 +41,12 @@ Before rebuilding an existing environment, `upgrade.sh` checks that the chosen i
 
 ## Getting started
 
-Download `netbox-ops-v0.6.0.tar.gz` and its matching `.sha256` asset from the official GitHub Release. Verify the checksum and inspect the archive before installing it on the NetBox server. Stop if verification fails. The archive contains a top-level `netbox-ops/` directory:
+Download `netbox-ops-v0.6.1.tar.gz` and its matching `.sha256` asset from the official GitHub Release. Verify the checksum and inspect the archive before installing it on the NetBox server. Stop if verification fails. The archive contains a top-level `netbox-ops/` directory:
 
 ```bash
-sha256sum -c netbox-ops-v0.6.0.tar.gz.sha256
-tar -tzf netbox-ops-v0.6.0.tar.gz
-sudo tar -xzf netbox-ops-v0.6.0.tar.gz -C /opt
+sha256sum -c netbox-ops-v0.6.1.tar.gz.sha256
+tar -tzf netbox-ops-v0.6.1.tar.gz
+sudo tar -xzf netbox-ops-v0.6.1.tar.gz -C /opt
 sudo /opt/netbox-ops/install.sh
 sudo netbox-ops
 ```
@@ -65,9 +65,9 @@ sudo netbox-ops backup combined
 
 New `combined` backups contain the PostgreSQL database and NetBox media files, not the entire NetBox installation. The CLI also supports separate `db` and `media` backups. Older `full` archives remain listed, verifiable, and restorable without conversion; new combined archives use the `.combined.tar.gz` extension and `kind=combined` metadata. Historical archives keep their original `.full.tar.gz` filename and `kind=full` metadata. Use `backup verify --kind full --file PATH` or `restore full --file PATH` for an older archive. Both `restore full` and `restore combined` support `--only db`, `--only media`, or `--only all`. Restores still require the existing safety checks and explicit confirmations.
 
-In the TUI main menu, select `4` (Upgrade NetBox) to choose NetBox-only, plugin-only or combined upgrades. Use `1`–`3` or the arrow keys and Enter in the submenu; Esc returns to the main menu. Select `5` for netbox-ops self-upgrade. The CLI commands and text-mode menu are unchanged.
+In the TUI main menu, select `3` (Upgrade NetBox) to open unified NetBox and plugin upgrade management. Use the arrow keys and Enter to choose exact target versions; Tab opens the operation bar. Suggestions and preliminary compatibility are read-only. Validate the full plan before Review and execute becomes available. Select `4` for netbox-ops self-upgrade. The CLI commands and text-mode menu are unchanged.
 
-In the TUI Backups screen, use the arrow keys to preview a backup, Space to mark it, and Tab to focus the operations. Press `I` to read the full filename and details on a narrow terminal without changing marks or executing an operation.
+In the TUI Backups screen, use the arrow keys to preview a backup, Space to mark it, and Tab to focus the operations. Press `I` to read the full filename and details, or `B` for storage and inventory counts on a narrow terminal. Neither changes marks or executes an operation.
 
 The upgrade views keep installed/target versions, plan status and available actions visible. Refreshing or editing the selection requires a new review; blocked plans cannot be executed. See [TUI conventions and upgrade layouts](docs/TUI_UX.md).
 
@@ -81,7 +81,7 @@ Run `sudo /opt/netbox-ops/uninstall.sh` from an interactive terminal. Exit other
 
 ## Project status
 
-**Current version: 0.6.0 — early development.**
+**Current version: 0.6.1 — early development.**
 
 CI includes real PostgreSQL backup and restore integration tests on Ubuntu 22.04 and Rocky Linux 9, plus disposable Ubuntu 24.04 VM suites for NetBox services, database and media restores, NetBox and plugin upgrades, and netbox-ops self-upgrade. Restore coverage includes combined and selective restores, corrupt archive rejection and rollback after an injected failure. Self-upgrade coverage uses unpublished candidate archives and controlled failure scenarios; testing two published releases is tracked in #132. PostgreSQL integration on Rocky Linux does not establish full upgrade support on that distribution.
 

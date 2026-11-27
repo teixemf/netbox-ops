@@ -1,8 +1,8 @@
 # NetBox and plugin upgrades
 
 The CLI and TUI share an editable upgrade plan and a guarded executor for
-NetBox-only, plugin-only and combined upgrades. This guide describes v0.6.0;
-these upgrade workflows are not available in v0.5.0.
+NetBox-only, plugin-only and combined upgrades. This guide describes v0.6.1;
+these upgrade workflows were introduced in v0.6.0 and are not available in v0.5.0.
 
 ## Supported setup
 
@@ -176,13 +176,19 @@ applied migrations; there is no automatic full rollback.
 
 ## CLI and terminal interface
 
-The existing NetBox, plugin and combined upgrade entries open an editable
-plan in the TUI. Choose a target release and select plugin packages, optionally
-pinning a specific stable release. Recalculate after edits, review the compact
-summary and open the compatibility details before approving. An edited
-selection invalidates the previous plan. Execution requires the literal
-`UPGRADE` confirmation and, for uncertain plans, a second `UNCERTAIN`
-confirmation. The API authorization header is optional and entered without echo.
+The TUI Upgrade NetBox entry opens a unified table of installed NetBox and
+reliably mapped configured plugins. Use Enter on a row to select an exact
+stable target, Tab to focus actions, D for detailed evidence and plan review,
+and P for local pin review. Initial suggestions and preliminary compatibility
+are read-only and may be incomplete. Suggest targets recomputes plugin targets
+for the chosen NetBox version; Reset targets restores installed versions.
+Validate builds the full plan for the exact differences (NetBox-only,
+plugin-only or combined). Review and execute requires an executable matching
+plan. Editing targets, refreshing inventory or correcting pins invalidates
+the previous review. A green preliminary assessment does not authorize an
+upgrade. Execution requires the literal `UPGRADE` confirmation and, for
+uncertain plans, a second `UNCERTAIN` confirmation. The API authorization
+header is optional and entered without echo. See [TUI conventions](TUI_UX.md).
 
 The CLI previews a plan without changing the installation:
 

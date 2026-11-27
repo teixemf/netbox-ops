@@ -2,6 +2,19 @@
 
 Notable changes to netbox-ops are listed below. The project is currently in early development.
 
+## [0.6.1] — Upgrade reliability and user experience
+
+- Replaced the TUI upgrade submenu with one exact-target NetBox and plugin dashboard, initial stable version suggestions, paged version pickers and preliminary compatibility evidence. Full dependency validation and explicit approval remain mandatory.
+- Restricted plugin upgrade targets to reliably mapped installed configured plugins. Explain overlapping local and core requirements; retain identical simple non-plugin pins only after successful dependency resolution.
+- Fixed plugin-only plan fingerprint consistency between TUI review and locked execution without relaxing inventory or approval checks.
+- Refined dashboard platform and latest backup information, service runtime/startup actions, inline confirmation errors and backup inventory layout. Show per-type totals and marked counts; discard stale selections when inventory refresh fails.
+- Improved CI impact-based test selection and differential coverage reporting, with manual and weekly full regression workflows. Release validation remains mandatory.
+- Added disposable Ubuntu 24.04 VM tests of real TUI upgrade selection, validation, cancellation, approval and execution for NetBox-only, plugin-only and combined upgrades, retaining CLI, cross-minor, controlled failure and recovery checks.
+
+**Upgrade from v0.6.0:** Use the transactional self-upgrade mechanism for supported archive installations after the official v0.6.1 release is published. Review the compatibility plan and verified release assets, and follow [self-upgrade and recovery](https://github.com/teixemf/netbox-ops/blob/v0.6.1/docs/SELF_UPGRADE_RECOVERY.md). Do not extract over an existing installation. Upgrading from v0.5.0 requires manual replacement.
+
+**Validation scope and limitations:** NetBox upgrade E2E uses disposable Ubuntu 24.04 guests and a synthetic terminal for TUI input/rendering, with real planning, execution, service health and recovery. PostgreSQL integration on Ubuntu 22.04 and Rocky Linux 9 is separate evidence, not full upgrade E2E on those platforms. Automatic NetBox upgrade rollback (#63), published-release self-upgrade pair testing (#132), and broader maintenance coordination (#99) remain outstanding.
+
 ## [0.6.0] — Upgrade management and recoverability
 
 - Added editable CLI and TUI plans for NetBox-only, plugin-only and combined upgrades, with exact target versions, compatibility warnings and explicit approval.
