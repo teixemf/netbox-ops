@@ -11,6 +11,7 @@ from netbox_ops.upgrade_diagnostics import CommandFailure
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_health import NetBoxHealth
+from netbox_ops.upgrade_runtime import LtreeEvidence
 
 
 class OrchestrationTests(unittest.TestCase):
@@ -37,7 +38,8 @@ class OrchestrationTests(unittest.TestCase):
             source=SimpleNamespace(installation=self.installation, inventory=self.inventory,
                                    python_by_stage=(('4.4.1', '3.12.1'),)),
             current_netbox='4.3.9', target_netbox='4.4.1',
-            stages=(SimpleNamespace(plugin_versions=()), SimpleNamespace(plugin_versions=())),
+            stages=(SimpleNamespace(netbox_version='4.4.0', plugin_versions=()),
+                    SimpleNamespace(netbox_version='4.4.1', plugin_versions=())),
         )
         self.plan.warnings = ()
         self.baseline = NetBoxHealth(self.plan.current_netbox, 'netbox', (), 1)
@@ -164,6 +166,34 @@ class OrchestrationTests(unittest.TestCase):
         self.calls.wait_for_netbox_health.assert_not_called()
         self.calls.finish_maintenance.assert_not_called()
 
+    def test_ltree_native_migration_must_be_usable_before_restart(self):
+        self.plan.stages = (SimpleNamespace(netbox_version='4.7.3', plugin_versions=()),)
+        self.plan.target_netbox = '4.7.3'
+        self.plan.dependency_reviews = (SimpleNamespace(ltree='available', ltree_identity='db'),)
+        self.calls.pin_release_stages.return_value = (PinnedStage('4.7.3', 'b' * 40),)
+        self.calls.prepare_combined_stages.return_value = ('prepared',)
+        with patch.object(orchestration, 'probe_ltree', side_effect=[
+            LtreeEvidence('available', identity='db'), LtreeEvidence('unusable', identity='db'),
+        ]):
+            with self.assertRaisesRegex(UpgradeExecutionError, 'ltree not usable after migrations'):
+                self.execute()
+        self.calls.run_combined_stage.assert_called_once()
+        self.calls.start_upgrade_writers.assert_not_called()
+        self.calls.finish_maintenance.assert_not_called()
+
+    def test_ltree_database_drift_blocks_stage(self):
+        self.plan.stages = (SimpleNamespace(netbox_version='4.7.3', plugin_versions=()),)
+        self.plan.target_netbox = '4.7.3'
+        self.plan.dependency_reviews = (SimpleNamespace(ltree='available', ltree_identity='db'),)
+        self.calls.pin_release_stages.return_value = (PinnedStage('4.7.3', 'b' * 40),)
+        self.calls.prepare_combined_stages.return_value = ('prepared',)
+        with patch.object(orchestration, 'probe_ltree',
+                          return_value=LtreeEvidence('available', identity='different')):
+            with self.assertRaisesRegex(UpgradeExecutionError, 'ltree prerequisites changed'):
+                self.execute()
+        self.calls.run_combined_stage.assert_not_called()
+        self.calls.start_upgrade_writers.assert_not_called()
+
     def test_wrong_baseline_version_blocks_before_maintenance(self):
         self.calls.read_netbox_health.return_value = replace(self.baseline, version='4.1.0')
         with self.assertRaises(UpgradeExecutionError):
@@ -221,7 +251,7 @@ class PluginOrchestrationTests(unittest.TestCase):
             source=SimpleNamespace(installation=self.installation, inventory=self.inventory,
                                    python_by_stage=(('4.4.1', '3.12.1'),)),
             current_netbox='4.4.1', target_netbox='4.4.1',
-            stages=(SimpleNamespace(plugin_versions=(('example-plugin', '2.0.0'),)),),
+            stages=(SimpleNamespace(netbox_version='4.4.1', plugin_versions=(('example-plugin', '2.0.0'),)),),
         )
         self.baseline = NetBoxHealth('4.4.1', 'netbox', (('example_plugin', '1.0.0'),), 1)
         for name in ('prepare_combined_stages', 'recheck_combined_stage', 'run_combined_stage'):
@@ -302,8 +332,8 @@ class CombinedOrchestrationTests(unittest.TestCase):
         self.plan.target_netbox = '4.6.1'
         self.plan.warnings = ()
         self.plan.stages = (
-            SimpleNamespace(plugin_versions=(('example-plugin', '1.0.0'),)),
-            SimpleNamespace(plugin_versions=(('example-plugin', '2.0.0'),)),
+            SimpleNamespace(netbox_version='4.5.1', plugin_versions=(('example-plugin', '1.0.0'),)),
+            SimpleNamespace(netbox_version='4.6.1', plugin_versions=(('example-plugin', '2.0.0'),)),
         )
         self.pinned = (PinnedStage('4.5.1', 'b' * 40), PinnedStage('4.6.1', 'c' * 40))
         self.calls.pin_release_stages.return_value = self.pinned
