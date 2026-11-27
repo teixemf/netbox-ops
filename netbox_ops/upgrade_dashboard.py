@@ -462,7 +462,8 @@ class UpgradeDashboard:
         action_height = 2 + self.positions[-1][1]
         gap = 1 if h >= 22 else 0
         side_by_side = w >= 100 and h >= 24
-        discovery = bool(self._discovery_states)
+        discovery = (bool(self._discovery_states) and self._validation_selection is None
+                     and not self._plan_matches())
         discovery_lines = self._discovery_lines(width, compact=h < 21 or width < 74) if discovery else []
         detail_height = (len(discovery_lines) + 1 if discovery else
                          min(12, max(5, (h - 12) // 2)) if side_by_side else 3)
