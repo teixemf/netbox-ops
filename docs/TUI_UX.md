@@ -99,8 +99,13 @@ where publisher repository/package/module identity and a literal exported
 PluginConfig can be mapped, explicit runtime minimum/maximum NetBox versions.
 Out-of-range documentation is a warning; a recognized runtime gate or
 declared dependency conflict blocks the target. Tagged README tables are a
-fallback only; remote source is parsed, never imported or executed. Missing,
-ambiguous or dynamic declarations remain uncertain. The core-aware dependency
+fallback only; remote source is parsed, never imported or executed. If the
+publisher link is missing or stale, a bounded static fallback can check a
+small universal wheel and matching source distribution from the exact PyPI
+release. Both must match the published SHA256 digests and agree on the literal
+runtime limits. Downloads use the fixed PyPI file host without redirects; no
+installation, build hooks or on-disk archive extraction is performed. Other
+artifact layouts, missing, ambiguous or dynamic declarations remain uncertain. The core-aware dependency
 resolver and execution-time review remain mandatory.
 D opens complete evidence, F5 retries release metadata and assessments within
 the inventory session (dashboard F5 refreshes official NetBox releases), Enter

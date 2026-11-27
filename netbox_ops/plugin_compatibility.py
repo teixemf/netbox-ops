@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+import zlib
 from urllib.error import HTTPError, URLError
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -755,7 +756,7 @@ def _distribution_gate(metadata: dict, version: str, opener: Callable) -> Compat
                 return None
             gates.append(gate)
         except (OSError, ValueError, EOFError, RuntimeError, zipfile.BadZipFile,
-                tarfile.TarError, URLError, TimeoutError, UnicodeError):
+                tarfile.TarError, zlib.error, URLError, TimeoutError, UnicodeError):
             return None
     first, second = gates
     if (first.min_netbox, first.max_netbox) != (second.min_netbox, second.max_netbox):
@@ -765,7 +766,7 @@ def _distribution_gate(metadata: dict, version: str, opener: Callable) -> Compat
 
 def fetch_release_declaration(metadata: dict, version: str, *,
                               opener: Callable | None = None) -> CompatibilityDeclaration | None:
-    """Use only bounded exact-tag files from an unambiguous publisher repository."""
+    """Use exact-tag source or matching bounded PyPI artifacts; never execute code."""
     if _release_key(version) is None:
         raise CompatibilityError('Invalid plugin version')
     repo = _github_source_repo(metadata)

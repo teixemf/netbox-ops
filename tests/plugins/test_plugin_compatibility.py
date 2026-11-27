@@ -338,7 +338,7 @@ class OrchestrationTests(unittest.TestCase):
                 archive.addfile(item, io.BytesIO(content))
             return data.getvalue()
 
-        for case in ('matching', 'different', 'bad-digest', 'untrusted-url'):
+        for case in ('matching', 'different', 'bad-digest', 'untrusted-url', 'malformed', 'oversized'):
             with self.subTest(case=case):
                 files = []
                 payloads = {}
@@ -350,6 +350,10 @@ class OrchestrationTests(unittest.TestCase):
                     url = 'https://files.pythonhosted.org/packages/ab/cd/123/' + name
                     if case == 'untrusted-url':
                         url = url.replace('files.pythonhosted.org', 'example.org')
+                    if case == 'malformed':
+                        data = b'not an archive'
+                    if case == 'oversized':
+                        data = b'x' * (2 * 1024 * 1024 + 1)
                     payloads[url] = data
                     files.append(dict(filename=name, packagetype=kind, url=url, size=len(data),
                                       digests={'sha256': '0' * 64 if case == 'bad-digest'
@@ -373,7 +377,7 @@ class OrchestrationTests(unittest.TestCase):
                     self.assertEqual(result.status, 'blocked')
                 else:
                     self.assertIsNone(gate)
-                    if case == 'untrusted-url':
+                    if case in ('untrusted-url', 'oversized'):
                         self.assertEqual(calls, [])
 
     def test_dynamic_or_mismapped_plugin_config_is_not_enforced(self):
