@@ -242,7 +242,9 @@ for language in ('en', 'pt'):
         assert dashboard._draw()
         frame = screen.frames[-1]
         headers = ' '.join(text for y, _, text, _ in frame if y == 4)
-        for name in ('component', 'current', 'target', 'status'):
+        assert menu.t('ut_group_core') in headers, headers
+        assert menu.t('ut_col_component') not in headers, headers
+        for name in ('current', 'target', 'status'):
             assert menu.t('ut_col_' + name) in headers, headers
         print(f'PASS: {scenario} dashboard {language} {size[1]}x{size[0]}: {headers}')
 
