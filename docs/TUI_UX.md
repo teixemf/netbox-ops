@@ -112,6 +112,14 @@ the inventory session (dashboard F5 refreshes official NetBox releases), Enter
 selects and Esc cancels. Cancellation may wait for a bounded in-flight lookup
 to finish before reusing the model. Discovery failure still permits retaining
 the installed version. Incomplete evidence is not approval.
+Upgrade NetBox opens directly into the planned changes dashboard. Operations
+stay immediately below the scrollable target table. Reserve rows for overall
+readiness, the primary reason and the footer before expanding the table.
+Use side-by-side component and plan panels on wider screens; use a compact
+plan summary on narrow or short screens. D/E expose complete evidence. Exact
+validation runs in the existing read-only worker while retaining the dashboard;
+execution stays disabled until the matching plan has been accepted. Dynamic
+pin actions retain focus by identity, never implicitly move focus to execution.
 Discovery opens directly in Upgrade Management. Show unknown values until
 installed inventory is observed, then publish installed rows while official
 release lookup continues. DISCOVERY STATUS reports the actual inventory,

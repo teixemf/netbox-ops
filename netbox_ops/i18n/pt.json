@@ -546,5 +546,8 @@
   "ut_plan_mismatch": "O plano não corresponde às versões exatas selecionadas.",
   "ut_no_changes": "Plano: Sem alterações",
   "ut_preliminary_status": "Preliminar: {status}",
-  "ut_preliminary_short": "Preliminar"
+  "ut_preliminary_short": "Preliminar",
+  "ut_validating": "A validar alvos exatos…",
+  "ut_validation_error": "A validação falhou. Repita ou reveja os alvos.",
+  "ut_review_next": "Próximo passo: Rever e executar"
 }

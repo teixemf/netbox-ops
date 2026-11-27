@@ -546,5 +546,8 @@
   "ut_plan_mismatch": "The plan does not match the selected exact targets.",
   "ut_no_changes": "Plan: No changes",
   "ut_preliminary_status": "Preliminary: {status}",
-  "ut_preliminary_short": "Preliminary"
+  "ut_preliminary_short": "Preliminary",
+  "ut_validating": "Validating exact targets…",
+  "ut_validation_error": "Validation failed. Retry Validate or review targets.",
+  "ut_review_next": "Next: Review and execute"
 }

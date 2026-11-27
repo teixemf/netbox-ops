@@ -782,6 +782,50 @@ class UpgradeTuiTests(InterfaceFixture):
                 self.assertFalse(dashboard._enabled('execute'))
                 self.assertNotIn(('Incompatible plugin', 'failure'), dashboard._plan_lines())
 
+    def test_adaptive_dashboard_reserves_operations_readiness_and_primary_blocker(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard.plan = replace(self.build(), blockers=('Incompatible plugin: exact runtime gate',))
+            dashboard.plan_selection = dashboard.model.selection
+            rows = tuple(TargetRow(None if i == 0 else f'plugin-{i:02}-very-long-name',
+                                   '1.0.0', '2.0.0', TargetAssessment('warning', 'verified'))
+                         for i in range(25))
+            with patch.object(dashboard, '_rows', return_value=rows):
+                dashboard.cursor = 24
+                for dimensions in ((45, 160), (30, 120), (24, 80), (16, 50), (45, 160)):
+                    menu.stdscr.dimensions = dimensions
+                    self.assertTrue(dashboard._draw())
+                    frame = menu.stdscr.frames[-1]
+                    ops = next(y for y, _, text, _ in frame if text == menu.t('ut_operations'))
+                    readiness = next(y for y, _, text, _ in frame if menu.t('upgrade_status_blocked') in text)
+                    self.assertLess(ops, readiness)
+                    self.assertLess(readiness, dimensions[0] - 2)
+                    self.assertTrue(any('Incompatible plugin:' in text for _, _, text, _ in frame))
+                    self.assertTrue(any('plugin-24' in text for _, _, text, _ in frame))
+                    self.assertEqual(dashboard.cursor, 24)
+                    self.assertFalse(dashboard._enabled('execute'))
+
+    def test_dashboard_validation_stays_on_screen_and_rejects_stale_result(self):
+        from concurrent.futures import Future
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        pool = Mock()
+        future = Future()
+        pool.submit.return_value = future
+        dashboard._validate(pool)
+        self.assertIs(dashboard.future, future)
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertTrue(dashboard._draw())
+        self.assertTrue(any(menu.t('ut_validating') in text for _, _, text, _ in menu.stdscr.frames[-1]))
+        dashboard.model.reset()
+        future.set_result(self.build())
+        dashboard._poll(pool)
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertEqual(dashboard.error, menu.t('ut_plan_mismatch'))
+
     def test_failed_recalculation_does_not_reuse_previous_review(self):
         dashboard, menu = self._dashboard()
         with (patch('netbox_ops.upgrade_dashboard.make_plan', side_effect=[self.build(), None]),
