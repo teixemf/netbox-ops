@@ -135,7 +135,11 @@ declarations (including bare names, exact pins, extras and comments) remain
 unchanged. Resolve supported declarations together with exact core and plugin
 pins, preferring installed bare-package versions when feasible. Review all
 resolved version changes before approval; bind the full report to temporary
-execution constraints, not permanent non-plugin pins. Conflicting core pins,
+execution constraints, not permanent non-plugin pins. For a declared LDAP
+requirement, a known exact python-ldap version may be built in a temporary
+unprivileged systemd unit with a private temporary directory. Missing build
+prerequisites or an unverified wheel block execution; no arbitrary source
+builds or automatic OS package installation are allowed. Conflicting core pins,
 ambiguous plugin mapping and complex/unsafe declarations require manual review.
 Only explicitly approved plugin pin changes are written under the
 existing lock and inventory revalidation; original requirements and their

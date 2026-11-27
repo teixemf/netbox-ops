@@ -46,6 +46,7 @@ class PluginUpgrade:
     overlaps: tuple[RequirementOverlap, ...] = ()
     # Temporary preference only; never written to local_requirements.txt.
     preferred_local: tuple[str, ...] = ()
+    ldap_source_pin: str | None = None
 
 
 class RequirementOverlapError(UpgradeExecutionError):
@@ -284,10 +285,18 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         expected[name] = version
     if any(expected.get(name) != version for name, version in expected_stage.items()):
         raise UpgradeExecutionError('Prepared pins differ from the approved plugin versions')
+    # python-ldap publishes source distributions. Restrict the exception to an
+    # explicitly declared LDAP dependency and a known exact version. This is
+    # temporary build input, never a permanent local pin.
+    ldap_version = expected.get('python-ldap') or installed.get('python-ldap')
+    ldap_source_pin = (f'python-ldap=={ldap_version}'
+                       if ('django-auth-ldap' in entries or 'python-ldap' in entries)
+                       and 'python-ldap' not in core_entries and 'python-ldap' not in configured
+                       and ldap_version and _STABLE.fullmatch(ldap_version) else None)
     return PluginUpgrade(digest, ''.join(lines).encode('utf-8'), tuple(core_pins),
                          tuple(local_pins), tuple(sorted(expected.items())),
                          tuple(sorted(selected.items())), overlaps=tuple(overlaps),
-                         preferred_local=tuple(preferred))
+                         preferred_local=tuple(preferred), ldap_source_pin=ldap_source_pin)
 
 
 def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
@@ -317,7 +326,13 @@ def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
         if not isinstance(version, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+_-]*', version):
             raise UpgradeExecutionError('Approved resolver report does not bind a local requirement')
         bound.append(f'{declaration}=={version}')
-    return replace(pins, local_pins=tuple(bound), expected=tuple(sorted(expected.items())))
+    # A different LDAP version may only be used when the reviewed resolver
+    # found a compatible wheel for it; do not broaden the source exception.
+    ldap_source_pin = pins.ldap_source_pin
+    if ldap_source_pin != f"python-ldap=={expected.get('python-ldap')}":
+        ldap_source_pin = None
+    return replace(pins, local_pins=tuple(bound), expected=tuple(sorted(expected.items())),
+                   ldap_source_pin=ldap_source_pin)
 
 
 def verify_reviewed_resolution(plan: UpgradePlan, index: int, resolution) -> None:

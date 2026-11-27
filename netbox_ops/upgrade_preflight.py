@@ -14,6 +14,7 @@ from .plugin_upgrade import PluginUpgrade, RequirementOverlapError, diagnose_loc
 from .upgrade_checkout import _run_git
 from .upgrade_combined import download_stage_wheels
 from .upgrade_execution import UpgradeExecutionError
+from .upgrade_diagnostics import CommandFailure
 from .upgrade_git import OFFICIAL_REMOTE, PinnedStage, pin_release_stages
 from .upgrade_plan import StageDependencyReview, UpgradePlan, _fingerprint
 from .upgrade_recovery import _read_config
@@ -46,6 +47,9 @@ def _review_resolution(pins: PluginUpgrade, live, scratch: Path, resolver, downl
             wheelhouse = scratch / f'wheels-{attempt}'
             try:
                 download(candidate, live, wheelhouse)
+            except CommandFailure as exc:
+                if exc.command_id == 'wheel.ldap':
+                    result = DependencyPreflight('unknown', exc.safe_message())
             except UpgradeExecutionError:
                 pass
             else:
@@ -123,6 +127,8 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                     # No approved full dependency set means execution cannot safely
                     # choose additional versions later, even with compatibility consent.
                     blockers.append(prefix + 'Cannot verify the complete dependency set')
+                    if result.detail.startswith('Isolated python-ldap wheel build'):
+                        blockers.append(prefix + result.detail)
                 expected = dict(result.packages if result.status == 'passed' and result.checked_core else pins.expected)
                 changes = tuple(sorted((name, previous.get(name), version)
                                        for name, version in expected.items() if previous.get(name) != version))

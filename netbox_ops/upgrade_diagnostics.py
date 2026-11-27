@@ -32,6 +32,7 @@ _COMMANDS = {
     'git.release_lookup': ('Official release lookup', 'check network access to the official NetBox remote'),
     'wheel.prepare': ('Upgrade wheel preparation', 'check package availability, Python compatibility and free space'),
     'wheel.psycopg': ('Upgrade wheel preparation', 'check Python headers, C compiler and PostgreSQL client development files'),
+    'wheel.ldap': ('Isolated python-ldap wheel build', 'check Python headers, C compiler, OpenLDAP and SASL development files and systemd sandbox availability'),
 }
 _UNKNOWN = ('Upgrade command', 'check the operation phase and recovery evidence')
 
