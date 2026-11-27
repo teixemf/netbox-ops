@@ -18,7 +18,7 @@ from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_plan import UpgradePlanError, build_upgrade_plan
 from netbox_ops.upgrade_preflight import review_plan_dependencies, target_requirements
-from netbox_ops.upgrade_runtime import probe_ltree
+from netbox_ops.upgrade_runtime import LtreeEvidence, probe_ltree
 from netbox_ops.upgrade_ui import summary_lines
 
 
@@ -43,7 +43,7 @@ class DependencyReviewTests(unittest.TestCase):
                                          ('transitive', '2.0')),
         ))
         self.download = Mock()
-        self.ltree = Mock(return_value='available')
+        self.ltree = Mock(return_value=LtreeEvidence('available'))
         self.cfg = Configuration(DEFAULT_UNITS)
 
     def reviewer(self, package, stages, runtimes, *, version, preflights):
@@ -107,7 +107,7 @@ class DependencyReviewTests(unittest.TestCase):
 
     def test_conflict_blocks_resolver_but_reports_independent_ltree(self):
         self.read.return_value += b'\nDisabled_Plugin==2.0'
-        self.ltree.return_value = 'permission'
+        self.ltree.return_value = LtreeEvidence('permission')
         plan = self.review(self.build())
         self.assertFalse(plan.can_execute)
         review = plan.dependency_reviews[0]
@@ -234,9 +234,9 @@ class DependencyReviewTests(unittest.TestCase):
             bind_reviewed_dependencies(original, 0, 'c' * 40, self.read.return_value, pins)
 
     def test_ltree_missing_or_unverified_blocks_before_approval(self):
-        for status in ('missing', 'permission', 'unknown'):
+        for status in ('missing', 'permission', 'unknown', 'unusable', 'mismatch'):
             with self.subTest(status=status):
-                self.ltree.return_value = status
+                self.ltree.return_value = LtreeEvidence(status)
                 plan = self.review(self.build())
                 self.assertFalse(plan.can_execute)
                 self.assertEqual(plan.dependency_reviews[0].ltree, status)
@@ -261,16 +261,25 @@ class LtreeProbeTests(unittest.TestCase):
         runner = Mock()
         for values, status in (
             ([True, True, True, False], 'installed'),
-            ([True, False, True, True], 'permission'),
+            ([True, False, True, True], 'unusable'),
             ([False, False, True, True], 'available'),
             ([False, False, True, False], 'permission'),
             ([False, False, False, True], 'missing'),
             ([False, False, 'invalid', True], 'unknown'),
         ):
             with self.subTest(status=status):
-                runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(values))
+                identity = 'netbox|5432|1234'
+                row = [identity, '160015', 'netbox', 'netbox', 'public',
+                       'public', 'public' if values[0] else '', *values, True]
+                runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(row))
                 self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
-                                             discover=discover), status)
+                                             discover=discover, sql=Mock(return_value=identity)).status, status)
                 self.assertNotEqual(runner.call_args.kwargs['user'], 0)
                 self.assertEqual(runner.call_args.kwargs['cwd'], root / 'netbox')
                 self.assertNotIn('CREATE EXTENSION', runner.call_args.args[0][-1])
+                self.assertIn('SET TRANSACTION READ ONLY', runner.call_args.args[0][-1])
+        runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(
+            ['other|5432|1234', '160015', 'netbox', 'netbox', 'public', 'public', '',
+             False, False, True, True, True]))
+        self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
+                                     discover=discover, sql=Mock(return_value=identity)).status, 'mismatch')

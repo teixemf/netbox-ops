@@ -21,6 +21,7 @@ from netbox_ops.upgrade_execution import (
 from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_plan import build_upgrade_plan
 from netbox_ops.upgrade_preflight import review_plan_dependencies
+from netbox_ops.upgrade_runtime import LtreeEvidence
 
 LOCAL = b'# preserve\nexample-plugin==1.0.0\nother-plugin==2.0.0\n'
 CORE = 'Django==4.2.15\npsycopg[c,pool]==3.2.1'
@@ -109,7 +110,7 @@ class CombinedStageTests(unittest.TestCase):
         )
         core_reader = Mock(side_effect=[(CORE + '\nadditional==2.0').encode(),
                                        (CORE + '\nadditional==1.0').encode()])
-        ltree = Mock(return_value='available')
+        ltree = Mock(return_value=LtreeEvidence('available'))
         resolver = Mock(return_value=DependencyPreflight('passed', 'resolved', True, (
             ('additional', '1.0'), ('django', '4.2.15'), ('psycopg', '3.2.1'),
             ('example-plugin', '1.5.0'), ('other-plugin', '2.0.0'))))
