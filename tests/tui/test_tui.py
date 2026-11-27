@@ -117,6 +117,46 @@ class MenuNavigationTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertTrue(any('c' in entry[2] for entry in screen.writes))
 
+    def test_backup_selector_aligned_options_and_contextual_details(self):
+        for language in ('en', 'pt'):
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    screen = FakeScreen([10, curses.KEY_DOWN, curses.KEY_END, 27, 27],
+                                        dimensions=dimensions)
+                    menu = CursesMenu(screen, Translator(language))
+                    self.assertIsNone(menu._choose_backup_type())
+                    initial, _, db, combined, cleared = screen.frames
+                    self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in initial))
+                    self.assertTrue(any(text == menu.t('nbo_create_type_heading') for _, _, text, _ in initial))
+                    self.assertTrue(any(text == menu.t('nbo_create_details_heading') for _, _, text, _ in combined))
+                    db_highlight = next(text for _, _, text, attr in db if attr == curses.A_REVERSE)
+                    combined_highlight = next(text for _, _, text, attr in combined if attr == curses.A_REVERSE)
+                    self.assertEqual(len(db_highlight), len(combined_highlight))
+                    self.assertIn(menu.t('nbo_create_name_combined'), combined_highlight)
+                    self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in cleared))
+                    self.assertTrue(all(y < dimensions[0] for y, _, _, _ in combined))
+
+    def test_restore_scope_preserves_explicit_focus_and_escape(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        entry = SimpleNamespace(path=Path('backup.tar.gz'))
+        for keys, result in (([10, 27], None), ([curses.KEY_UP, 10], 'all'),
+                             ([curses.KEY_DOWN, 27], None)):
+            screen = FakeScreen(keys, dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator('en'))
+            self.assertEqual(menu._choose_restore_scope(entry), result)
+            self.assertTrue(any(text == 'backup.tar.gz' for _, _, text, _ in screen.frames[0]))
+            self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in screen.frames[0]))
+
+    def test_selector_long_list_remains_navigable(self):
+        screen = FakeScreen([curses.KEY_DOWN, curses.KEY_END, 10], dimensions=(16, 50))
+        menu = CursesMenu(screen, Translator('en'))
+        entries = [(f'Option {index:02} ' + 'x' * 80, '') for index in range(30)]
+        self.assertEqual(menu._choose('Menu', entries, menu.t('tui_back_hint')), 29)
+        self.assertTrue(any('Option 29' in text and attr == curses.A_REVERSE
+                            for _, _, text, attr in screen.frames[-1]))
+
     def test_language_can_change_without_exiting(self):
         menu = CursesMenu(FakeScreen(), Translator('pt'))
         with patch.object(menu, '_choose', return_value=1):

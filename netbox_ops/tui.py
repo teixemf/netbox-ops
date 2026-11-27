@@ -283,13 +283,18 @@ class CursesMenu:
                 hint: str, index: int = 0, headings: dict[int, str] | None = None,
                 allow_language_key: bool = False, main_menu: bool = False,
                 numeric_shortcuts: bool = False, escape_clears_selection: bool = True,
-                overview: Sequence[tuple[str, str]] = ()) -> int | None | str:
+                overview: Sequence[tuple[str, str]] = (),
+                section: str = '', subtitles: Sequence[str] = (),
+                details: Sequence[Sequence[tuple[str, str]]] = (),
+                detail_heading: str = '') -> int | None | str:
         """No initial highlight; Esc disarms selection before leaving submenu."""
         headings = headings or {}
         if not entries:
             return None
         lines: list[tuple[int | None, str, str]] = []
         select_to_row = []
+        if subtitles and len(subtitles) != len(entries) or details and len(details) != len(entries):
+            raise ValueError('Selector descriptions must match entries')
         for i, (label, kind) in enumerate(entries):
             if i in headings:
                 lines.append((None, self.t(headings[i]).strip(), 'section'))
@@ -301,7 +306,12 @@ class CursesMenu:
         movement = (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END,
                     curses.KEY_NPAGE, curses.KEY_PPAGE, ord('j'), ord('k'))
         while True:
-            frame = self._frame(title, self._quit_hint(hint))
+            actual_hint = self.t('tui_selector_hint') if hint == self.t('tui_back_hint') else hint
+            if hint == self.t('nbo_restore_scope_hint'):
+                actual_hint = self.t('tui_selector_cancel_hint')
+            if len(self._quit_hint(actual_hint)) > self.stdscr.getmaxyx()[1] - 3:
+                actual_hint = self.t('tui_selector_short_hint')
+            frame = self._frame(title, self._quit_hint(actual_hint))
             if frame:
                 h, w = frame
                 start = 3
@@ -315,20 +325,53 @@ class CursesMenu:
                     start += len(shown)
                     self._put(start, 3, '─' * (w - 7), 'muted')
                     start += 1
-                rows_visible = max(1, h - start - 3)
+                # Content-sized selector, with one aligned highlight for every
+                # option. Reserve the optional detail panel before list scrolling.
+                heading = section or self.t('tui_selector_options')
+                labels = [safe_text(label) for _, label, _ in lines]
+                names_width = max(len(safe_text(label)) for label, _ in entries)
+                if subtitles:
+                    names_width = min(names_width, max(8, (w - 10) // 2))
+                    def option_text(item, label):
+                        name = safe_text(label)
+                        if len(name) > names_width:
+                            name = name[:names_width - 1] + '…'
+                        return name.ljust(names_width) + '  ' + safe_text(subtitles[item])
+                    labels = [option_text(item, label) if item is not None else safe_text(label)
+                              for item, label, _ in lines]
+                panel_width = min(w - 6, max(len(heading), *(len(label) for label in labels)) + 4)
+                detail_width = w - 6
+                detail_lines = []
+                if details:
+                    for text, style in details[index] if armed else ((self.t('tui_selector_focus'), 'muted'),):
+                        detail_lines.extend((part, style) for part in textwrap.wrap(
+                            safe_text(text), width=detail_width - 4))
+                # A heading, one list row and the footer must always fit.
+                detail_height = min(len(detail_lines) + 1, max(0, h - start - 6)) if details else 0
+                rows_visible = max(1, h - start - 4 - (detail_height + 1 if detail_height else 0))
                 scroll = min(scroll, max(0, len(lines) - rows_visible))
                 target = select_to_row[index] if armed else 0
                 if target < scroll:
                     scroll = target
                 elif target >= scroll + rows_visible:
                     scroll = target - rows_visible + 1
-                for y, (item_idx, label, style) in enumerate(lines[scroll:scroll + rows_visible], start):
+                visible = lines[scroll:scroll + rows_visible]
+                self._paint(start, 3, panel_width, len(visible) + 1)
+                self._put(start, 5, heading[:panel_width - 4], 'section')
+                for y, (item_idx, label, style) in enumerate(visible, start + 1):
+                    label = labels[scroll + y - start - 1][:panel_width - 4]
                     if armed and item_idx == index:
-                        self._put(y, 3, '  ' + label + '  ', 'selected')
+                        self._put(y, 4, (' ' + label).ljust(panel_width - 2), 'selected')
                     elif item_idx is None:
-                        self._put(y, 3, label, 'section')
+                        self._put(y, 5, label, 'section')
                     else:
-                        self._put(y, 3, '  ' + label, style)
+                        self._put(y, 5, label, style)
+                detail_y = start + len(visible) + 2
+                if detail_height:
+                    self._paint(detail_y, 3, detail_width, detail_height)
+                    self._put(detail_y, 5, detail_heading[:detail_width - 4], 'section')
+                    for y, (text, style) in enumerate(detail_lines[:detail_height - 1], detail_y + 1):
+                        self._put(y, 5, text, style)
                 if len(lines) > rows_visible and armed:
                     self._put(h - 3, 3, f'{index + 1}/{len(entries)}', 'muted')
                 self.stdscr.refresh()
@@ -2034,48 +2077,30 @@ class CursesMenu:
             return marked > 0
         return False
 
+    def _choose_backup_type(self) -> int | None | str:
+        kinds = ('db', 'media', 'combined')
+        entries = [(self.t('nbo_create_name_' + kind), '') for kind in kinds]
+        subtitles = [self.t('nbo_create_subtitle_' + kind) for kind in kinds]
+        details = [((self.t('nbo_create_detail_' + kind), ''),
+                    (self.t('nbo_create_downtime_' + ('combined' if kind == 'combined' else 'live')),
+                     'warning' if kind == 'combined' else 'muted')) for kind in kinds]
+        return self._choose(self.t('nbo_create_title'), entries, self.t('tui_back_hint'),
+                            section=self.t('nbo_create_type_heading'), subtitles=subtitles,
+                            details=details, detail_heading=self.t('nbo_create_details_heading'))
+
     def _choose_restore_scope(self, entry) -> str | None:
         """Explicit, arrow-controlled restore scope; no accidental Enter default."""
         kinds = ('db', 'media', 'all')
-        names = (self.t('nbo_restore_db'), self.t('nbo_restore_media'),
-                 self.t('nbo_restore_all'))
-        descriptions = (self.t('nbo_restore_db_desc'), self.t('nbo_restore_media_desc'),
-                        self.t('nbo_restore_all_desc'))
-        selected: int | None = None
-        while True:
-            frame = self._frame(self.t('nbo_restore_choose'), self._quit_hint(self.t('nbo_restore_scope_hint')))
-            if frame:
-                h, w = frame
-                width = min(w-8, max(55, min(92, w-8)))
-                self._paint(3, 3, width, min(18, h-7))
-                self._put(4, 5, self.t('nbo_restore_source'), 'section')
-                self._put(5, 5, safe_text(entry.path.name)[:max(10,width-7)], 'title')
-                compact = h < 25
-                for i, (name, description) in enumerate(zip(names, descriptions)):
-                    y = (7 + i*2) if compact else (8 + i*3)
-                    if y >= h-3:
-                        break
-                    highlighted = i == selected
-                    if highlighted:
-                        self._put(y, 5, ' ' * (width-4), 'selected')
-                    marker = '●' if highlighted else '○'
-                    self._put(y, 6, f'{marker} {name}', 'selected' if highlighted else 'title')
-                    if y+1 < h-3:
-                        self._put(y+1, 9, description[:max(10,width-12)], 'muted')
-                if h > 25:
-                    self._put(19, 5, self.t('nbo_restore_scope_warning')[:max(10,width-7)], 'warning')
-                self.stdscr.refresh()
-            key = self.stdscr.getch()
-            self._check_quit(key)
-            if key in (27,3):
-                return None
-            if key in (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k')):
-                if selected is None:
-                    selected = 2 if key in (curses.KEY_UP, ord('k')) else 0
-                else:
-                    selected = (selected + (-1 if key in (curses.KEY_UP,ord('k')) else 1)) % len(kinds)
-            elif key in (10,13,curses.KEY_ENTER) and selected is not None:
-                return kinds[selected]
+        entries = [(self.t('nbo_restore_' + kind), '') for kind in kinds]
+        details = [((self.t('nbo_restore_' + kind + '_desc'), ''),
+                    (self.t('nbo_restore_scope_warning'), 'warning')) for kind in kinds]
+        result = self._choose(self.t('nbo_restore_choose'), entries, self.t('nbo_restore_scope_hint'),
+                              escape_clears_selection=False,
+                              overview=[(self.t('nbo_restore_source'), 'section'),
+                                        (safe_text(entry.path.name), 'title')],
+                              section=self.t('nbo_restore_scope_heading'), details=details,
+                              detail_heading=self.t('nbo_create_details_heading'))
+        return kinds[result] if isinstance(result, int) else None
 
     def _backup_inventory_counts(self, entries):
         """Count each displayed inventory entry once, without filesystem I/O."""
@@ -2558,10 +2583,7 @@ class CursesMenu:
                     # Continue through the same safe confirmation handlers as shortcuts.
                 if key in (ord('c'),ord('C')):
                     self.stdscr.timeout(-1)
-                    types = [(self.t('nbo_create_kind_db'), ''),
-                             (self.t('nbo_create_kind_media'), ''),
-                             (self.t('nbo_create_kind_combined'), '')]
-                    i = self._choose(self.t('nbo_create_title'), types, self.t('tui_back_hint'))
+                    i = self._choose_backup_type()
                     if isinstance(i,int):
                         kind = ('db','media','combined')[i]
                         if self._confirm_token(self.t('nbo_create_title'),
