@@ -554,6 +554,8 @@ class UpgradeTuiTests(InterfaceFixture):
                 for row in rows:
                     self.assertEqual(dashboard._row_status(row), (menu.t('ut_unchanged'), 'muted'))
                     self.assertEqual(row.assessment.status, 'warning')
+                    self.assertIn((menu.t('ut_evidence_hint'), 'muted'),
+                                  dashboard._compact_component_lines(row, 55))
             conflict = replace(warning, status='conflict', evidence=(
                 CompatibilityEvidence('PluginConfig', 'Known incompatibility', 'blocks'),))
             blocked = replace(rows[1], assessment=conflict)
@@ -884,6 +886,11 @@ class UpgradeTuiTests(InterfaceFixture):
                                 lines.index(('Advisory range', 'warning')))
                 self.assertFalse(dashboard._enabled('execute'))
                 self.assertTrue(dashboard._draw())
+                if dimensions[1] >= 100:
+                    count_line = next(text for _, _, text, _ in menu.stdscr.frames[-1]
+                                      if menu.t('ut_counts', count=2, changed=2) in text)
+                    self.assertIn(menu.t('ut_details_key'), count_line)
+                    self.assertNotIn(menu.t('ut_preliminary_short'), count_line)
                 with patch.object(menu, '_show_lines', return_value=False) as show:
                     dashboard._details(dashboard._rows()[0])
                     overview = show.call_args.args[1]

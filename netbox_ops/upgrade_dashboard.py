@@ -374,7 +374,7 @@ class UpgradeDashboard:
         evidence = lines[4:]
         result = lines[:3] + [self._row_status(row)]
         if result[-1][0] == self.t('ut_unchanged'):
-            return result + [(self.t('ut_evidence_next'), 'muted')]
+            return result + [(self.t('ut_evidence_hint'), 'muted')]
         # Put blocking/uncertain reasons before ordinary supporting evidence.
         attention = [line for line in evidence if line[1] in ('warning', 'failure')]
         if attention:
@@ -632,6 +632,8 @@ class UpgradeDashboard:
                 else t('ut_preliminary_short'))
         if self._validation_selection is not None:
             note = t('ut_validating')
+        elif self._plan_matches():
+            note = t('ut_details_key')
         counts = (t('ut_counts', count=len(rows), changed=count) if self._inventory_valid and self.model
                   else t('ut_inventory_pending'))
         position = f'{self.cursor + 1}/{len(rows)} | ' if len(visible) < len(rows) else ''
