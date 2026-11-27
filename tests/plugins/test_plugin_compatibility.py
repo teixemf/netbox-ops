@@ -327,7 +327,13 @@ class OrchestrationTests(unittest.TestCase):
                      source.replace('"2.0.0"', '"1.0.0"'),
                      source + 'Config.min_version = "4.0.0"\n',
                      source + 'setattr(Config, "min_version", "4.0.0")\n',
-                     source.replace('config = Config', 'config = Other')):
+                     source.replace('config = Config', 'config = Other'),
+                     source + 'from other import Replacement as config\n',
+                     source + 'class Config: pass\n',
+                     source + 'globals().update(config=Other)\n',
+                     source.replace('config = Config', 'config = alias = Config'),
+                     source.replace('config = Config', 'config = Config\nmutate(Config)'),
+                     source.replace('    name = "demo"', '    name = "demo"\n    other = mutate()')):
             self.assertIsNone(parse_plugin_config(text, 'demo', '2.0.0', 'https://example.com/tag'))
         self.assertIsNotNone(parse_plugin_config(source, 'demo', '2.0.0', 'https://example.com/tag'))
 
