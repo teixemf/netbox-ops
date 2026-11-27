@@ -89,6 +89,14 @@ requests, without replacing the picker or blocking navigation. Unassessed rows
 stay explicitly unchecked. Only the version cell highlights focus; status
 colours remain semantic and notes prioritize actual blocking/warning evidence.
 The installed plugin is assessed against the selected NetBox target too.
+Plugin evidence includes conventional exact-tag compatibility tables and,
+where publisher repository/package/module identity and a literal exported
+PluginConfig can be mapped, explicit runtime minimum/maximum NetBox versions.
+Out-of-range documentation is a warning; a recognized runtime gate or
+declared dependency conflict blocks the target. Tagged README tables are a
+fallback only; remote source is parsed, never imported or executed. Missing,
+ambiguous or dynamic declarations remain uncertain. The core-aware dependency
+resolver and execution-time review remain mandatory.
 D opens complete evidence, F5 retries release metadata and assessments within
 the inventory session (dashboard F5 refreshes official NetBox releases), Enter
 selects and Esc cancels. Cancellation may wait for a bounded in-flight lookup

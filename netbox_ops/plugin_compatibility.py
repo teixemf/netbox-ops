@@ -6,6 +6,7 @@ are advisory; a confirmed Python or package dependency conflict is blocking.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -13,11 +14,11 @@ import subprocess
 import sys
 import tempfile
 from urllib.error import HTTPError, URLError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Sequence
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from .plugin_inventory import normalize_name
 from .upgrade_process import ManagedOutputError, run_managed
@@ -65,6 +66,7 @@ class CompatibilityDeclaration:
     max_netbox: str | None = None
     advisory: bool = False
     enforced: bool = False  # Only verified PluginConfig runtime gates.
+    runtime_gate: CompatibilityDeclaration | None = None
 
 
 @dataclass(frozen=True)
@@ -260,7 +262,7 @@ def _netbox_requirements(requires_dist: object, target: str) -> tuple[list[Compa
     evidence: list[CompatibilityEvidence] = []
     supported = False
     if not isinstance(requires_dist, list):
-        return [CompatibilityEvidence('PyPI Requires-Dist', 'No usable NetBox requirement declaration', 'unknown')], False
+        return [CompatibilityEvidence('PyPI Requires-Dist', 'No explicit NetBox distribution dependency', 'warns')], False
     found = False
     for requirement in requires_dist:
         if not isinstance(requirement, str):
@@ -359,6 +361,7 @@ def assess_compatibility(package: str, version: str, netbox_version: str,
             evidence.append(CompatibilityEvidence('PyPI distribution files',
                                                  'File-level Python compatibility could not be verified', 'unknown'))
     for label, item in (('Plugin release documentation', declaration),
+                        ('PluginConfig runtime gate', declaration.runtime_gate if declaration else None),
                         ('NetBox Labs plugin catalog', catalog)):
         if item is None:
             continue
@@ -377,15 +380,20 @@ def assess_compatibility(package: str, version: str, netbox_version: str,
             continue
         in_range = lower_ok is not False and upper_ok is not False
         if in_range:
-            evidence.append(CompatibilityEvidence(item.source, 'Target NetBox is in the declared range', 'supports'))
+            evidence.append(CompatibilityEvidence(item.source,
+                             f'NetBox {netbox_version} is within declared range '
+                             f'{item.min_netbox or "unbounded"} – {item.max_netbox or "unbounded"}', 'supports'))
             if not item.advisory and label != 'NetBox Labs plugin catalog':
                 confirmed_netbox = True
         elif item.enforced and not item.advisory and label != 'NetBox Labs plugin catalog':
             evidence.append(CompatibilityEvidence(item.source,
-                             'Verified PluginConfig gate rejects target NetBox', 'blocks'))
+                             f'PluginConfig rejects NetBox {netbox_version}: '
+                             f'minimum {item.min_netbox or "unbounded"}, maximum {item.max_netbox or "unbounded"}', 'blocks'))
         else:
             evidence.append(CompatibilityEvidence(item.source,
-                             'Declared range differs from target; not proof of a technical conflict', 'warns'))
+                             f'NetBox {netbox_version} outside declared range '
+                             f'{item.min_netbox or "unbounded"} – {item.max_netbox or "unbounded"}; '
+                             'not proof of a technical conflict', 'warns'))
     # Record the same preliminary checks without changing the existing
     # full-compatibility contract. A missing resolver is never a pass.
     material_warning = any(
@@ -512,22 +520,27 @@ def parse_compatibility_document(markdown: str, plugin_version: str, source: str
     matches: list[tuple[str | None, str | None]] = []
     for line in lines:
         if '|' not in line:
+            header_indexes = None
             continue
         columns = [item.strip() for item in line.strip().strip('|').split('|')]
         lowered = [re.sub(r'[^a-z0-9]+', ' ', item.lower()).strip() for item in columns]
-        if 'plugin version' in lowered or ('version' in lowered and any('netbox' in x for x in lowered)):
+        if any(x in lowered for x in ('plugin version', 'version', 'release')) and any('netbox' in x for x in lowered):
             def locate(terms: tuple[str, ...]) -> int | None:
                 return next((i for i, text in enumerate(lowered) if text in terms), None)
-            version_at = locate(('plugin version', 'version'))
-            minimum_at = locate(('minimum netbox', 'min netbox', 'netbox minimum', 'min netbox version'))
-            maximum_at = locate(('maximum netbox', 'max netbox', 'netbox maximum', 'max netbox version'))
+            version_at = locate(('plugin version', 'version', 'release'))
+            minimum_at = locate(('minimum netbox', 'min netbox', 'netbox minimum', 'min netbox version', 'minimum netbox version'))
+            maximum_at = locate(('maximum netbox', 'max netbox', 'netbox maximum', 'max netbox version', 'maximum netbox version'))
             if version_at is not None and (minimum_at is not None or maximum_at is not None):
                 header_indexes = (version_at, minimum_at, maximum_at)
             continue
         if header_indexes is None:
             continue
         version_at, minimum_at, maximum_at = header_indexes
-        if len(columns) <= version_at or columns[version_at].removeprefix('v') != plugin_version:
+        if len(columns) <= version_at:
+            continue
+        release = columns[version_at]
+        linked = re.fullmatch(r'\[([^\]]+)\]\([^()]+\)', release)
+        if (linked.group(1) if linked else release).removeprefix('v') != plugin_version:
             continue
         minimum = columns[minimum_at].removeprefix('v') if minimum_at is not None and len(columns) > minimum_at else ''
         maximum = columns[maximum_at].removeprefix('v') if maximum_at is not None and len(columns) > maximum_at else ''
@@ -549,8 +562,11 @@ def _github_source_repo(metadata: dict) -> tuple[str, str] | None:
     links = info.get('project_urls')
     if not isinstance(links, dict):
         return None
-    for key in ('Source', 'Repository', 'Source Code', 'Code'):
-        candidate = links.get(key)
+    repos = set()
+    for key, candidate in links.items():
+        if not isinstance(key, str) or key.lower() not in (
+                'source', 'repository', 'source code', 'code', 'homepage', 'home page'):
+            continue
         if not isinstance(candidate, str):
             continue
         try:
@@ -562,40 +578,151 @@ def _github_source_repo(metadata: dict) -> tuple[str, str] | None:
                 parsed.username or parsed.password or port or parsed.query or parsed.fragment):
             continue
         parts = parsed.path.strip('/').removesuffix('.git').split('/')
-        if len(parts) == 2 and all(_PACKAGE.fullmatch(x) for x in parts):
-            return parts[0], parts[1]
-    return None
+        if len(parts) == 2 and all(_PACKAGE.fullmatch(x) and x not in ('.', '..') for x in parts):
+            repos.add(tuple(parts))
+    return next(iter(repos)) if len(repos) == 1 else None
+
+
+def parse_plugin_config(source_text: str, module: str, version: str,
+                        source: str) -> CompatibilityDeclaration | None:
+    """Recognize one literal, direct PluginConfig declaration without executing source."""
+    if len(source_text) > 128 * 1024 or not source.startswith('https://'):
+        return None
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', module) or _release_key(version) is None:
+        return None
+    try:
+        tree = ast.parse(source_text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    if sum(1 for _ in ast.walk(tree)) > 10000:
+        return None
+    imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)
+               and node.module == 'netbox.plugins' and node.level == 0
+               and any(alias.name == 'PluginConfig' and alias.asname is None for alias in node.names)]
+    configs = [node for node in tree.body if isinstance(node, ast.ClassDef)
+               and len(node.bases) == 1 and isinstance(node.bases[0], ast.Name)
+               and node.bases[0].id == 'PluginConfig' and not node.decorator_list and not node.keywords]
+    if len(imports) != 1 or len(configs) != 1:
+        return None
+    config = configs[0]
+    fields = {}
+    tracked = {'name', 'version', 'min_version', 'max_version'}
+    for node in config.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                return None
+            # A call/comprehension can modify class state even in an unrelated field.
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError):
+                return None
+            names = [targets[0].id]
+            for name in names:
+                if name not in tracked:
+                    continue
+                if name in fields or len(targets) != 1:
+                    return None
+                fields[name] = node.value
+        elif not (isinstance(node, ast.Pass) or
+                  isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                  and isinstance(node.value.value, str)):
+            # Conditional/dynamic assignments, methods and other class behavior
+            # are outside the conservative literal-declaration subset.
+            return None
+    def literal(name):
+        node = fields.get(name)
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    if literal('name') != module or literal('version') != version:
+        return None
+    if any(key in fields and (literal(key) is None or not _TARGET.fullmatch(literal(key)))
+           for key in ('min_version', 'max_version')):
+        return None
+    minimum, maximum = literal('min_version'), literal('max_version')
+    if not minimum and not maximum:
+        return None
+    if minimum and maximum and _number_version(minimum) > _number_version(maximum):
+        return None
+    # Require the conventional exported config binding, not just an unused class.
+    bindings = [node for node in tree.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == 'config' for target in node.targets)]
+    if (len(bindings) != 1 or not isinstance(bindings[0].value, ast.Name)
+            or bindings[0].value.id != config.name):
+        return None
+    # Only the conventional declaration is evidence of a hard gate. Do not
+    # attempt to reason about arbitrary module-level execution or rebinding.
+    if not (tree.body.index(imports[0]) < tree.body.index(config) < tree.body.index(bindings[0])):
+        return None
+    if (len(imports[0].names) != 1 or len(bindings[0].targets) != 1):
+        return None
+    protected = {'PluginConfig', 'config', config.name}
+    for node in tree.body:
+        if node is config or node is bindings[0] or node in imports:
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id not in protected
+                and isinstance(node.value, ast.Constant)):
+            continue
+        return None
+    return CompatibilityDeclaration(source, minimum, maximum, enforced=True)
+
+
+class _NoReleaseRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def fetch_release_declaration(metadata: dict, version: str, *,
-                              opener: Callable = urlopen) -> CompatibilityDeclaration | None:
-    """Check a plugin publisher's GitHub release-tag COMPATIBILITY.md, if present.
-
-    Uses only the repository claimed by the selected PyPI release, pinned to an
-    exact version tag. Never falls back to a mutable main README.
-    """
+                              opener: Callable | None = None) -> CompatibilityDeclaration | None:
+    """Use only bounded exact-tag files from an unambiguous publisher repository."""
     if _release_key(version) is None:
         raise CompatibilityError('Invalid plugin version')
     repo = _github_source_repo(metadata)
-    if repo is None:
+    info = metadata.get('info', {})
+    if repo is None or not isinstance(info, dict) or info.get('version') != version:
+        return None
+    package = info.get('name')
+    if not isinstance(package, str) or not _PACKAGE.fullmatch(package):
         return None
     owner, name = repo
-    for tag in ('v' + version, version):
-        url = f'https://raw.githubusercontent.com/{owner}/{name}/{tag}/COMPATIBILITY.md'
+    module = normalize_name(package).replace('-', '_')
+    mapped = normalize_name(name) == normalize_name(package) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', module)
+    opener = opener or build_opener(_NoReleaseRedirect()).open
+
+    def read(url):
         request = Request(url, headers={'User-Agent': 'netbox-ops-upgrade-check'})
         try:
             with opener(request, timeout=8) as response:
+                if hasattr(response, 'geturl') and response.geturl() != url:
+                    return None
                 data = response.read(128 * 1024 + 1)
-        except (HTTPError, URLError, OSError, TimeoutError):
-            continue
-        if len(data) > 128 * 1024:
-            continue
-        try:
-            doc = data.decode('utf-8')
-        except UnicodeDecodeError:
-            continue
-        if result := parse_compatibility_document(doc, version, url):
-            return result
+            return data.decode('utf-8') if len(data) <= 128 * 1024 else None
+        except (HTTPError, URLError, OSError, TimeoutError, UnicodeDecodeError):
+            return None
+
+    for tag in ('v' + version, version):
+        base = f'https://raw.githubusercontent.com/{owner}/{name}/{tag}/'
+        declaration = None
+        for filename in ('COMPATIBILITY.md', 'README.md'):
+            url = base + filename
+            doc = read(url)
+            if doc is not None:
+                declaration = parse_compatibility_document(doc, version, url)
+                if declaration is not None:
+                    break
+        gate = None
+        if mapped:
+            url = base + module + '/__init__.py'
+            source_text = read(url)
+            if source_text is not None:
+                gate = parse_plugin_config(source_text, module, version, url)
+        if declaration is not None:
+            return replace(declaration, runtime_gate=gate)
+        if gate is not None:
+            return gate
     return None
 
 
