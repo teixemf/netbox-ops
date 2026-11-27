@@ -32,6 +32,9 @@ old_plugin=2.7.0
 new_plugin=2.7.1
 if [[ "$scenario" == cross-minor ]]; then
   old=4.4.10
+  plugin=netbox-reorder-rack
+  old_plugin=1.1.4
+  new_plugin=1.1.5
 fi
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
@@ -50,6 +53,10 @@ install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netb
 printf '\nLOGIN_REQUIRED = False\n' >> "$root/netbox/netbox/configuration.py"
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
+  printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
+  printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
+elif [[ "$scenario" == cross-minor ]]; then
+  printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
   printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
 else
@@ -128,9 +135,84 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   echo 'PASS: additional local package excluded from plugin selection'
 fi
 
+# Reproduce the reported incompatible plugin upgrade and local pin blocker
+# against real published releases, before any maintenance begins.
+if [[ "$scenario" == cross-minor ]]; then
+  # The source fixture installed the exact version. Simulate the operator's
+  # existing bare declaration without changing any installed package.
+  sed -i 's/^tomli-w==1.2.0$/tomli-w  # preserve local intent/' "$root/local_requirements.txt"
+  for unit in netbox netbox-rq; do
+    systemctl show -p ActiveEnterTimestampMonotonic --value "$unit" > "$scratch/$unit"
+  done
+  python3 - "$target" "$plugin" "$new_plugin" <<'PY'
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.config import load_config
+from netbox_ops.i18n import Translator
+from netbox_ops.tui import CursesMenu
+from netbox_ops.upgrade_dashboard import UpgradeDashboard
+from netbox_ops.upgrade_targets import TargetModel, TargetSelection
+from netbox_ops.upgrade_ui import discover_context, make_plan
+from tests.helpers.fake_screen import FakeScreen
+
+target, plugin, version = sys.argv[1:]
+cfg = load_config()
+context = discover_context(cfg)
+requirements = context.installation.root / 'local_requirements.txt'
+original = requirements.read_bytes()
+bad = make_plan(context, 'plugins', None, {plugin: version})
+assert not bad.can_execute
+check = next(c for stage in bad.stages for c in stage.plugin_checks if c.package == plugin)
+assert check.status == 'blocked', check
+assert any(e.status == 'blocks' and '4.7.0' in e.detail and 'PluginConfig' in e.detail
+           for e in check.evidence), check.evidence
+assert all(r.resolution.status == 'not-run' for r in bad.dependency_reviews)
+assert requirements.read_bytes() == original
+print('PASS: real reorder-rack release rejected on NetBox 4.4.x')
+
+plan = make_plan(context, 'stack', target, {plugin: version})
+assert not plan.can_execute
+assert any(d.name == 'tomli-w' and d.installed == '1.2.0' and d.action == 'review-pin'
+           for r in plan.dependency_reviews for d in r.local_diagnostics)
+assert all(r.resolution.status == 'not-run' for r in plan.dependency_reviews)
+assert any(r.ltree in ('installed', 'available') for r in plan.dependency_reviews)
+screen = FakeScreen([10, *map(ord, 'PIN'), 10, 10], dimensions=(16, 50))
+menu = CursesMenu(screen, Translator('en'))
+dashboard = UpgradeDashboard(menu)
+dashboard.cfg = cfg
+dashboard.model = TargetModel(context)
+dashboard.model.selection = TargetSelection(target, ((plugin, version),))
+dashboard.plan = plan
+dashboard.plan_selection = dashboard.model.selection
+assert dashboard._correctable_pins() == {'tomli-w'}
+assert dashboard._enabled('pins') and not dashboard._enabled('execute')
+# Only menu navigation is scripted; the displayed exact review, literal
+# PIN challenge, protected backup and actual mutation are not mocked.
+with ThreadPoolExecutor(max_workers=1) as pool, patch.object(menu, '_choose', side_effect=[0, 2]):
+    dashboard._review_plan_pins(pool)
+assert dashboard.plan is None and dashboard._revalidate_after_pins
+assert not dashboard._enabled('execute')
+assert requirements.read_bytes() == original.replace(b'tomli-w  #', b'tomli-w==1.2.0  #')
+backups = list(Path('/var/lib/netbox-ops/pin-recovery').glob('pins-*/local_requirements.txt'))
+assert len(backups) == 1 and backups[0].read_bytes() == original
+assert backups[0].stat().st_mode & 0o777 == 0o600
+assert backups[0].parent.stat().st_mode & 0o777 == 0o700
+print('PASS: contextual exact pin correction retained protected original')
+PY
+  [[ $(git -C "$root" rev-parse HEAD) == "$commit" && ! -e "$marker" ]]
+  [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
+  for unit in netbox netbox-rq; do
+    [[ $(systemctl show -p ActiveEnterTimestampMonotonic --value "$unit") == "$(cat "$scratch/$unit")" ]]
+  done
+  wait_health "$old"
+fi
+
 case "$scenario" in
   plugins) args=(upgrade plugins --plugin "$plugin==$new_plugin") ;;
-  combined) args=(upgrade stack --netbox-version "$target" --plugin "$plugin==$new_plugin") ;;
+  combined|cross-minor) args=(upgrade stack --netbox-version "$target" --plugin "$plugin==$new_plugin") ;;
   *) args=(upgrade netbox --version "$target") ;;
 esac
 "${cli[@]}" "${args[@]}" --details | tee "$scratch/plan"
@@ -330,7 +412,7 @@ PY
     [[ $(systemctl is-active "$unit" || true) == inactive ]]
   done
 else
-  # Cross-minor retains the real CLI execution path. The three other
+  # Cross-minor exercises the real combined CLI execution path. The three other
   # success scenarios executed the exact reviewed plan through the TUI.
   if [[ "$scenario" == cross-minor ]]; then
     "${cli[@]}" "${args[@]}" --execute --approve-plan "$fingerprint" \
@@ -359,6 +441,31 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   "$root/venv/bin/python" -c 'import importlib.metadata as m; assert m.version("tomli-w")=="1.2.0"'
   "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]' "$plugin" "$new_plugin"
   curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
+fi
+if [[ "$scenario" == cross-minor ]]; then
+  grep -Fxq "$plugin==$new_plugin" "$root/local_requirements.txt"
+  grep -Fxq 'tomli-w==1.2.0  # preserve local intent' "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]; assert m.version("tomli-w")=="1.2.0"' "$plugin" "$new_plugin"
+  curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
+  python3 - "$root" "$new_plugin" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.plugin_compatibility import parse_plugin_config, fetch_pypi_json, fetch_release_declaration
+root, version = sys.argv[1:]
+# Compare the actual installed distribution's source to the exact-tag gate;
+# do not import the remote module into the operations process.
+source, = Path(root).glob('venv/lib/python*/site-packages/netbox_reorder_rack/__init__.py')
+installed = parse_plugin_config(source.read_text(), 'netbox_reorder_rack', version, 'https://pypi.org/project/netbox-reorder-rack/')
+metadata = fetch_pypi_json('netbox-reorder-rack', version)
+declaration = fetch_release_declaration(metadata, version)
+assert declaration is not None
+gate = declaration.runtime_gate or declaration
+assert installed is not None and installed.enforced and gate.enforced
+assert installed.min_netbox == gate.min_netbox == '4.7.0'
+assert installed.max_netbox == gate.max_netbox is None
+print('PASS: installed published plugin artifact matches exact-tag runtime gate')
+PY
 fi
 if [[ -n "$overlap_pin" ]]; then
   grep -Fxq "$overlap_pin" "$root/local_requirements.txt"
@@ -400,6 +507,8 @@ assert hashlib.sha256((directory / 'configuration.py').read_bytes()).hexdigest()
 assert record['stages'][-1] == target
 if scenario == 'cross-minor':
     assert old == '4.4.10' and record['stages'] == [target]
+    assert ['netbox-reorder-rack', '1.1.4'] in record['plugin_versions']
+    assert ['netbox-reorder-rack', '1.1.5'] in record['stage_commits'][-1]['plugin_versions']
 if scenario in ('plugins', 'combined'):
     assert ['netbox-inventory', '2.7.0'] in record['plugin_versions']
     assert ['netbox-inventory', '2.7.1'] in record['stage_commits'][-1]['plugin_versions']
