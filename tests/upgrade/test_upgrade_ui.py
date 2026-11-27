@@ -439,8 +439,59 @@ class UpgradeTuiTests(InterfaceFixture):
                                  for _, _, text, _ in menu.stdscr.frames[-1]), partial)
             self.assertFalse(dashboard._enabled('execute'))
 
+    def test_picker_scrolls_continuous_catalogue_and_keeps_status_colors(self):
+        from concurrent.futures import Future
+        from netbox_ops.upgrade_targets import TargetModel
+
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    dashboard, menu = self._dashboard(
+                        [curses.KEY_END, curses.KEY_HOME, curses.KEY_NPAGE, 27],
+                        dimensions, language)
+                    model = dashboard.model
+                    context = replace(self.context, tags=tuple(f'v4.4.{n}' for n in range(32)))
+                    dashboard.model = TargetModel(context, fetcher=model._fetcher,
+                                                  docs_fetcher=model._docs_fetcher)
+                    menu.colors.update(selected=101, warning=102, failure=103, muted=104, title=105)
+
+                    def submit(fn, *args, **kwargs):
+                        future = Future()
+                        future.set_result(fn(*args, **kwargs))
+                        return future
+
+                    pool = Mock()
+                    pool.submit.side_effect = submit
+                    self.assertIsNone(dashboard._picker(None, pool))
+                    frames = menu.stdscr.frames
+                    self.assertTrue(any('32/32' in text for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any('4.4.31' in text for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any('4.4.1' == text.strip() for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any(menu.t('ut_keep_installed_short') in text
+                                        or menu.t('ut_keep_installed') in text
+                                        for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any(y == dimensions[0] - 1 and text == 'F5' and attr == 105
+                                        for frame in frames for y, _, text, attr in frame))
+                    self.assertTrue(all(len(text) < dimensions[1] - 10
+                                        for frame in frames for _, _, text, attr in frame if attr == 101))
+                    self.assertGreaterEqual(pool.submit.call_count, 3)
+
+    def test_picker_notes_prioritize_real_blocking_reason(self):
+        from netbox_ops.plugin_compatibility import CompatibilityEvidence
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        dashboard, _ = self._dashboard()
+        assessment = TargetAssessment('conflict', 'verified', (
+            CompatibilityEvidence('PyPI', 'metadata missing', 'unknown'),
+            CompatibilityEvidence('Python', 'requires >=3.14', 'blocks'),
+        ))
+        row = TargetRow(None, '4.4.0', '4.4.2', assessment)
+        notes = dashboard._picker_notes(row, '4.4.2', None, '4.4.2')
+        self.assertTrue(notes.startswith('Python: requires >=3.14'))
+        self.assertIn(dashboard.t('ut_note_latest'), notes)
+
     def test_dashboard_picker_cancel_and_confirm_preserve_other_targets(self):
-        for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, 10], '4.4.1')):
+        for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, curses.KEY_DOWN, 10], '4.4.1'), ([10], '4.4.0')):
             with self.subTest(expected=expected):
                 dashboard, menu = self._dashboard([10, *picker_keys, 27], (16, 50))
                 self._run_dashboard(dashboard, menu)
@@ -583,12 +634,21 @@ class UpgradeTuiTests(InterfaceFixture):
         execute.assert_not_called()
 
     def test_alternative_selection_rebuilds_plan(self):
-        dashboard, menu = self._dashboard([10])
+        dashboard, menu = self._dashboard([curses.KEY_DOWN, 10])
         dashboard.model.reset()
         plan = self.build('plugins', None, {'example-plugin': '2.0.0'})
         with (patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan) as build,
               patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()))):
-            target = dashboard._picker('example-plugin')
+            from concurrent.futures import Future
+
+            def submit(fn, *args, **kwargs):
+                future = Future()
+                future.set_result(fn(*args, **kwargs))
+                return future
+
+            pool = Mock()
+            pool.submit.side_effect = submit
+            target = dashboard._picker('example-plugin', pool)
             self.assertEqual(target, '2.0.0')
             dashboard.model.select('example-plugin', target)
             dashboard._validate()

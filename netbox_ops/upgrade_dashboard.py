@@ -444,88 +444,206 @@ class UpgradeDashboard:
         return [(' | '.join(f'{state} {task}' for state, task in labels[i:i + 2]), 'muted')
                 for i in range(0, len(labels), 2)]
 
-    def _picker(self, component):
+    def _picker_notes(self, row, latest, suggested, selected):
+        """Prioritize actual reasons over release markers, without coloring the row."""
+        t = self.t
+        notes = []
+        if row.target == row.current:
+            notes.append(f'{row.current} ({t("ut_note_installed")})')
+        if row.assessment.availability == 'unavailable':
+            notes.append(t('ut_unavailable'))
+        reasons = sorted((item for item in row.assessment.evidence
+                          if item.status in ('blocks', 'warns', 'unknown')),
+                         key=lambda item: {'blocks': 0, 'warns': 1, 'unknown': 2}[item.status])
+        if reasons:
+            notes.append(f'{reasons[0].source}: {reasons[0].detail}')
+        for name, match in (('latest', row.target == latest),
+                            ('suggested', row.target == suggested),
+                            ('target', row.target == selected)):
+            if match:
+                notes.append(t('ut_note_' + name))
+        return ' | '.join(notes)
+
+    def _draw_picker(self, title, rows, cursor, scroll, latest, suggested, selected,
+                     busy, warnings, *, leaving=False):
         menu, t = self.menu, self.t
-        offset = cursor = 0
-        scroll = 0
+        hint = t('ut_picker_hint')
+        if sum(len(part) + 2 for part in hint.split(' | ')) > menu.stdscr.getmaxyx()[1] - 3:
+            hint = t('ut_picker_hint_short')
+        frame = menu._frame(title, hint)
+        if not frame:
+            return None, scroll, 1
+        h, w = frame
+        width = w - 6
+        labels = [t('ut_keep_installed') if row.target == row.current else row.target for row in rows]
+        headers = (t('ut_col_version'), t('ut_col_compatibility'), t('ut_col_notes'))
+        status_width = max(len(headers[1]), *(len(t('ut_' + state)) for state in _STYLES),
+                           len(t('ut_checking')))
+        version_width = min(max(len(headers[0]), *map(len, labels)),
+                            max(len(headers[0]), width - status_width - 12))
+        if version_width < len(labels[0]):
+            labels[0] = t('ut_keep_installed_short')
+        notes_width = width - version_width - status_width - 2
+        # Keep a compact selected reason below the table on taller screens.
+        detail = h >= 20
+        visible = max(1, h - 7 - (2 if detail else 0))
+        scroll = max(0, min(scroll, len(rows) - visible))
+        if cursor < scroll:
+            scroll = cursor
+        elif cursor >= scroll + visible:
+            scroll = cursor - visible + 1
+        shown = min(visible, len(rows) - scroll)
+        count_y = 4 + shown
+        menu._paint(3, 2, w - 4, shown + 2 + (2 if detail else 0))
+        menu._put(3, 3, self._row_text(headers, (version_width, status_width, notes_width)), 'muted')
+        for index in range(scroll, scroll + shown):
+            row = rows[index]
+            y = 4 + index - scroll
+            label = _clip(labels[index], version_width)
+            # Only the VERSION cell carries focus. The status retains its own
+            # semantic foreground and neutral notes remain on the panel.
+            menu._put(y, 3, label.ljust(version_width) if index == cursor else label,
+                      'selected' if index == cursor else 'title' if index == 0 else '')
+            status = t('ut_' + row.assessment.status)
+            menu._put(y, 4 + version_width, _clip(status, status_width), _STYLES[row.assessment.status])
+            notes = self._picker_notes(row, latest, suggested, selected)
+            menu._put(y, 5 + version_width + status_width, _clip(notes, notes_width))
+        note = t('ut_picker_returning') if leaving else t('ut_checking') if busy else (
+            t('ut_picker_discovery_warning') if warnings else t('ut_details_key'))
+        menu._put(count_y, 3, _clip(f'{cursor + 1}/{len(rows)} | {note}', width), 'muted')
+        if detail:
+            menu._put(count_y + 1, 3, t('ut_component_details'), 'section')
+            row = rows[cursor]
+            notes = self._picker_notes(row, latest, suggested, selected)
+            menu._put(count_y + 2, 3, _clip(f'{row.target} | {notes or t("ut_" + row.assessment.status)}', width))
+        menu.stdscr.refresh()
+        return frame, scroll, visible
+
+    def _picker(self, component, pool=None):
+        """One continuous catalogue; only the selected batch is evaluated lazily."""
+        menu, t = self.menu, self.t
+        own_pool = pool is None
+        if own_pool:
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='nbo-upgrade-picker')
+        current = self.model.installed.netbox if component is None else dict(self.model.installed.plugins)[component]
         selected = self.model.selection.netbox if component is None else dict(self.model.selection.plugins)[component]
         suggested = (self.suggested.netbox if component is None else dict(self.suggested.plugins).get(component)
                      ) if self.suggested else None
-        catalogue = None
+        rows = [TargetRow(component, current, current, TargetAssessment('unchecked', 'installed'))]
         title = t('ut_picker', component=self._name(component))
-        while True:
-            if catalogue is None:
-                request = self.model.request('catalogue', component, offset=offset)
-                result = menu._upgrade_job(title, lambda _: self.model.evaluate(request))
-                if not isinstance(result, TargetCatalogue) or not self.model.accept(result):
+        cursor = scroll = 0
+        latest = None
+        warnings = ()
+        attempted = set()
+        cancel = Event()
+        future = None
+        request = None
+        choice = None
+        listing = True
+        restore_version = None
+
+        def submit(action, offset=0):
+            nonlocal request, future
+            request = self.model.request(action, component, offset=offset)
+            future = pool.submit(copy_context().run, self.model.evaluate, request, cancelled=cancel.is_set)
+
+        try:
+            submit('listing')
+            while True:
+                if future is not None and future.done():
+                    finished, future = future, None
+                    try:
+                        result = finished.result()
+                        if not isinstance(result, TargetCatalogue) or not self.model.accept(result):
+                            return None
+                        warnings = tuple(dict.fromkeys((*warnings, *result.warnings)))
+                        if request.action in ('listing', 'relist'):
+                            rows = list(result.rows) or rows
+                            latest = result.latest
+                            listing = False
+                            cursor = next((i for i, row in enumerate(rows) if row.target == restore_version), 0)
+                            restore_version = None
+                            if choice is not None:
+                                cursor = next((i for i, row in enumerate(rows) if row.target == choice), cursor)
+                        else:
+                            # The catalogue can shrink after a failed release lookup.
+                            # Merge by exact version, never by an assumed row index.
+                            assessed = {row.target: row for row in result.rows}
+                            rows = [assessed.get(row.target, row) for row in rows]
+                            attempted.add(request.offset)
+                    except Exception:
+                        warnings = (*warnings, t('upgrade_discovery_error'))
+                        if listing:
+                            rows = [TargetRow(component, current, current, TargetAssessment('unchecked', 'installed'))]
+                            cursor = scroll = 0
+                            latest = None
+                            listing = False
+                        else:
+                            attempted.add(request.offset)
+                if future is None and not listing:
+                    batch = cursor // MAX_PICKER_ROWS * MAX_PICKER_ROWS
+                    if batch not in attempted:
+                        submit('catalogue', batch)
+                    elif choice is not None:
+                        row = rows[cursor]
+                        if row.target == choice and row.assessment.availability != 'unavailable':
+                            return choice
+                        choice = None
+                        if row.assessment.availability == 'unavailable':
+                            menu.stdscr.timeout(-1)
+                            menu._show_lines(title, [(t('ut_unavailable'), 'warning')], allow_quit=True)
+                menu.stdscr.timeout(150 if future is not None else -1)
+                frame, scroll, visible = self._draw_picker(title, rows, cursor, scroll, latest,
+                                                          suggested, selected, future is not None, warnings)
+                key = menu.stdscr.getch()
+                menu._check_quit(key)
+                if key in (27, 3):
                     return None
-                catalogue = result
-                if not catalogue.rows:
-                    menu._show_lines(title, [(line, 'warning') for line in catalogue.warnings],
-                                     allow_quit=True)
-                    return None
-                cursor = min(cursor, len(catalogue.rows) - 1)
-            frame = menu._frame(title, t('ut_picker_hint'))
-            if frame:
-                h, w = frame
-                width = w - 6
-                first = min(17, max(12, width // 3))
-                compatibility = max(12, len(t('ut_col_compatibility')))
-                widths = (first, compatibility, width - first - compatibility - 2)
-                visible = max(1, h - 7)
-                scroll = max(0, min(scroll, len(catalogue.rows) - visible))
-                if cursor < scroll:
-                    scroll = cursor
-                elif cursor >= scroll + visible:
-                    scroll = cursor - visible + 1
-                menu._paint(3, 2, w - 4, h - 5)
-                menu._put(3, 3, self._row_text(
-                    (t('ut_col_version'), t('ut_col_compatibility'), t('ut_col_notes')), widths), 'muted')
-                for i, row in enumerate(catalogue.rows[scroll:scroll + visible], scroll):
-                    notes = [t('ut_note_' + name) for name, match in (
-                        ('installed', row.target == row.current), ('latest', row.target == catalogue.latest),
-                        ('suggested', row.target == suggested), ('target', row.target == selected)) if match]
-                    if row.assessment.availability == 'unavailable':
-                        notes.append(t('ut_unavailable'))
-                    y = 4 + i - scroll
-                    if i == cursor:
-                        menu._put(y, 3, ' ' * width, 'selected')
-                    menu._put(y, 3, self._row_text((row.target, self._status(row.assessment),
-                                                   ', '.join(notes)), widths),
-                              'selected' if i == cursor else _STYLES[row.assessment.status])
-                menu._put(h - 3, 3, _clip(f'{offset + cursor + 1}/{catalogue.total} '
-                                          + (t('ut_partial') if catalogue.partial else t('ut_details_key')), width), 'muted')
-                menu.stdscr.refresh()
-            key = menu.stdscr.getch()
-            menu._check_quit(key)
-            if key in (27, 3):
-                return None
-            if not frame:
-                continue
-            if key in _ENTER:
-                row = catalogue.rows[cursor]
-                if row.assessment.availability == 'unavailable':
-                    menu._show_lines(title, [(t('ut_unavailable'), 'warning')], allow_quit=True)
+                if not frame or key == -1:
                     continue
-                return row.target
-            if key in (ord('d'), ord('D')):
-                row = catalogue.rows[cursor]
-                menu._show_lines(title, [*self._component_lines(row),
-                                        *((line, 'warning') for line in catalogue.warnings)], allow_quit=True)
-            elif key == curses.KEY_F5:
-                catalogue = None
-            elif key in _MOVE:
-                position = offset + cursor
-                if key == curses.KEY_NPAGE:
-                    position = min(catalogue.total - 1, position + MAX_PICKER_ROWS)
-                elif key == curses.KEY_PPAGE:
-                    position = max(0, position - MAX_PICKER_ROWS)
-                else:
-                    position = move_selection(position, key, catalogue.total)
-                new_offset = position // MAX_PICKER_ROWS * MAX_PICKER_ROWS
-                cursor = position - new_offset
-                if new_offset != offset:
-                    offset, catalogue, scroll = new_offset, None, 0
+                if key in _ENTER:
+                    if rows[cursor].assessment.availability == 'unavailable':
+                        menu.stdscr.timeout(-1)
+                        menu._show_lines(title, [(t('ut_unavailable'), 'warning')], allow_quit=True)
+                    else:
+                        choice = rows[cursor].target
+                elif key in (ord('d'), ord('D')):
+                    menu.stdscr.timeout(-1)
+                    menu._show_lines(title, [*self._component_lines(rows[cursor]),
+                                            *((line, 'warning') for line in warnings)], allow_quit=True)
+                elif key == curses.KEY_F5 and future is None:
+                    attempted.clear()
+                    warnings = ()
+                    choice = None
+                    # Refresh release metadata and retry evidence in this inventory session.
+                    listing = True
+                    restore_version = rows[cursor].target
+                    rows = [TargetRow(component, current, current, TargetAssessment('unchecked', 'installed'))]
+                    cursor = scroll = 0
+                    submit('relist')
+                elif key in _MOVE:
+                    choice = None
+                    if key == curses.KEY_NPAGE:
+                        cursor = min(len(rows) - 1, cursor + visible)
+                    elif key == curses.KEY_PPAGE:
+                        cursor = max(0, cursor - visible)
+                    else:
+                        cursor = move_selection(cursor, key, len(rows))
+        finally:
+            cancel.set()
+            if future is not None:
+                # This model's caches have one owner. Do not return to a caller
+                # that could mutate/evaluate them while a lookup is still running.
+                if not future.done():
+                    self._draw_picker(title, rows, cursor, scroll, latest, suggested, selected,
+                                      True, warnings, leaving=True)
+                try:
+                    future.result()
+                except Exception:
+                    pass
+            if own_pool:
+                pool.shutdown(wait=False, cancel_futures=True)
+            menu.stdscr.timeout(-1)
 
     def _validate(self):
         self._invalidate_plan()
@@ -582,7 +700,7 @@ class UpgradeDashboard:
                         if not self._inventory_valid or self.model is None:
                             continue
                         component = self._rows()[self.cursor].component
-                        version = self._picker(component)
+                        version = self._picker(component, pool)
                         if version is not None:
                             try:
                                 self.model.select(component, version)

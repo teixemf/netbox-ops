@@ -174,19 +174,46 @@ class TargetModelTests(unittest.TestCase):
         model.select(None, '4.5.0')
         self.assertEqual(model.selection.plan_arguments(model.installed), ('netbox', '4.5.0', {}))
 
+    def test_listing_is_complete_and_does_not_assess_versions(self):
+        self.context = replace(self.context, tags=tuple(f'v4.4.{n}' for n in range(32)))
+        model = self.model()
+        listing = self.run_request(model, 'listing')
+        self.assertEqual(listing.total, 32)
+        self.assertEqual([r.target for r in listing.rows], ['4.4.0'] + [
+            f'4.4.{n}' for n in range(31, 0, -1)])
+        self.assertTrue(all(r.assessment.status == 'unchecked' for r in listing.rows))
+        self.fetcher.assert_not_called()
+        plugin = self.run_request(model, 'listing', 'demo-plugin')
+        self.assertEqual([r.target for r in plugin.rows], ['1.0.0', '3.0.0', '2.0.0'])
+        self.assertTrue(all(r.assessment.status == 'unchecked' for r in plugin.rows))
+        self.fetcher.assert_called_once_with('demo-plugin')
+
+    def test_failed_listing_keeps_installed_and_refresh_retries(self):
+        model = self.model()
+        self.fetcher.side_effect = OSError('offline')
+        result = self.run_request(model, 'listing', 'demo-plugin')
+        self.assertEqual([r.target for r in result.rows], ['1.0.0'])
+        self.assertTrue(result.warnings)
+        self.assertEqual(result.rows[0].assessment.status, 'unchecked')
+        self.fetcher.side_effect = self.fetch
+        result = self.run_request(model, 'relist', 'demo-plugin')
+        self.assertEqual([r.target for r in result.rows], ['1.0.0', '3.0.0', '2.0.0'])
+
     def test_pickers_assess_target_context_and_installed_prerequisites(self):
         model = self.model()
         plugin = self.run_request(model, 'catalogue', 'demo-plugin')
-        self.assertEqual([r.target for r in plugin.rows], ['3.0.0', '2.0.0', '1.0.0'])
+        self.assertEqual([r.target for r in plugin.rows], ['1.0.0', '3.0.0', '2.0.0'])
         self.assertEqual([r.assessment.status for r in plugin.rows],
-                         ['conflict', 'supported', 'conflict'])
+                         ['conflict', 'conflict', 'supported'])
         model.select('demo-plugin', '2.0.0')
         picker = self.run_request(model, 'catalogue', None, limit=2)
         self.assertEqual(picker.total, 3)
-        self.assertEqual([r.target for r in picker.rows], ['4.6.2', '4.5.0'])
-        self.assertEqual([r.assessment.status for r in picker.rows], ['supported', 'conflict'])
+        self.assertEqual([r.target for r in picker.rows], ['4.4.0', '4.6.2'])
+        self.assertEqual(picker.rows[1].assessment.status, 'supported')
+        self.assertEqual(picker.rows[0].assessment.status, 'conflict')
         page = self.run_request(model, 'catalogue', None, offset=2)
-        self.assertEqual([r.target for r in page.rows], ['4.4.0'])
+        self.assertEqual([r.target for r in page.rows], ['4.5.0'])
+        self.assertEqual(page.rows[0].assessment.status, 'conflict')
         with self.assertRaises(ValueError):
             model.request('catalogue', limit=MAX_PICKER_ROWS + 1)
         model = TargetModel(replace(self.context, postgres='12.0'),

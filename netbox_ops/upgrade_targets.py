@@ -95,7 +95,7 @@ class TargetRequest:
     session: object
     revision: int
     selection: TargetSelection
-    action: str  # assess | suggest | catalogue
+    action: str  # assess | suggest | listing | relist | catalogue
     component: str | None = None
     offset: int = 0
     limit: int = MAX_PICKER_ROWS
@@ -263,7 +263,7 @@ class TargetModel:
 
     def request(self, action='assess', component: str | None = None,
                 *, offset=0, limit=MAX_PICKER_ROWS) -> TargetRequest:
-        if action not in ('assess', 'suggest', 'catalogue'):
+        if action not in ('assess', 'suggest', 'listing', 'relist', 'catalogue'):
             raise ValueError('Unknown target request')
         if component is not None and component not in dict(self.installed.plugins):
             raise UpgradePlanError('Select an eligible configured plugin')
@@ -408,9 +408,15 @@ class TargetModel:
         for row in (*plugin_rows, *earlier):
             statuses.append(row.assessment.status)
             if row.assessment.status != 'supported':
-                evidence.append(_evidence(row.component or 'NetBox',
-                                          f'{row.target}: {row.assessment.status}',
-                                          'blocks' if row.assessment.status == 'conflict' else 'warns'))
+                reasons = [item for item in row.assessment.evidence
+                           if item.status in ('blocks', 'warns', 'unknown')]
+                for item in reasons:
+                    evidence.append(_evidence(row.component or 'NetBox',
+                                              f'{row.target}: {item.source}: {item.detail}', item.status))
+                if not reasons:
+                    evidence.append(_evidence(row.component or 'NetBox',
+                                              f'{row.target}: {row.assessment.status}',
+                                              'blocks' if row.assessment.status == 'conflict' else 'warns'))
         if self.context.plugin_selection_incomplete:
             statuses.append('warning')
             evidence.append(_evidence('Inventory', 'Some configured plugins could not be reliably mapped', 'unknown'))
@@ -501,7 +507,16 @@ class TargetModel:
             notes.append('Official NetBox release discovery unavailable')
         if self.context.plugin_selection_incomplete:
             notes.append('Some configured plugins could not be reliably mapped')
-        if request.action == 'catalogue':
+        if request.action == 'relist':
+            # F5 explicitly retries remote metadata inside this inventory
+            # session; official NetBox tags are refreshed by dashboard F5.
+            self._assessments.clear()
+            self._documents.clear()
+            self._releases.clear()
+            self._projects.clear()
+            self._catalogues.clear()
+            self._suggestions.clear()
+        if request.action in ('listing', 'relist', 'catalogue'):
             return self._picker(request, budget, notes)
         partial = False
         if request.action == 'suggest':
@@ -538,20 +553,24 @@ class TargetModel:
         current = self.installed.netbox if name is None else dict(self.installed.plugins)[name]
         latest = None
         if name is None:
-            versions = (*self.netbox_versions, current)
+            versions = (current, *self.netbox_versions)
             latest = self.netbox_versions[0] if self.netbox_versions else None
         else:
             try:
                 listing = self._catalogue(name, budget)
-                versions = self._plugin_versions(name, listing)
+                versions = (current, *self._plugin_versions(name, listing)[:-1])
                 latest = listing.latest
                 notes.extend(listing.warnings)
             except _BudgetExhausted:
-                return TargetCatalogue(request, (), 0, None,
-                                       tuple(notes + ['Release listing not yet checked']), True)
+                versions = (current,)
+                notes.append('Release listing not yet checked')
             except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
                 versions = (current,)
                 notes.append('Plugin release discovery unavailable')
+        if request.action in ('listing', 'relist'):
+            rows = tuple(TargetRow(name, current, version, TargetAssessment(
+                'unchecked', 'installed' if version == current else 'verified')) for version in versions)
+            return TargetCatalogue(request, rows, len(rows), latest, tuple(dict.fromkeys(notes)), False)
         rows = []
         for version in versions[request.offset:request.offset + request.limit]:
             if name is None:
