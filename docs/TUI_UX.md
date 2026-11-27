@@ -132,8 +132,11 @@ the last group (4, L, Q). CLI commands and menu numbering remain unchanged.
 Update discovery is available in the corresponding upgrade views.
 
 The storage panel uses the existing disk chart only when its legend fits;
-otherwise show compact textual usage/count. The latest local backup section
-has aligned Date, Name, Type and Tag fields below the usage. It selects the
+otherwise show compact textual usage/count. When the legend column is wide
+enough and the full details fit, place Latest Backup under the legend beside
+the chart, separated by one empty row. Size the panel to the taller content.
+Otherwise keep the vertical layout or compact B details. The latest local
+backup section has aligned Date, Name, Type and Tag fields. It selects the
 newest recognized local archive using the same chronological inventory as
 backup management. For the selected file only, read a bounded regular JSON
 sidecar when available. Prefer its validated timezone-aware creation timestamp
