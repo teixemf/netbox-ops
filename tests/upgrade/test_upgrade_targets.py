@@ -287,6 +287,36 @@ class TargetModelTests(unittest.TestCase):
         self.assertEqual(model.selection.netbox, model.installed.netbox)
         self.assertTrue(any('Official NetBox' in note for note in result.warnings))
 
+    def test_discovery_events_publish_inventory_before_release_lookup(self):
+        events = []
+        def notify(task, state, context):
+            events.append((task, state, context))
+        def releases():
+            self.assertEqual(events[-2][:2], ('inventory', 'done'))
+            self.assertEqual(events[-2][2].plugins, self.context.plugins)
+            self.assertEqual(events[-1][:2], ('releases', 'running'))
+            raise UpgradeExecutionError('remote unavailable')
+        with (patch('netbox_ops.upgrade_targets.discover_context', return_value=self.context),
+              patch('netbox_ops.upgrade_targets.official_tags', side_effect=releases)):
+            context = discover_target_context(Mock(), progress=notify)
+        self.assertEqual(context.tags, ())
+        self.assertEqual([event[:2] for event in events],
+                         [('inventory', 'running'), ('inventory', 'done'),
+                          ('releases', 'running'), ('releases', 'failed')])
+
+    def test_discovery_cancellation_before_remote_lookup(self):
+        from concurrent.futures import CancelledError
+
+        cancelled = False
+        def notify(task, state, context):
+            nonlocal cancelled
+            cancelled = task == 'inventory' and state == 'done'
+        with (patch('netbox_ops.upgrade_targets.discover_context', return_value=self.context),
+              patch('netbox_ops.upgrade_targets.official_tags') as releases):
+            with self.assertRaises(CancelledError):
+                discover_target_context(Mock(), progress=notify, cancelled=lambda: cancelled)
+        releases.assert_not_called()
+
     def test_preliminary_support_never_changes_full_compatibility_contract(self):
         meta = self.fetch('demo-plugin', '2.0.0')
         args = ('demo-plugin', '2.0.0', '4.6.2', '3.12.3', meta)

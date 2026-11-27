@@ -163,6 +163,7 @@ import curses
 import sys
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, '/opt/netbox-ops')
@@ -171,12 +172,11 @@ from netbox_ops.i18n import Translator
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_dashboard import UpgradeDashboard
 from netbox_ops.upgrade_plan import UpgradePlanError
-from netbox_ops.upgrade_targets import MAX_PICKER_ROWS, TargetModel, discover_target_context
+from netbox_ops.upgrade_targets import MAX_PICKER_ROWS
 from tests.helpers.fake_screen import FakeScreen
 
 scenario, target, plugin, plugin_target, status_url = sys.argv[1:]
 cfg = load_config()
-context = discover_target_context(cfg)
 class TimedScreen(FakeScreen):
     def getch(self):
         # Match curses timeout behavior while backend work is in progress.
@@ -189,9 +189,33 @@ class TimedScreen(FakeScreen):
 screen = TimedScreen(dimensions=(34, 140))
 menu = CursesMenu(screen, Translator('en'))
 dashboard = UpgradeDashboard(menu)
-dashboard.cfg = cfg
-dashboard.model = model = TargetModel(context)
+# Exercise actual initial dashboard discovery, not a preloaded model.
+with ThreadPoolExecutor(max_workers=1) as pool:
+    dashboard._discover(pool, 'suggest')
+    assert dashboard._draw()
+    initial = screen.frames[-1]
+    assert any(text == menu.t('ut_discovery_heading') for _, _, text, _ in initial)
+    assert not dashboard._enabled('execute') and not dashboard._enabled('validate')
+    assert dashboard._rows()[0].current == '?' and dashboard._rows()[0].target == '?'
+    deadline = time.monotonic() + 180
+    while dashboard.future is not None:
+        dashboard._poll(pool)
+        dashboard._draw()
+        assert not dashboard._enabled('execute')
+        assert time.monotonic() < deadline, 'Initial discovery exceeded its test budget'
+        if dashboard.future is not None:
+            time.sleep(0.15)
+assert dashboard.model is not None and dashboard.snapshot is not None
+assert dashboard._inventory_valid and not dashboard.error
+model = dashboard.model
+context = model.context
+assert context.tags and model.installed.netbox == context.installation.version
+assert any(text == context.installation.version for frame in screen.frames for _, _, text, _ in frame)
+assert dashboard.plan is None
+print(f'PASS: {scenario} real dashboard initial discovery and execution gating')
 model.reset()
+# The fixture checks exact targets independently of preliminary suggestions.
+dashboard.snapshot = None
 assert not dashboard._enabled('validate') and not dashboard._enabled('execute')
 try:
     model.select('tomli-w', '1.2.0')

@@ -81,6 +81,16 @@ component evidence and the complete plan, P reviews local pins, and Tab or
 Shift+Tab switches between rows and actions. The paged picker assesses the
 candidate against the selected platform; D shows evidence and F5 retries the
 page. Enter selects, Esc cancels. Incomplete evidence is not approval.
+Discovery opens directly in Upgrade Management. Show unknown values until
+installed inventory is observed, then publish installed rows while official
+release lookup continues. DISCOVERY STATUS reports the actual inventory,
+release lookup, target suggestion and compatibility assessment phases;
+remove it only on completed discovery without incomplete evidence. Partial
+or failed discovery retains the status and D/F5 retry guidance. A failed
+inventory refresh invalidates the previous review and hides stale rows;
+only retry and read-only navigation are available. The worker uses the
+existing bounded requests and cooperative cancellation on exit, not forced
+termination of a running external command.
 Initial suggestions and reassessment run in a single bounded read-only worker;
 while it runs, changes and execution are disabled. Suggest continues a partial
 search or explicitly recomputes plugin targets without changing NetBox.

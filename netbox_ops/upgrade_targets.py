@@ -129,14 +129,31 @@ class _SuggestionProgress:
     choice: str | None = None
 
 
-def discover_target_context(cfg: Configuration) -> UpgradeContext:
-    """Keep installed inventory available if official release discovery fails."""
+def discover_target_context(cfg: Configuration, *, progress=None,
+                            cancelled: Callable[[], bool] | None = None) -> UpgradeContext:
+    """Report installed inventory separately from bounded remote release discovery."""
+    def notify(task, state, context=None):
+        if progress is not None:
+            progress(task, state, context)
+
+    def check_cancelled():
+        if cancelled is not None and cancelled():
+            raise CancelledError
+
+    check_cancelled()
+    notify('inventory', 'running')
     context = discover_context(cfg, releases=False)
+    notify('inventory', 'done', context)
+    check_cancelled()
+    notify('releases', 'running')
     try:
         tags = official_tags()
     except UpgradeExecutionError:
         tags = ()
-    return replace(context, tags=tags)
+    context = replace(context, tags=tags)
+    notify('releases', 'done' if tags else 'failed', context)
+    check_cancelled()
+    return context
 
 
 def _evidence(source: str, detail: str, status: str) -> CompatibilityEvidence:
@@ -471,8 +488,8 @@ class TargetModel:
                     notes.append(f'{name}: no supported target found; suggested release remains uncertain')
         return replace(selection, plugins=tuple(sorted(proposed.items()))), notes, partial
 
-    def evaluate(self, request: TargetRequest, *, cancelled: Callable[[], bool] | None = None
-                 ) -> TargetSnapshot | TargetCatalogue:
+    def evaluate(self, request: TargetRequest, *, cancelled: Callable[[], bool] | None = None,
+                 progress=None) -> TargetSnapshot | TargetCatalogue:
         """Call in one worker; accept only on the UI thread for the active request."""
         if request.session is not self._session:
             raise ValueError('Request belongs to another inventory')
@@ -488,10 +505,24 @@ class TargetModel:
             return self._picker(request, budget, notes)
         partial = False
         if request.action == 'suggest':
+            if progress is not None:
+                progress('suggestions', 'running', None)
             selection, warnings, partial = self._suggest(selection, budget)
             notes.extend(warnings)
+            if progress is not None:
+                progress('suggestions', 'partial' if partial or warnings else 'done', None)
+        budget.take(0)
+        if progress is not None:
+            progress('assessment', 'running', None)
         rows = self._rows(selection, budget)
-        partial = partial or any(row.assessment.pending for row in rows)
+        pending = any(row.assessment.pending for row in rows)
+        partial = partial or pending
+        if progress is not None:
+            incomplete = pending or any(
+                row.assessment.status == 'unchecked' or row.assessment.availability == 'unknown'
+                or any(item.status == 'unknown' for item in row.assessment.evidence)
+                for row in rows)
+            progress('assessment', 'partial' if incomplete else 'done', None)
         if request.action == 'suggest' and not partial:
             # A subsequent explicit suggestion can retry uncertain evidence;
             # only continuations reuse the completed search decisions.
