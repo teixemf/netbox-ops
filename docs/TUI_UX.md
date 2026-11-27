@@ -114,6 +114,17 @@ when attempted. Overall success requires a successful worker result, including
 required service restart and cleanup. Legacy progress callbacks retain the
 four-argument signature with task-based counters.
 
+Present PROGRESS, TASKS / STATUS and RESULT as separate top-aligned panels.
+Keep the planned rows stable and show a text state before each task name;
+colour reinforces the state, not the entire row. Wrap long names and result
+messages without losing characters. Up/Down and Page Up/Down scroll tasks,
+with automatic active-task following until the operator scrolls manually.
+After completion, Tab switches between task and result scrolling; a visible
+focus marker works without colour. Enter/Esc/Space acknowledges the final
+result. Q and other cancellation keys remain disabled while the worker runs.
+Resize clamps both viewports and keeps the outcome accessible at 50x16.
+Services and upgrade progress views retain their existing layout.
+
 ## Backup inventory counters
 
 Available Backups is a standalone heading. An empty inventory displays only
