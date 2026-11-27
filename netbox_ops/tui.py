@@ -885,13 +885,16 @@ class CursesMenu:
             (f'{self.t("nbo_storage_count")}: {count}', 'muted'),
         ]
 
+    _DASHBOARD_LEGEND_OFFSET = 20
+
     def _dashboard_storage_height(self, width, available, storage, disk, error) -> int:
         if available <= 0:
             return 0
         if error:
             return min(2, available)
         legend = self._dashboard_storage_legend(storage, disk)
-        if disk[3] and available >= 10 and width >= 20 + max(len(label) + 2 for label, _ in legend):
+        if (disk[3] and available >= 10 and
+                width >= self._DASHBOARD_LEGEND_OFFSET + max(len(label) + 2 for label, _ in legend)):
             return 10
         return min(4, available)
 
@@ -913,7 +916,8 @@ class CursesMenu:
         if height == 10:
             self._draw_storage_ring(x, y + 1, disk)
             for row, (label, style) in enumerate(legend, y + 1):
-                self._put(row, x + 20, f'● {label}' if style != 'muted' else label, style)
+                self._put(row, x + self._DASHBOARD_LEGEND_OFFSET,
+                          f'● {label}' if style != 'muted' else label, style)
         elif height == 4:
             for row, index in enumerate((0, 2, 3), y + 1):
                 self._put(row, x, legend[index][0][:width], 'muted')
@@ -975,6 +979,22 @@ class CursesMenu:
         usage_height = self._dashboard_storage_height(
             width, usage_space - latest_gap, storage, disk, storage_error)
         storage_height = usage_height + latest_gap + len(latest_rows)
+        latest_x, latest_width = x, width
+        latest_y = storage_y + usage_height + latest_gap
+        # The donut is ten rows including its heading; the four legend rows
+        # finish at y+4. Reserve one empty row before the adjacent details.
+        legend_width = width - self._DASHBOARD_LEGEND_OFFSET
+        if (not storage_error and legend_width >= 40 and
+                self._dashboard_storage_height(width, storage_space, storage, disk, '') == 10):
+            adjacent = self._latest_backup_lines(latest, legend_width)
+            adjacent_height = max(10, 6 + len(adjacent))
+            if adjacent_height <= storage_space:
+                latest_rows = adjacent
+                latest_x = x + self._DASHBOARD_LEGEND_OFFSET
+                latest_width = legend_width
+                latest_y = storage_y + 6
+                usage_height = 10
+                storage_height = adjacent_height
         # Paint all three panels before rendering their content.
         menu_height = max(1 + len(items) + (1 if available >= 10 else 0),
                           platform_height + gap + storage_height)
@@ -991,11 +1011,11 @@ class CursesMenu:
         table_end = self._draw_platform_status(x, 4, width, states, metrics, service_error)
         for row, line in enumerate(note, table_end + 1):
             self._put(row, x, line, 'muted')
-        next_row = self._draw_dashboard_storage(
+        self._draw_dashboard_storage(
             x, storage_y, width, storage_y + usage_height - 1, storage, disk, storage_error)
-        for row, (line, style) in enumerate(latest_rows, next_row + latest_gap):
+        for row, (line, style) in enumerate(latest_rows, latest_y):
             if row < h - 2:
-                self._put(row, x, line[:width], style)
+                self._put(row, latest_x, line[:latest_width], style)
 
     def _main(self) -> int:
         """Main screen: compact menu and live service/storage dashboard."""
