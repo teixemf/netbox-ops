@@ -201,13 +201,16 @@ class CursesMenu:
             return
         text = safe_text(msg)
         limit = w - x - 1
-        role = style or 'text'
+        bold = style == 'title_bold'
+        role = 'title' if bold else style or 'text'
         if role != 'selected' and any(x0 <= x < x1 and y0 <= y < y1
                                            for x0, y0, x1, y1 in self._panels):
             role = role + '_panel' if role + '_panel' in self.colors else role
         attr = self.colors.get(role, self.colors.get('text', 0))
         if style == 'selected':
             attr = attr or curses.A_REVERSE
+        if bold:
+            attr |= curses.A_BOLD
         try:
             self.stdscr.addnstr(y, x, text, limit, attr)
         except curses.error:
@@ -605,67 +608,110 @@ class CursesMenu:
         finally:
             self.stdscr.timeout(-1)
 
-    def _confirmation_footer(self, h: int, w: int, token: str, typed: str,
-                             invalid: bool) -> int:
-        """Draw the exact challenge and inline error above the normal footer."""
+    @staticmethod
+    def _confirmation_wrap(text: str, width: int) -> list[str]:
+        return textwrap.wrap(safe_text(text), width=width, drop_whitespace=False,
+                             break_on_hyphens=False) or ['']
+
+    def _confirmation_panel(self, h: int, w: int, summary: Sequence[tuple[str, str]],
+                            typed: str, *, token: str | None = None, invalid: bool = False,
+                            target_names: Sequence[str] = (), offset: int = 0) -> tuple[int, int]:
+        """Keep the exact instruction and field adjacent; scroll the review, not the input."""
         width = w - 7
+        heading = self.t('tui_confirm_panel' if token is not None else 'tui_input_panel')
+        instruction = self.t('tui_confirm_token', token=token) if token is not None else ''
+        instructions = self._confirmation_wrap(instruction, width) if instruction else []
         errors = []
         if invalid:
             for key in ('nbo_confirm_failed_title', 'nbo_confirm_failed_message'):
                 errors.extend(textwrap.wrap(self.t(key), width=width))
-        instruction = textwrap.wrap(self.t('tui_confirm_token', token=token), width=width)
-        input_y = h - 3 - len(errors)
-        token_y = input_y - len(instruction)
-        for y, line in enumerate(instruction, token_y):
-            self._put(y, 3, line, 'section')
-        prefix = self.t('tui_confirm_prompt')
-        self._put(input_y, 3, prefix + typed[-max(1, width - len(prefix)):], 'title')
-        for y, line in enumerate(errors, input_y + 1):
-            self._put(y, 3, line, 'failure')
-        return token_y
+        # Reserve the literal instruction, input and complete inline error first.
+        available = h - 2 - 4 - len(instructions) - 1 - len(errors)
+        lines = [(part, style) for text, style in summary
+                 for part in self._confirmation_wrap(text, width)]
+        # Keep a concise warning visible while scrolling lengthy targets. If
+        # it cannot fit completely, leave the complete wording in the review.
+        pinned = []
+        if summary and summary[0][1] == 'warning':
+            warning = self._confirmation_wrap(summary[0][0], width)
+            if len(warning) < available:
+                pinned = [(part, 'warning') for part in warning]
+                lines = lines[len(warning):]
+                available -= len(pinned)
+            elif available >= 2:
+                pinned = [(self.t('tui_confirm_review_warning'), 'warning')]
+                available -= 1
+        targets = []
+        for index, name in enumerate(target_names, 1):
+            targets.extend((part, 'muted') for part in
+                           self._confirmation_wrap(f'{index}. {name}', width))
+        if target_names:
+            lines.append((f'{self.t("nbo_operation_targets")} ({len(target_names)}):', 'section'))
+            lines.extend(targets)
+        visible = min(len(lines), max(1, available))
+        scroll = len(lines) > visible
+        if scroll and visible > 1:
+            visible -= 1
+        limit = max(0, len(lines) - visible)
+        offset = min(max(0, offset), limit)
+        gap = 1 if available > len(lines) and lines else 0
+        height = (1 + len(pinned) + visible + int(scroll and available > 1)
+                  + gap + len(instructions) + 1 + len(errors))
+        self._paint(3, 2, w - 4, height)
+        self._put(3, 3, heading, 'section')
+        y = 4
+        for line, style in pinned + lines[offset:offset + visible]:
+            self._put(y, 3, line, style)
+            y += 1
+        if scroll and available > 1:
+            self._put(y, 3, f'↑↓ {offset + 1}-{min(offset + visible, len(lines))}/{len(lines)}', 'section')
+            y += 1
+        y += gap
+
+        # Split the translated instruction into styled spans without changing
+        # token spelling, even when a long token wraps onto multiple lines.
+        token_start = instruction.find(token) if token else -1
+        position = 0
+        for line in instructions:
+            if token_start < 0:
+                self._put(y, 3, line)
+            else:
+                left = max(0, min(len(line), token_start - position))
+                right = max(left, min(len(line), token_start + len(token) - position))
+                if left:
+                    self._put(y, 3, line[:left])
+                if right > left:
+                    self._put(y, 3 + left, line[left:right], 'title_bold')
+                if right < len(line):
+                    self._put(y, 3 + right, line[right:])
+            position += len(line)
+            y += 1
+        prefix = self.t('tui_confirm_prompt') if token is not None else '> '
+        value = prefix + typed[-max(1, width - len(prefix) - 1):]
+        self._put(y, 3, value)
+        self._put(y, 3 + len(value), '▏', 'title')
+        for row, line in enumerate(errors, y + 1):
+            self._put(row, 3, line, 'failure')
+        return offset, visible
+
+    @staticmethod
+    def _confirmation_scroll(key: int, offset: int, visible: int) -> int:
+        if key in (curses.KEY_UP, curses.KEY_PPAGE):
+            return max(0, offset - (visible if key == curses.KEY_PPAGE else 1))
+        return offset + (visible if key == curses.KEY_NPAGE else 1)
 
     def _confirm_action(self, action: str, names: Sequence[str],
                         skipped: Sequence[str] = ()) -> bool:
-        """Use exact, strong challenge for PostgreSQL and Redis changes."""
+        """Use the shared exact challenge, with service-specific review information."""
         token = challenge(action, names)
-        typed = ''
-        invalid = False
-        while True:
-            frame = self._frame(self.t('tui_confirm_title'), self.t('tui_confirm_hint'))
-            if frame:
-                h, w = frame
-                width = max(12, w - 8)
-                lines = [self.t('action_target', action=self.t('action_' + action),
-                                names=', '.join(names))]
-                if skipped:
-                    lines.append(self.t('nbo_skipped', names=', '.join(skipped)))
-                lines.append(self.t('tui_startup_only') if action in ('enable', 'disable')
-                             else self.t('tui_action_warning'))
-                token_y = self._confirmation_footer(h, w, token, typed, invalid)
-                y = 3
-                for line in lines:
-                    for part in textwrap.wrap(safe_text(line), width=width):
-                        if y >= token_y:
-                            break
-                        self._put(y, 3, part)
-                        y += 1
-                self.stdscr.refresh()
-            key = self.stdscr.getch()
-            if key in (27, 3):
-                return False
-            if not frame:
-                continue
-            if key in (10, 13, curses.KEY_ENTER):
-                if typed == token:
-                    return True
-                typed = ''
-                invalid = True
-            elif key in (curses.KEY_BACKSPACE, 8, 127):
-                typed = typed[:-1]
-                invalid = False
-            elif 32 <= key <= 126 and len(typed) < 48:
-                typed += chr(key)
-                invalid = False
+        warning = (self.t('tui_startup_only') if action in ('enable', 'disable')
+                   else self.t('tui_action_warning'))
+        summary = [(warning, 'muted' if action in ('enable', 'disable') else 'warning'),
+                   (self.t('action_target', action=self.t('action_' + action),
+                           names=', '.join(names)), '')]
+        if skipped:
+            summary.append((self.t('nbo_skipped', names=', '.join(skipped)), 'muted'))
+        return self._confirm_token(self.t('tui_confirm_title'), '', token, summary=summary)
 
     def _confirm(self, names: Sequence[str]) -> bool:
         return self._confirm_action('restart', names)
@@ -1153,23 +1199,25 @@ class CursesMenu:
     def _upgrade_input(self, title: str, prompt: str, *, initial: str = '',
                        secret: bool = False) -> str | None:
         typed = initial
+        offset = 0
+        visible = 1
         while True:
             frame = self._frame(title, self.t('tui_confirm_hint'))
             if frame:
-                _, width = frame
-                for y, line in enumerate(textwrap.wrap(prompt, width=max(10, width - 8))[:3], 3):
-                    self._put(y, 3, line)
-                visible = '*' * len(typed) if secret else typed
-                self._put(7, 3, '> ' + visible[-max(1, width - 9):], 'title')
+                value = '*' * len(typed) if secret else typed
+                offset, visible = self._confirmation_panel(
+                    *frame, [(prompt, '')], value, offset=offset)
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return None
             if not frame:
                 continue
-            if key in (10, 13, curses.KEY_ENTER):
+            if key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                offset = self._confirmation_scroll(key, offset, visible)
+            elif key in (10, 13, curses.KEY_ENTER):
                 return typed
-            if key in (8, 127, curses.KEY_BACKSPACE):
+            elif key in (8, 127, curses.KEY_BACKSPACE):
                 typed = typed[:-1]
             elif 32 <= key <= 126 and len(typed) < 2048:
                 typed += chr(key)
@@ -1190,10 +1238,12 @@ class CursesMenu:
         auth = self._upgrade_input(title, self.t('upgrade_auth_prompt'), secret=True)
         if auth is None:
             return False
-        if not self._confirm_token(title, self.t('upgrade_confirm'), 'UPGRADE'):
+        prompt = self.t('upgrade_confirm')
+        if not self._confirm_token(title, prompt, 'UPGRADE', summary=[(prompt, 'warning')]):
             return False
         unknowns = plan.requires_strong_confirmation
-        if unknowns and not self._confirm_token(title, self.t('upgrade_confirm_unknowns'), 'UNCERTAIN'):
+        prompt = self.t('upgrade_confirm_unknowns')
+        if unknowns and not self._confirm_token(title, prompt, 'UNCERTAIN', summary=[(prompt, 'warning')]):
             return False
         result = self._upgrade_job(title, lambda report: execute_plan(
             cfg, operation, plan, fingerprint=plan.fingerprint,
@@ -1406,8 +1456,10 @@ class CursesMenu:
                 if self._show_lines(title, [(line, '') for line in review_lines(review, self.t)],
                                     self.t('upgrade_review_hint'), allow_quit=True) is False:
                     continue
-                if not self._confirm_token(title, self.t('self_upgrade_install_warning'), review.token,
-                                           target_names=[f'v{step}' for step in review.decision.steps]):
+                prompt = self.t('self_upgrade_install_warning')
+                if not self._confirm_token(title, prompt, review.token,
+                                           target_names=[f'v{step}' for step in review.decision.steps],
+                                           summary=[(prompt, 'warning')]):
                     continue
                 clear, status = tui_recovery_state(self.t)
                 if not clear:
@@ -1688,48 +1740,28 @@ class CursesMenu:
             self.stdscr.timeout(-1)
 
     def _confirm_token(self, title: str, prompt: str, token: str,
-                       *, target_names: Sequence[str] = ()) -> bool:
+                       *, target_names: Sequence[str] = (),
+                       summary: Sequence[tuple[str, str]] = ()) -> bool:
         typed = ''
         invalid = False
-        target_scroll = 0
-        visible = 0
+        offset = 0
+        visible = 1
+        lines = list(summary) or [(prompt, '')]
         while True:
             frame = self._frame(title, self.t('tui_confirm_hint'))
             if frame:
-                h, w = frame
-                token_y = self._confirmation_footer(h, w, token, typed, invalid)
-                target_y = min(6, token_y - 3)
-                prompt_lines = max(0, target_y - 4) if target_names else max(0, min(5, token_y - 4))
-                for i, line in enumerate(textwrap.wrap(safe_text(prompt), width=max(15, w - 10))[:prompt_lines]):
-                    self._put(4 + i, 3, line, 'section')
-                if target_names:
-                    visible = max(1, min(7, h - 13, token_y - target_y - 2))
-                    target_scroll = min(target_scroll, max(0, len(target_names) - visible))
-                    self._put(target_y, 3, f'{self.t("nbo_operation_targets")} ({len(target_names)}):',
-                              'section')
-                    for i in range(target_scroll, min(len(target_names), target_scroll + visible)):
-                        self._put(target_y + 1 + i - target_scroll, 4,
-                                  f'{i + 1}. {safe_text(target_names[i])}'[:max(10, w - 10)],
-                                  'muted')
-                    if len(target_names) > visible:
-                        self._put(target_y + 1 + visible, 3,
-                                  f'↑↓ {target_scroll + 1}-{min(len(target_names), target_scroll + visible)}'
-                                  f'/{len(target_names)}', 'section')
+                offset, visible = self._confirmation_panel(
+                    *frame, lines, typed, token=token, invalid=invalid,
+                    target_names=target_names, offset=offset)
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return False
             if not frame:
                 continue
-            if target_names and key in (curses.KEY_UP, curses.KEY_DOWN,
-                                        curses.KEY_PPAGE, curses.KEY_NPAGE):
-                step = -1 if key in (curses.KEY_UP, curses.KEY_PPAGE) else 1
-                if key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
-                    step *= max(1, visible)
-                target_scroll = max(0, min(max(0, len(target_names) - visible),
-                                           target_scroll + step))
-                continue
-            if key in (10, 13, curses.KEY_ENTER):
+            if key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                offset = self._confirmation_scroll(key, offset, visible)
+            elif key in (10, 13, curses.KEY_ENTER):
                 if typed == token:
                     return True
                 typed = ''
@@ -2566,13 +2598,17 @@ class CursesMenu:
                     if accept_unknown:
                         if not self._confirm_token(
                                 self.t('nbo_restore_choose'),
-                                self.t('nbo_unknown_version_warning'), 'ACCEPT UNKNOWN VERSION'):
+                                self.t('nbo_unknown_version_warning'), 'ACCEPT UNKNOWN VERSION',
+                                summary=[(self.t('nbo_unknown_version_warning'), 'warning')]):
                             self.stdscr.timeout(120)
                             continue
                     token = f'RESTORE {entry.kind.upper()}' + (f' {only.upper()}' if entry.kind in ('combined', 'full') else '')
-                    notice = (f'{entry.path.name} | {self._pretty_date(entry.created)} | '
-                              f'{self._human_size(entry.size)}. '+self.t('nbo_restore_warning'))
-                    if self._confirm_token(self.t('nbo_restore_choose'),notice,token):
+                    description = (f'{entry.path.name} | {self._pretty_date(entry.created)} | '
+                                   f'{self._human_size(entry.size)}.')
+                    warning = self.t('nbo_restore_warning')
+                    notice = description + ' ' + warning
+                    if self._confirm_token(self.t('nbo_restore_choose'), notice, token,
+                                           summary=[(warning, 'warning'), (description, '')]):
                         def restore_worker(cb, item=entry, scope=only, unknown=accept_unknown):
                             opts = {'only': scope, 'task_progress': cb}
                             if unknown:
@@ -2589,7 +2625,8 @@ class CursesMenu:
                     notice = self.t('nbo_delete_selected_warning', count=len(targets),
                                     size=self._human_size(sum(e.size for e in targets)))
                     if self._confirm_token(self.t('nbo_delete_title'), notice, token,
-                                           target_names=[e.path.name for e in targets]):
+                                           target_names=[e.path.name for e in targets],
+                                           summary=[(notice, 'warning')]):
                         self._run_backup_job(self.t('nbo_delete_title'),
                              lambda cb, paths=[e.path for e in targets]:
                              self._delete_selected_job(manager, paths, cb),

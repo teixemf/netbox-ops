@@ -432,6 +432,8 @@ class UpgradeTuiTests(InterfaceFixture):
             dashboard.future.set_result(result)
             dashboard._poll()
             self.assertEqual(bool(dashboard._discovery_states), partial)
+            if partial:
+                self.assertEqual(dashboard._discovery_states['assessment'], 'partial')
             self.assertTrue(dashboard._draw())
             self.assertEqual(any(text == menu.t('ut_discovery_heading')
                                  for _, _, text, _ in menu.stdscr.frames[-1]), partial)
@@ -467,6 +469,9 @@ class UpgradeTuiTests(InterfaceFixture):
         dashboard._poll()
         self.assertEqual(dashboard.model.selection, dashboard.model.installed)
         self.assertIsNone(dashboard.snapshot)
+        self.assertEqual(dashboard._discovery_states['assessment'], 'not_run')
+        self.assertTrue(dashboard.error)
+        self.assertFalse(dashboard._enabled('execute'))
 
     def test_dashboard_validates_exact_modes_and_disables_stale_or_blocked_plan(self):
         from netbox_ops.upgrade_targets import TargetSelection

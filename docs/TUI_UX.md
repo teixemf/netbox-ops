@@ -32,6 +32,19 @@ other views should adopt these conventions incrementally, not via a rewrite.
   Self-upgrade submission is not installation success; show the recorded
   outcome and recovery state on reopening.
 
+## Confirmation and input panels
+
+Use the same top-aligned content-sized panel for service and backup
+confirmation, upgrade/self-upgrade approval, pin review and URL/credential
+input. Keep the exact challenge in bold teal (bold in monochrome), the field
+and local validation message together. Preserve literal case-sensitive tokens,
+masked credentials, cancellation and the existing operation gates.
+Wrap complete summary and target text; scroll the review with arrows or
+Page Up/Down while keeping the input visible. Keep the leading warning
+visible when it fits, with a compact warning and scrollable full text on
+short screens. Resize clamps the review viewport. The normal keyboard footer
+remains separate from the input panel.
+
 ## Unified NetBox and plugin upgrades
 
 The main Upgrade NetBox entry opens a version-target dashboard. NetBox and

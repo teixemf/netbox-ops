@@ -156,7 +156,9 @@ class UpgradeDashboard:
                 if discovering:
                     self.cfg, context = result
                     action, self._discovery_action = self._discovery_action, None
-                    self._discovery_states.update(inventory='done', releases='done' if context.tags else 'failed')
+                    self._discovery_states.update(
+                        inventory='partial' if context.plugin_selection_incomplete else 'done',
+                        releases='done' if context.tags else 'failed')
                     self.model = self.model.refreshed(context) if self.model else TargetModel(context)
                     self._inventory_valid = True
                     self._preview_context = None
@@ -166,14 +168,18 @@ class UpgradeDashboard:
                     self.snapshot = result
                     if result.request.action == 'suggest':
                         self.suggested = result.selection
-                    if (not result.partial and not result.warnings
+                    if result.partial and all(state != 'partial' for state in self._discovery_states.values()):
+                        self._discovery_states['assessment'] = 'partial'
+                    if (not result.partial
                             and all(state in ('done', 'not_applicable')
                                     for state in self._discovery_states.values())):
                         self._discovery_states.clear()
-                    elif result.partial and self._discovery_states.get('assessment') == 'pending':
-                        self._discovery_states['assessment'] = 'partial'
                 else:
-                    self._discovery_states.clear()
+                    # Never report a rejected/stale request as completed discovery.
+                    self.error = self.t('upgrade_discovery_error')
+                    for task in ('suggestions', 'assessment'):
+                        if self._discovery_states.get(task) != 'not_applicable':
+                            self._discovery_states[task] = 'not_run'
             except CancelledError:
                 self._discovery_action = None
                 self.error = self.t('upgrade_discovery_error')

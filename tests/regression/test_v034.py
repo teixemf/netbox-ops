@@ -183,17 +183,30 @@ class BackupView034Tests(unittest.TestCase):
         self.assertFalse(any('Marked targets:' in text for _, _, text, _ in focused))
 
     def test_delete_confirmation_lists_targets_and_can_scroll(self):
+        names = [f'backup-{index}.dump' for index in range(10)]
+        screen = FakeScreen([curses.KEY_NPAGE, 27], dimensions=(16, 72))
+        menu = CursesMenu(screen, Translator('en'))
+        self.assertFalse(menu._confirm_token('Delete', 'Delete these backups?',
+                                             'DELETE 10 BACKUPS', target_names=names))
+        first = ' '.join(text for _, _, text, _ in screen.frames[0])
+        scrolled = ' '.join(text for _, _, text, _ in screen.frames[1])
+        self.assertIn('1. backup-0.dump', first)
+        self.assertNotIn('10. backup-9.dump', first)
+        self.assertIn('10. backup-9.dump', scrolled)
+        self.assertNotIn('1. backup-0.dump', scrolled)
+        self.assertIn('/12', scrolled)
+        self.assertIn('DELETE 10 BACKUPS', scrolled)
+
+    def test_delete_confirmation_does_not_scroll_when_all_targets_fit(self):
         names = [f'backup-{index}.dump' for index in range(5)]
         screen = FakeScreen([curses.KEY_DOWN, 27], dimensions=(16, 72))
         menu = CursesMenu(screen, Translator('en'))
         self.assertFalse(menu._confirm_token('Delete', 'Delete these backups?',
                                              'DELETE 5 BACKUPS', target_names=names))
-        first = ' '.join(text for _, _, text, _ in screen.frames[0])
-        scrolled = ' '.join(text for _, _, text, _ in screen.frames[1])
-        self.assertIn('1. backup-0.dump', first)
-        self.assertIn('2. backup-1.dump', scrolled)
-        self.assertNotIn('1. backup-0.dump', scrolled)
-        self.assertIn('2-4/5', scrolled)
+        self.assertEqual(screen.frames[0], screen.frames[1])
+        for index, name in enumerate(names, 1):
+            self.assertTrue(any(text == f'{index}. {name}'
+                                for _, _, text, _ in screen.frames[-1]))
 
     def test_refresh_clears_mark_when_same_path_is_replaced(self):
         menu, screen = self.menu([curses.KEY_DOWN, 32, curses.KEY_F5,
