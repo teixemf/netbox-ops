@@ -394,6 +394,23 @@ class UpgradeTuiTests(InterfaceFixture):
                     self.assertEqual(dashboard._discovery_states['inventory'], 'done')
                     self.assertEqual(dashboard._discovery_states['releases'], 'running')
 
+    def test_discovery_omits_not_applicable_and_leaves_pending_status_blank(self):
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard._discovery_states = {'inventory': 'done', 'releases': 'running',
+                                           'suggestions': 'not_applicable', 'assessment': 'pending'}
+            for compact in (False, True):
+                lines = dashboard._discovery_lines(44 if compact else 100, compact=compact)
+                text = ' '.join(line for line, _ in lines)
+                self.assertNotIn('N/A', text)
+                self.assertNotIn(menu.t('nbo_task_state_pending'), text)
+                self.assertNotIn(menu.t('ut_discovery_short_suggestions' if compact
+                                       else 'ut_discovery_suggestions'), text)
+                self.assertIn(menu.t('ut_discovery_short_assessment' if compact
+                                     else 'ut_discovery_assessment'), text)
+                self.assertIn(menu.t('nbo_task_state_running'), text)
+            self.assertEqual(dashboard._discovery_states['suggestions'], 'not_applicable')
+
     def test_failed_inventory_refresh_disables_stale_targets_and_allows_retry(self):
         from concurrent.futures import Future
 

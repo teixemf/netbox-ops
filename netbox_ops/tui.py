@@ -781,22 +781,19 @@ class CursesMenu:
         if not frame:
             return
         h, w = frame
-        self._put(4, 3, self.t('action_target', action=self.t('action_' + action), names=name))
-        self._put(6, 3, self.t('tui_progress_count', done=completed, total=total),
+        self._put(3, 3, self.t('action_target', action=self.t('action_' + action), names=name))
+        self._put(4, 3, self.t('tui_progress_count', done=completed, total=total),
                   'failure' if stage == 'error' or failed else 'title')
         length = max(10, min(60, w - 12))
         filled = int(length * completed / total) if total else 0
-        self._put(8, 3, '[' + '█' * filled + '░' * (length-filled) + '] %3d%%' %
+        self._put(5, 3, '[' + '█' * filled + '░' * (length-filled) + '] %3d%%' %
                   (100 * completed // total if total else 0),
                   'failure' if stage == 'error' or failed else 'success')
-        status = 'tui_progress_running' if stage == 'running' else (
-            'tui_progress_failed' if stage == 'error' else 'tui_progress_done')
-        self._put(10, 3, self.t(status, name=name),
-                  'failure' if stage == 'error' else 'section')
-        if detail:
-            self._put(11, 3, detail[:max(10, w-8)], 'failure' if stage == 'error' else 'muted')
-        # Keep a live task list below the progress bar, including completed
-        # services, current command and failures. No prediction of elapsed time.
+        if stage != 'pending':
+            status = {'running': 'tui_progress_running', 'error': 'tui_progress_failed',
+                      'done': 'tui_progress_done'}[stage]
+            self._put(6, 3, self.t(status, name=name),
+                      'failure' if stage == 'error' else 'section')
         if not hasattr(self, '_service_steps'):
             self._service_steps = []
         item = (name, stage, detail)
@@ -805,23 +802,30 @@ class CursesMenu:
             self._service_steps.append(item)
         else:
             self._service_steps[old] = item
-        self._put(13, 3, self.t('nbo_task_header'), 'section')
-        visible = self._service_steps[-max(0, h - 19):] if h >= 19 else []
-        for i, (service, state, info) in enumerate(visible):
-            mark = 'OK' if state == 'done' else ('!!' if state == 'error' else '..')
-            self._put(14+i, 4, f'{mark} {self.t("action_"+action)} {service}: {info}'[:max(8,w-9)],
-                      'success' if state == 'done' else ('failure' if state == 'error' else 'muted'))
+        labels = {state: self.t('nbo_task_state_' + key) for state, key in
+                  (('done', 'done'), ('error', 'failed'), ('running', 'running'),
+                   ('not_run', 'not_run'))}
+        labels['pending'] = ''
+        status_width = max(map(len, labels.values()))
+        self._put(7, 3, self.t('nbo_task_header'), 'section')
+        capacity = max(1, h - 11)
+        offset = max(0, min(len(self._service_steps) - capacity, (old or 0) - capacity + 1))
+        for i, (service, state, info) in enumerate(self._service_steps[offset:offset + capacity]):
+            displayed = 'not_run' if finished and state == 'pending' else state
+            style = {'done': 'success', 'error': 'failure', 'running': 'title'}.get(state, 'muted')
+            self._put(8 + i, 3, labels[displayed].ljust(status_width), style)
+            task = f'{self.t("action_" + action)} {service}' + (f': {info}' if info else '')
+            self._put(8 + i, 4 + status_width, task[:max(1, w - status_width - 6)])
         if finished:
-            y = min(h - 4, 15 + len(visible))
-            self._put(y, 3, summary[:max(10, w - 8)],
+            self._put(h - 3, 3, summary[:max(10, w - 8)],
                       'failure' if failed else 'success')
         self.stdscr.refresh()
 
     def _execute_batch(self, systemd: SystemdServices,
                        action: str, names: Sequence[str]) -> None:
         ordered = order_services(action, names)
-        self._service_steps = []
-        self._draw_progress(action, 0, len(ordered), ordered[0], 'running', '')
+        self._service_steps = [(name, 'pending', '') for name in ordered]
+        self._draw_progress(action, 0, len(ordered), ordered[0], 'pending', '')
         completed: list[tuple[str, str]] = []
         failure: str | None = None
         try:
@@ -831,19 +835,20 @@ class CursesMenu:
                 self._draw_progress(action, done, total, name, stage, info))
         except (ServiceError, OSError) as exc:
             failure = safe_text(exc)
-            name = self._service_steps[-1][0] if self._service_steps else ordered[0]
-            self._draw_progress(action, len(completed), len(ordered), name,
-                                'error', failure)
+            active = next((name for name, state, _ in self._service_steps if state == 'running'), None)
+            if active is not None:
+                self._draw_progress(action, len(completed), len(ordered), active, 'error', failure)
         # Do not replace this screen with a second, redundant results page.
         done = len(completed)
-        status = self._service_steps[-1][1] if self._service_steps else 'running'
-        last = self._service_steps[-1][0] if self._service_steps else ordered[0]
+        last, status, _ = next((row for row in reversed(self._service_steps) if row[1] != 'pending'),
+                               (ordered[0], 'pending', ''))
         if failure:
             summary = self.t('tui_batch_failed', error=failure)
         else:
             summary = self.t('tui_batch_complete', count=done)
+        detail = next((info for name, _, info in self._service_steps if name == last), '')
         self._draw_progress(action, done, len(ordered), last, status,
-                            failure or '', finished=True, summary=summary,
+                            detail, finished=True, summary=summary,
                             failed=bool(failure))
         self._wait_result_ack()
 
@@ -1959,14 +1964,19 @@ class CursesMenu:
         self._put(5, 3, '[' + '█' * filled + '░' * (length - filled) + '] ' + count,
                   'failure' if error else 'title')
 
-        states = ('pending', 'running', 'done', 'failed', 'skipped', 'not_applicable', 'not_run')
+        states = ('running', 'done', 'failed', 'skipped', 'not_run')
         labels = {state: self.t('nbo_task_state_' + state) for state in states}
+        labels['pending'] = ''
         status_width = max(map(len, labels.values()))
         task_lines = []
         active_line = 0
         active_found = False
         for name, state, info in self._backup_steps:
-            label = labels[state]
+            if state == 'not_applicable':
+                continue
+            # A failure before backend events still leaves planned work unrun.
+            displayed = 'not_run' if finished and state == 'pending' else state
+            label = labels[displayed]
             style = {'done': 'success', 'failed': 'failure', 'running': 'title'}.get(state, 'muted')
             name_text = self.t('nbo_stage_' + name) + (' — ' + info if info else '')
             if not active_found and state == ('failed' if error else 'running'):
@@ -1991,7 +2001,7 @@ class CursesMenu:
                         style = 'warning' if line.startswith(('Redis cache', 'NetBox upgrade recovery')) else 'muted'
                         add_result(line, style)
         else:
-            add_result(self.t('nbo_backup_result_pending'), 'muted')
+            add_result('—', 'muted')
 
         task_y = 6 + gap
         space = h - 2 - task_y - gap
