@@ -128,6 +128,44 @@ class DependencyReviewTests(unittest.TestCase):
         self.assertFalse(plan.can_execute)
         self.assertIn('Pin unselected local packages', ' '.join(plan.blockers))
         self.resolver.assert_not_called()
+        item, = plan.dependency_reviews[0].local_diagnostics
+        self.assertEqual((item.name, item.declaration, item.installed, item.stage, item.reason, item.action),
+                         ('disabled-plugin', 'disabled-plugin', '1.0', '4.7.3', 'unpinned', 'review-pin'))
+        for language in ('en', 'pt'):
+            summary = '\n'.join(summary_lines(plan, Translator(language)))
+            self.assertIn('disabled-plugin', summary)
+            self.assertIn('1.0', summary)
+            self.assertIn('4.7.3', summary)
+
+    def test_local_diagnostics_name_every_blocker_without_leaking_url(self):
+        local = b'disabled-plugin==2.0\nmissing-package\nprivate @ https://user:secret@example.invalid/p.whl\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        plan = self.review(self.build())
+        self.assertFalse(plan.can_execute)
+        diagnostics = {item.name: item for item in plan.dependency_reviews[0].local_diagnostics}
+        self.assertEqual(diagnostics['disabled-plugin'].reason, 'mismatched')
+        self.assertEqual(diagnostics['missing-package'].reason, 'missing')
+        self.assertEqual(diagnostics['private'].reason, 'ambiguous')
+        self.assertTrue(all(item.action == 'manual-review' for item in diagnostics.values()))
+        self.assertNotIn('secret', '\n'.join(summary_lines(plan, Translator('en'), details=True)))
+        self.resolver.assert_not_called()
+        self.download.assert_not_called()
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
+
+    def test_compatibility_block_keeps_independent_local_diagnostics_without_resolver(self):
+        local = b'disabled-plugin\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        base = self.build()
+        blocked = replace(base, blockers=('Plugin compatibility conflict',))
+        plan = self.review(blocked)
+        self.assertFalse(plan.can_execute)
+        review = plan.dependency_reviews[0]
+        self.assertEqual(review.resolution.status, 'not-run')
+        self.assertEqual(review.local_diagnostics[0].name, 'disabled-plugin')
+        self.ltree.assert_called_once()
+        self.resolver.assert_not_called()
+        self.download.assert_not_called()
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
 
     def test_combined_and_plugin_only_review_exact_selection(self):
         local = self.local + b'configured-plugin==1.0\n'

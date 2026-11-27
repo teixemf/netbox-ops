@@ -9,6 +9,7 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 from .config import load_config
+from .plugin_inventory import PluginInventoryError, inventory_plugins
 from .tui import move_action_focus, move_selection, safe_text
 from .upgrade_targets import (
     MAX_PICKER_ROWS, TargetAssessment, TargetCatalogue, TargetModel, TargetRow, TargetSnapshot,
@@ -57,6 +58,7 @@ class UpgradeDashboard:
         self._discovery_states = {}
         self._discovery_events = SimpleQueue()
         self._preview_context = None
+        self._revalidate_after_pins = False
 
     def _invalidate_plan(self):
         self.plan = self.plan_selection = None
@@ -281,7 +283,45 @@ class UpgradeDashboard:
         lines.extend([(self.t('ut_plan'), 'section'), *self._plan_lines()])
         if self._plan_matches():
             lines.extend((line, '') for line in summary_lines(self.plan, self.t, details=True))
+        if self._correctable_pins():
+            lines.append((self.t('ut_pin_review_from_plan'), 'title'))
+            return self.menu._show_lines(self.title, lines, self.t('ut_pin_details_hint'), allow_quit=True)
         self.menu._show_lines(self.title, lines, allow_quit=True)
+        return False
+
+    def _correctable_pins(self):
+        if not self._plan_matches():
+            return set()
+        diagnostics = [item for review in self.plan.dependency_reviews for item in review.local_diagnostics]
+        manual = {item.name for item in diagnostics if item.action != 'review-pin'}
+        return {item.name for item in diagnostics if item.action == 'review-pin'} - manual
+
+    def _review_plan_pins(self, pool):
+        menu = self.menu
+        names = self._correctable_pins()
+        context = self.model.context
+        if not names:
+            if self._plan_matches() and any(review.local_diagnostics for review in self.plan.dependency_reviews):
+                menu._show_lines(self.title, [(self.t('upgrade_local_action_manual_review'), 'warning')],
+                                 allow_quit=True)
+                return
+            inventory = context.inventory
+        else:
+            try:
+                inventory = inventory_plugins(context.installation, local_pin_names=tuple(sorted(names)))
+            except (PluginInventoryError, OSError, UnicodeError):
+                menu._show_lines(self.title, [(self.t('upgrade_discovery_error'), 'failure')])
+                return
+            if (inventory.requirements_hash, inventory.enabled, inventory.packages) != (
+                    context.inventory.requirements_hash, context.inventory.enabled, context.inventory.packages):
+                self._invalidate_plan()
+                menu._show_lines(self.title, [(self.t('ut_plan_mismatch'), 'failure')])
+                self._discover(pool)
+                return
+        if menu._review_plugin_pins(self.title, inventory, eligible=names or None):
+            self._revalidate_after_pins = self._plan_matches()
+            self._invalidate_plan()
+            self._discover(pool)
 
     def _table_widths(self, rows, width):
         t = self.t
@@ -669,6 +709,10 @@ class UpgradeDashboard:
             self._draw()
             while True:
                 self._poll(pool)
+                if self.future is None and self._revalidate_after_pins:
+                    self._revalidate_after_pins = False
+                    if self._inventory_valid and self.model is not None and not self.error:
+                        self._validate()
                 menu.stdscr.timeout(150 if self.future is not None else -1)
                 frame = self._draw()
                 key = menu.stdscr.getch()
@@ -684,12 +728,11 @@ class UpgradeDashboard:
                     self.actions_focused = not self.actions_focused
                     self.action = 0
                 elif key in (ord('d'), ord('D')):
-                    if self.future is None:
-                        self._details(self._rows()[self.cursor])
+                    if self.future is None and self._details(self._rows()[self.cursor]):
+                        self._review_plan_pins(pool)
                 elif key in (ord('p'), ord('P')):
-                    if (self.future is None and self._inventory_valid and self.model is not None
-                            and menu._review_plugin_pins(self.title, self.model.context.inventory)):
-                        self._discover(pool)
+                    if self.future is None and self._inventory_valid and self.model is not None:
+                        self._review_plan_pins(pool)
                 elif key == curses.KEY_F5:
                     if self.future is None:
                         self._discover(pool, 'assess' if self.model else 'suggest')

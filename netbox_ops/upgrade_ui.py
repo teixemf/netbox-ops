@@ -169,6 +169,11 @@ def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) ->
         for overlap in review.overlaps:
             lines.append(t('upgrade_overlap_' + overlap.status, name=overlap.name,
                            local=overlap.local_pin, core=overlap.core_pin))
+        for diagnostic in review.local_diagnostics:
+            lines.append(t('upgrade_local_diagnostic', name=diagnostic.name,
+                           declared=diagnostic.declaration, installed=diagnostic.installed or '?',
+                           stage=diagnostic.stage, reason=t('upgrade_local_' + diagnostic.reason),
+                           action=t('upgrade_local_action_' + diagnostic.action.replace('-', '_'))))
         for name, before, after in review.changes:
             lines.append(f'  {name}: {before or "-"} -> {after}')
         if details:

@@ -10,7 +10,7 @@ from typing import Callable
 from .config import Configuration
 from .plugin_compatibility import CompatibilityError, DependencyPreflight, isolated_dependency_preflight
 from .plugin_inventory import normalize_name
-from .plugin_upgrade import RequirementOverlapError, prepare_plugin_upgrade
+from .plugin_upgrade import RequirementOverlapError, diagnose_local_requirements, prepare_plugin_upgrade
 from .upgrade_checkout import _run_git
 from .upgrade_combined import download_stage_wheels
 from .upgrade_execution import UpgradeExecutionError
@@ -42,7 +42,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
     upstream psycopg[c] source-build requirement. No live checkout, install,
     service action or requirements modification is allowed here.
     """
-    if not plan.can_execute:
+    if not plan.stages:
         return plan
     warnings, blockers = list(plan.warnings), list(plan.blockers)
     reviews = []
@@ -68,6 +68,14 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                         blockers.append(prefix + 'PostgreSQL ltree availability or permissions not verified')
                 # A blocked requirements stage must not hide independent
                 # prerequisite checks or the remaining targets' evidence.
+                diagnostics = diagnose_local_requirements(plan, local, core, index)
+                if not plan.can_execute:
+                    reviews.append(StageDependencyReview(
+                        stage.netbox_version, pinned.commit, hashlib.sha256(core).hexdigest(), (),
+                        DependencyPreflight('not-run', 'Plan has independent compatibility or prerequisite blockers'),
+                        (), ltree, local_diagnostics=diagnostics,
+                    ))
+                    continue
                 try:
                     pins = prepare_plugin_upgrade(plan, local, core,
                                                   stage_index=index if stage.kind == 'netbox' else None)
@@ -77,7 +85,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                     reviews.append(StageDependencyReview(
                         stage.netbox_version, pinned.commit, hashlib.sha256(core).hexdigest(), (),
                         DependencyPreflight('not-run', 'Requirements could not be safely prepared'),
-                        (), ltree, overlaps,
+                        (), ltree, overlaps, diagnostics,
                     ))
                     continue
                 result = resolver(pins.local_pins, pins.core_pins, live.python_version,
