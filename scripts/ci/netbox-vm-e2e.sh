@@ -286,21 +286,29 @@ from netbox_ops.config import load_config
 source = Path(sys.argv[1])
 reached_replace = False
 
-def fail_after_replace(stage, done, total, detail=''):
+events = []
+
+def fail_after_replace(event):
     global reached_replace
-    if stage == 'replace' and done == 6:
+    events.append(event)
+    if event.task.phase == 'replace' and event.state == 'done':
         reached_replace = True
         raise RuntimeError('CI injected failure after live replacement')
 
 try:
     BackupManager(load_config()).restore(
-        'combined', source, progress=fail_after_replace
+        'combined', source, task_progress=fail_after_replace
     )
 except RuntimeError as exc:
     assert str(exc) == 'CI injected failure after live replacement', str(exc)
 else:
     raise AssertionError('Restore unexpectedly succeeded despite injected failure')
 assert reached_replace, 'Restore did not reach the post-replacement checkpoint'
+states = {event.task.phase: event.state for event in events}
+assert states['rollback_files'] == 'done', states
+assert states['rollback_db'] == 'done', states
+assert states['rollback_services'] == 'done', states
+assert states['restart_services'] == 'not_run', states
 print('PASS: injected post-replacement failure reached rollback path')
 PY
 netbox_tag verify_modified

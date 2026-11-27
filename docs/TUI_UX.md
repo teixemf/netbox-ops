@@ -107,6 +107,19 @@ offering installation and again before execution; the backend still owns the
 lock, archive verification, fresh plan validation and transactional handoff.
 Reopening the view shows the last recorded status, never an inferred success.
 
+## Backup task progress
+
+Backup create, restore, verify and delete show planned tasks before starting.
+The backend emits explicit pending, running, done, failed, skipped,
+not-applicable and not-run states; a later task never implies earlier success.
+For combined archives, extraction is required even for database-only restore;
+a PostgreSQL dump does not require extraction. Tasks that are not applicable
+or skipped do not contribute to the completed/total task counts. Batch file
+tasks have distinct identities. Recovery and cleanup tasks are appended only
+when attempted. Overall success requires a successful worker result, including
+required service restart and cleanup. Legacy progress callbacks retain the
+four-argument signature with task-based counters.
+
 ## Backup inventory counters
 
 Available Backups is a standalone heading. An empty inventory displays only
