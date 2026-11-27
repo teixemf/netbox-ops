@@ -145,15 +145,45 @@ class PluginUpgradeTests(_PluginFixture):
         self.assertEqual(pins.overlaps[0].status, 'redundant')
 
     def test_conflicting_or_ambiguous_core_pin_never_prepares(self):
-        for pin, status in ((b'django==5.2.5', 'conflict'),
-                            (b'django[extra]==5.2.6', 'ambiguous'),
-                            (b'django', 'ambiguous')):
+        for pin, status in ((b'django==5.2.5', 'conflict'),):
             with self.subTest(pin=pin):
                 raw = LOCAL + pin + b'\r\n'
                 inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest())
                 plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
                 with self.assertRaisesRegex(UpgradeExecutionError, 'django: local .*core Django==5.2.6.*' + status):
                     self.prepare(plan, local=raw)
+
+    def test_bare_and_extra_core_declarations_are_preserved_and_resolved(self):
+        for declaration in (b'django', b'django[extra]==5.2.6'):
+            with self.subTest(declaration=declaration):
+                raw = LOCAL + declaration + b' # local reason\r\n'
+                inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest())
+                plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+                pins = self.prepare(plan, local=raw)
+                self.assertTrue(pins.requirements.endswith(declaration + b' # local reason\r\n'))
+                self.assertIn(declaration.decode(), pins.local_pins)
+                self.assertEqual(pins.overlaps[0].status, 'review')
+                self.assertEqual(dict(pins.expected)['django'], '5.2.6')
+        inventory = replace(self.inventory, requirements_hash=hashlib.sha256(LOCAL).hexdigest())
+        plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+        with self.assertRaisesRegex(UpgradeExecutionError, 'overlap'):
+            self.prepare(plan, local=LOCAL, core=CORE + b'other-plugin==2.0.0\n')
+
+    def test_non_plugin_declarations_do_not_require_matching_installed_pins(self):
+        raw = LOCAL + b'django-auth-ldap[extra]  # keep bare\r\ntomli-w==1.2.0\r\n'
+        inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest(),
+                            packages=self.packages + (InstalledPackage('django-auth-ldap', '5.0.0', ()),
+                                                      InstalledPackage('tomli-w', '1.1.0', ())))
+        plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+        prepared = self.prepare(plan, local=raw)
+        self.assertTrue(prepared.requirements.endswith(raw[len(LOCAL):]))
+        self.assertIn('django-auth-ldap[extra]', prepared.local_pins)
+        self.assertIn('django-auth-ldap[extra]==5.0.0', prepared.preferred_local)
+        self.assertNotIn('django-auth-ldap', dict(prepared.expected))
+        self.assertEqual(dict(prepared.expected)['tomli-w'], '1.2.0')
+        from netbox_ops.plugin_upgrade import bind_reviewed_dependencies
+        with self.assertRaisesRegex(UpgradeExecutionError, 'approved full dependency report'):
+            bind_reviewed_dependencies(plan, 0, self.installation.commit, CORE, prepared)
 
     def test_core_versions_must_match_installed_release(self):
         with self.assertRaises(UpgradeExecutionError):

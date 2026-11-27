@@ -209,6 +209,25 @@ class CompatibilityTests(unittest.TestCase):
         with self.assertRaises(CompatibilityError):
             isolated_dependency_preflight(['demo==1.0\n--allow-external'], ['django==5.2'], '3.12')
 
+    def test_bare_local_requirements_are_explicitly_opt_in_and_verified(self):
+        def run(command, **kwargs):
+            self.assertIn('django-auth-ldap[extra]', command)
+            Path(command[command.index('--report') + 1]).write_text(json.dumps({'install': [
+                {'metadata': {'name': 'Django', 'version': '5.2'}},
+                {'metadata': {'name': 'django-auth-ldap', 'version': '5.0'}}]}))
+            return subprocess.CompletedProcess(command, 0, '', '')
+        with self.assertRaises(CompatibilityError):
+            isolated_dependency_preflight(['django-auth-ldap[extra]'], ['django==5.2'], '3.12')
+        result = isolated_dependency_preflight(['django-auth-ldap[extra]'], ['django==5.2'],
+                                               '3.12', runner=run, allow_unpinned=True)
+        self.assertEqual(result.status, 'passed')
+        self.assertIn(('django-auth-ldap', '5.0'), result.packages)
+        for unsafe in ('-r file', 'foo @ https://example.org/p.whl', 'foo>=1', 'foo;python_version<"3.12"'):
+            with self.assertRaises(CompatibilityError):
+                isolated_dependency_preflight([unsafe], ['django==5.2'], '3.12', allow_unpinned=True)
+        with self.assertRaises(CompatibilityError):
+            isolated_dependency_preflight(['django-auth-ldap'], ['Django'], '3.12', allow_unpinned=True)
+
     def test_preflight_timeout_is_unknown(self):
         def run(*args, **kwargs):
             raise subprocess.TimeoutExpired('pip', 120)

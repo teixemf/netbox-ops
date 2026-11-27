@@ -178,20 +178,24 @@ class PluginInventoryTests(unittest.TestCase):
         self.assertEqual(self.requirements.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.requirements.stat().st_uid, 0)
 
-    def test_contextual_local_pin_preserves_extras_comments_and_protected_backup(self):
+    def test_contextual_pin_is_plugin_only_and_preserves_other_declarations(self):
         self.add_package('local-extra', '2.1.0', 'local_extra')
         (self.root / 'requirements.txt').write_text('Django==5.2.1\n')
-        original = b'sample-plugin==2.4.1\r\nlocal-extra[foo]  # preserve\r\n'
+        original = b'sample-plugin[foo]  # plugin\r\nlocal-extra[foo]  # preserve\r\n'
         self.requirements.write_bytes(original)
-        self.assertFalse(self.inventory().proposals)
-        inventory = inventory_plugins(self.installation, local_pin_names=('local-extra',))
+        inventory = inventory_plugins(self.installation, local_pin_names=('local-extra', 'sample-plugin'))
         self.assertEqual(configured_plugin_packages(inventory), (('sample-plugin', '2.4.1'),))
         self.assertEqual(len(inventory.proposals), 1)
-        self.assertEqual(inventory.proposals[0].after, 'local-extra[foo]==2.1.0  # preserve\r\n')
+        self.assertEqual(inventory.proposals[0].after, 'sample-plugin[foo]==2.4.1  # plugin\r\n')
         self.assertEqual(self.requirements.read_bytes(), original)
-        self._apply(inventory, ('local-extra',))
+        from dataclasses import replace
+        forged = replace(inventory, proposals=(replace(inventory.proposals[0], package='local-extra'),))
+        with self.assertRaisesRegex(PluginInventoryError, 'configured plugins'):
+            self._apply(forged, ('local-extra',))
+        self.assertEqual(self.requirements.read_bytes(), original)
+        self._apply(inventory, ('sample-plugin',))
         self.assertEqual(self.requirements.read_bytes(),
-                         b'sample-plugin==2.4.1\r\nlocal-extra[foo]==2.1.0  # preserve\r\n')
+                         b'sample-plugin[foo]==2.4.1  # plugin\r\nlocal-extra[foo]  # preserve\r\n')
         backup, = (self.root.parent / 'pin-recovery').glob('pins-*/local_requirements.txt')
         self.assertEqual(backup.read_bytes(), original)
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
