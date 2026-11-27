@@ -123,6 +123,10 @@ class CursesMenu:
         self._service_steps: list[tuple[str, str, str]] = []
         self._backup_steps: list[tuple[str, str, str]] = []
         self._backup_step_indexes: dict[tuple[str, str], int] = {}
+        self._backup_task_offset: int | None = None
+        self._backup_result_offset = 0
+        self._backup_result_focus = False
+        self._backup_scroll_limits = (0, 0)
 
     def _init_screen(self) -> None:
         self.stdscr.keypad(True)
@@ -1776,6 +1780,9 @@ class CursesMenu:
         tick = 0
         self._backup_steps = []
         self._backup_step_indexes = {}
+        self._backup_task_offset = None
+        self._backup_result_offset = 0
+        self._backup_result_focus = False
         for task in tasks:
             self._record_backup_step(BackupTaskEvent(
                 task, 'pending' if task.applicable else 'not_applicable', 0, progress[2]))
@@ -1802,18 +1809,25 @@ class CursesMenu:
                     drain()
                     self._draw_backup_progress(title, progress, tick)
                     tick += 1
-                    self.stdscr.getch()  # No cancellation while a transaction runs.
+                    self._scroll_backup_progress(self.stdscr.getch())  # Read-only navigation.
                 drain()
                 result = future.result()
                 progress = ('complete', progress[1], progress[2], '')
         except Exception as exc:
-            error = safe_text(exc) or type(exc).__name__
+            error = str(exc) or type(exc).__name__
             drain()
         finally:
             self.stdscr.timeout(-1)
-        self._draw_backup_progress(title, progress, tick,
-                                   finished=True, error=error, result=result)
-        self._wait_result_ack()
+        self._backup_result_focus = False
+        self._flush_input()
+        while True:
+            self._draw_backup_progress(title, progress, tick,
+                                       finished=True, error=error, result=result)
+            key = self.stdscr.getch()
+            if key in (10, 13, curses.KEY_ENTER, 27, 32):
+                self._flush_input()
+                break
+            self._scroll_backup_progress(key, finished=True)
         return not bool(error)
 
     def _record_backup_step(self, event: BackupTaskEvent) -> None:
@@ -1826,42 +1840,142 @@ class CursesMenu:
             self._backup_step_indexes[key] = len(self._backup_steps)
             self._backup_steps.append(row)
 
+    def _scroll_backup_progress(self, key: int, *, finished: bool = False) -> None:
+        """Scroll read-only task/result content; never cancel a running transaction."""
+        if key in (9, curses.KEY_BTAB) and finished:
+            self._backup_result_focus = not self._backup_result_focus
+            return
+        if key not in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE,
+                       curses.KEY_HOME, curses.KEY_END, ord('j'), ord('k')):
+            return
+        result_focus = finished and self._backup_result_focus
+        limit = self._backup_scroll_limits[1 if result_focus else 0]
+        offset = self._backup_result_offset if result_focus else self._backup_task_offset
+        offset = offset if offset is not None else getattr(self, '_backup_auto_offset', 0)
+        if key == curses.KEY_HOME:
+            offset = 0
+        elif key == curses.KEY_END:
+            offset = limit
+        else:
+            delta = {curses.KEY_UP: -1, ord('k'): -1, curses.KEY_DOWN: 1, ord('j'): 1,
+                     curses.KEY_PPAGE: -5, curses.KEY_NPAGE: 5}[key]
+            offset += delta
+        offset = max(0, min(offset, limit))
+        if result_focus:
+            self._backup_result_offset = offset
+        else:
+            self._backup_task_offset = offset
+
+    @staticmethod
+    def _backup_wrap(text, width):
+        """Preserve every character, including long paths; sanitize per line."""
+        lines = []
+        for line in str(text).splitlines() or ['']:
+            lines.extend(textwrap.wrap(safe_text(line), width=max(1, width),
+                                       replace_whitespace=False, drop_whitespace=False,
+                                       break_long_words=True, break_on_hyphens=False) or [''])
+        return lines
+
     def _draw_backup_progress(self, title: str, progress: tuple, tick: int,
                               *, finished: bool = False, error: str = '',
                               result=None) -> None:
-        frame = self._frame(title, self.t('nbo_progress_result_hint') if finished
-                            else self.t('tui_quit_blocked'))
+        hint = self.t('nbo_backup_result_scroll_hint' if finished else 'nbo_backup_running_scroll_hint')
+        frame = self._frame(title, hint)
         if not frame:
             return
         h, w = frame
+        width = w - 6
         phase, done, total, detail = progress
-        self._put(4, 3, self.t('nbo_stage_'+phase), 'section')
-        length = max(10, min(50, w-20))
-        filled = round(length * done / total) if total else 0
+        gap = 1 if h >= 22 else 0
+
+        # The progress panel always occupies three rows. All other space is
+        # allocated to the actual task list and result, not a fixed-height history.
+        self._paint(3, 2, w - 4, 3)
+        self._put(3, 3, self.t('nbo_progress_heading'), 'section')
+        current = self.t('nbo_stage_' + phase)
+        if detail and not finished:
+            current += ' — ' + safe_text(detail)
+        self._put(4, 3, current[:width], 'title')
         count = f'{done}/{total}' if total else '—'
-        self._put(7, 3, '['+'█'*filled+'░'*(length-filled)+'] '+count,
+        length = max(1, min(50, width - len(count) - 3))
+        filled = round(length * min(done, total) / total) if total else 0
+        self._put(5, 3, '[' + '█' * filled + '░' * (length - filled) + '] ' + count,
                   'failure' if error else 'title')
-        status = (self.t('nbo_job_failed') if error else self.t('nbo_job_success')) if finished \
-                 else self.t('nbo_working') + '.'*(1+(tick % 4))
-        self._put(9, 3, status, 'failure' if error else ('success' if finished else 'muted'))
-        if error:
-            self._put(10, 3, error[:max(8,w-9)], 'failure')
-        elif finished and result is not None:
-            self._put(10, 3, safe_text(getattr(result,'path',result))[:max(8,w-9)], 'title')
-            if getattr(result, 'detail', ''):
-                self._put(11, 3, result.detail[:max(8,w-9)], 'muted')
-        elif detail:
-            self._put(10, 3, detail[:max(8,w-9)], 'muted')
-        self._put(12, 3, self.t('nbo_task_header'), 'section')
-        visible = max(1, h - 15)
-        active = next((i for i, (_, state, _) in enumerate(self._backup_steps)
-                       if state == ('failed' if error else 'running')), 0)
-        offset = max(0, active - visible + 1)
-        for i, (phase_name, step_status, info) in enumerate(self._backup_steps[offset:offset + visible]):
-            marker = self.t('nbo_task_state_' + step_status)
-            style = {'done': 'success', 'failed': 'failure', 'running': 'title'}.get(step_status, 'muted')
-            self._put(13 + i, 4, f'{marker} {self.t("nbo_stage_" + phase_name)}' +
-                      (f' — {info}' if info else '')[:max(0, w - 35)], style)
+
+        states = ('pending', 'running', 'done', 'failed', 'skipped', 'not_applicable', 'not_run')
+        labels = {state: self.t('nbo_task_state_' + state) for state in states}
+        status_width = max(map(len, labels.values()))
+        task_lines = []
+        active_line = 0
+        active_found = False
+        for name, state, info in self._backup_steps:
+            label = labels[state]
+            style = {'done': 'success', 'failed': 'failure', 'running': 'title'}.get(state, 'muted')
+            name_text = self.t('nbo_stage_' + name) + (' — ' + info if info else '')
+            if not active_found and state == ('failed' if error else 'running'):
+                active_line = len(task_lines)
+                active_found = True
+            for index, line in enumerate(self._backup_wrap(name_text, width - status_width - 4)):
+                task_lines.append((label if index == 0 else '', style, line, state == 'running'))
+
+        result_lines = []
+        def add_result(text, style):
+            result_lines.extend((line, style) for line in self._backup_wrap(text, width))
+        if finished:
+            add_result(self.t('nbo_job_failed' if error else 'nbo_job_success'),
+                       'failure' if error else 'success')
+            if error:
+                add_result(error, 'failure')
+            elif result is not None:
+                add_result(getattr(result, 'path', result), 'title')
+                for line in str(getattr(result, 'detail', '')).splitlines():
+                    if line:
+                        # These are the existing backend post-restore notices.
+                        style = 'warning' if line.startswith(('Redis cache', 'NetBox upgrade recovery')) else 'muted'
+                        add_result(line, style)
+        else:
+            add_result(self.t('nbo_backup_result_pending'), 'muted')
+
+        task_y = 6 + gap
+        space = h - 2 - task_y - gap
+        # One heading + at least two task rows; keep result and its first
+        # messages visible even at 50x16. Both lists can scroll independently.
+        result_height = min(len(result_lines) + 1, max(2, space - 3), max(4, space // 2))
+        task_height = min(max(2, len(task_lines) + 1), space - result_height)
+        result_y = task_y + task_height + gap
+        result_height = min(len(result_lines) + 1, h - 2 - result_y)
+        task_visible = max(1, task_height - 1)
+        result_visible = max(1, result_height - 1)
+        task_limit = max(0, len(task_lines) - task_visible)
+        result_limit = max(0, len(result_lines) - result_visible)
+        self._backup_scroll_limits = (task_limit, result_limit)
+        auto = max(0, min(task_limit, active_line - task_visible + 1))
+        self._backup_auto_offset = auto
+        task_offset = auto if self._backup_task_offset is None else min(self._backup_task_offset, task_limit)
+        if self._backup_task_offset is not None:
+            self._backup_task_offset = task_offset
+        self._backup_result_offset = min(self._backup_result_offset, result_limit)
+
+        def heading(y, key, offset, visible, count, focused):
+            text = ('> ' if focused and finished else '') + self.t(key)
+            if count > visible:
+                text += f'  {offset + 1}-{min(offset + visible, count)}/{count}'
+            self._put(y, 3, text[:width], 'title' if focused else 'section')
+
+        self._paint(task_y, 2, w - 4, task_height)
+        heading(task_y, 'nbo_task_header', task_offset, task_visible, len(task_lines),
+                not self._backup_result_focus)
+        for y, (label, style, line, active) in enumerate(
+                task_lines[task_offset:task_offset + task_visible], task_y + 1):
+            self._put(y, 3, ('● ' if label else '  ') + label.ljust(status_width), style)
+            self._put(y, 3 + status_width + 4, line, 'title' if active else '')
+        self._paint(result_y, 2, w - 4, result_height)
+        heading(result_y, 'nbo_result_heading', self._backup_result_offset,
+                result_visible, len(result_lines), self._backup_result_focus)
+        for y, (line, style) in enumerate(
+                result_lines[self._backup_result_offset:self._backup_result_offset + result_visible],
+                result_y + 1):
+            self._put(y, 3, line, style)
         self.stdscr.refresh()
 
     def _targets_summary(self, names: Sequence[str], width: int) -> str:
