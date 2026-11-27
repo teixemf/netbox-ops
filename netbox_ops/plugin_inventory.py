@@ -379,12 +379,19 @@ def _save_pin_backup(root: Path, raw: bytes, mode: int, group: int) -> Path:
 
     parent = _PIN_RECOVERY_DIRECTORY.parent
     try:
-        for item in (parent, *parent.parents):
+        # The shared state directory may not exist on a fresh installation.
+        # Validate its existing ancestors before creating it; never follow a
+        # symlink or create an arbitrary chain of missing directories.
+        for item in parent.parents:
             info = item.lstat()
             if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
                     or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
                 raise PluginInventoryError('Unsafe pin recovery directory')
         if parent.resolve() != parent:
+            raise PluginInventoryError('Unsafe pin recovery directory')
+        parent.mkdir(mode=0o700, exist_ok=True)
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
             raise PluginInventoryError('Unsafe pin recovery directory')
         _PIN_RECOVERY_DIRECTORY.mkdir(mode=0o700, exist_ok=True)
         _private_directory(_PIN_RECOVERY_DIRECTORY)
