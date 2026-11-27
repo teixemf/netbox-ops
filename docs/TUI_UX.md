@@ -183,7 +183,11 @@ contextual details below. Database and media-only backups do not stop NetBox;
 combined backups temporarily stop active NetBox and RQ writers. None includes
 configuration. Restore scope keeps its selected backup and precautionary backup
 warning visible and Esc cancels immediately. Other selectors retain their
-existing Esc behavior, scrolling and confirmation gates.
+existing Esc behavior, scrolling and confirmation gates. For real offline
+curses captures, run `python -m tests.tui.terminal_selector_capture /tmp/selectors.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite exercises actual curses at 50x16 and 140x34 without
+performing backups or restores.
 
 ## Backup task progress
 

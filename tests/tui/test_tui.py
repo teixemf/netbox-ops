@@ -165,6 +165,37 @@ class MenuNavigationTests(unittest.TestCase):
             self.assertIn(menu.t('nbo_restore_downtime_short'), visible)
             self.assertIn(menu.t('nbo_restore_safety_short'), visible)
 
+    def test_real_curses_backup_and_restore_selector_capture(self):
+        import json
+        import tempfile
+        from tests.helpers.terminal_capture import run_capture
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for language, monochrome in (('en', False), ('pt', True)):
+                with self.subTest(language=language, monochrome=monochrome):
+                    output = Path(tmp) / f'{language}.json'
+                    run_capture('tests.tui.terminal_selector_capture', output, language, monochrome)
+                    captures = json.loads(output.read_text())
+                    t = Translator(language)
+                    self.assertEqual(len(captures), 4)
+                    for capture in captures:
+                        self.assertEqual(capture['color'], not monochrome)
+                        frames = capture['frames']
+                        heading = t('nbo_create_type_heading' if capture['selector'] == 'backup'
+                                    else 'nbo_restore_scope_heading')
+                        self.assertTrue(any(heading in line for line in frames[0]))
+                        if capture['selector'] == 'backup':
+                            warning = t('nbo_create_downtime_combined')
+                            self.assertNotIn(warning, ' '.join(line.strip() for line in frames[0]))
+                        else:
+                            warning = t('nbo_restore_downtime_short')
+                        shown = next(frame for frame in frames
+                                     if warning in ' '.join(line.strip() for line in frame))
+                        self.assertTrue(any(t('nbo_create_details_heading') in line for line in shown))
+                        print(f"Actual curses selector: {language} {capture['selector']} "
+                              f"{capture['width']}x{capture['height']} color={capture['color']}\n"
+                              + '\n'.join(shown))
+
     def test_selector_long_list_remains_navigable(self):
         screen = FakeScreen([curses.KEY_DOWN, curses.KEY_END, 10], dimensions=(16, 50))
         menu = CursesMenu(screen, Translator('en'))
