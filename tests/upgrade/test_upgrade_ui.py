@@ -888,7 +888,7 @@ class UpgradeTuiTests(InterfaceFixture):
                 self.assertTrue(dashboard._draw())
                 if dimensions[1] >= 100:
                     count_line = next(text for _, _, text, _ in menu.stdscr.frames[-1]
-                                      if menu.t('ut_counts', count=2, changed=2) in text)
+                                      if menu.t('ut_counts', count=2, changed=1) in text)
                     self.assertIn(menu.t('ut_details_key'), count_line)
                     self.assertNotIn(menu.t('ut_preliminary_short'), count_line)
                 with patch.object(menu, '_show_lines', return_value=False) as show:
