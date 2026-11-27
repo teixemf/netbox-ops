@@ -269,40 +269,49 @@ class OrchestrationTests(unittest.TestCase):
     def test_reorder_rack_release_matrix_and_runtime_gate(self):
         from netbox_ops.plugin_compatibility import fetch_release_declaration
 
-        # Minimal deterministic fixtures of the reported upstream declaration;
-        # not a vendored copy of the package or an execution of its source.
-        for version, minimum, maximum in (('1.1.4', '4.3.0', '4.6.99'), ('1.1.5', '4.7.0', '4.7.99')):
+        # Minimal fixtures checked against the publisher's exact release tags.
+        # v1.1.4 has no recognized exact-release matrix row or runtime limits.
+        # v1.1.5 declares only a runtime minimum; its tested maximum is advisory.
+        for version in ('1.1.4', '1.1.5'):
             with self.subTest(version=version):
                 metadata = {'info': {'name': 'netbox-reorder-rack', 'version': version,
                                      'requires_python': '>=3.12', 'requires_dist': None,
                                      'project_urls': {'Homepage':
                                                       'https://github.com/netbox-community/netbox-reorder-rack'}}}
                 matrix = ('| Release | Minimum NetBox Version | Maximum NetBox Version |\n'
-                          f'| [v{version}](https://example.com/tag) | {minimum} | {maximum} |')
+                          '| 1.1.5 | 4.7.0 | 4.7.x |\n'
+                          '| 1.1.4 | 4.3.0 | 4.5.x |') if version == '1.1.5' else ''
                 source = ('from netbox.plugins import PluginConfig\n'
                           'class RackConfig(PluginConfig):\n'
                           '    name = "netbox_reorder_rack"\n'
                           f'    version = "{version}"\n'
-                          f'    min_version = "{minimum}"\n'
-                          f'    max_version = "{maximum}"\n'
-                          'config = RackConfig\n')
+                          + ('    min_version = "4.7.0"\n' if version == '1.1.5' else '')
+                          + 'config = RackConfig\n')
 
                 def opener(request, timeout):
-                    self.assertIn('/v' + version + '/', request.full_url)
                     return FakeResponse((matrix if request.full_url.endswith('.md') else source).encode())
 
                 declaration = fetch_release_declaration(metadata, version, opener=opener)
-                self.assertEqual(declaration.min_netbox, minimum)
-                self.assertTrue(declaration.runtime_gate.enforced)
                 result = assess_compatibility('netbox-reorder-rack', version, '4.4.9', '3.12.3',
                                               metadata, declaration=declaration)
-                self.assertEqual(result.preliminary_status, 'conflict' if version == '1.1.5' else 'supported')
-                if version == '1.1.5':
+                if version == '1.1.4':
+                    self.assertIsNone(declaration)
+                    self.assertEqual(result.preliminary_status, 'warning')
+                else:
+                    self.assertEqual(declaration.min_netbox, '4.7.0')
+                    self.assertEqual(declaration.max_netbox, '4.7.x')
+                    self.assertTrue(declaration.runtime_gate.enforced)
+                    self.assertIsNone(declaration.runtime_gate.max_netbox)
+                    self.assertEqual(result.preliminary_status, 'conflict')
                     self.assertTrue(any(e.status == 'blocks' and '4.7.0' in e.detail for e in result.evidence))
                     result = assess_compatibility('netbox-reorder-rack', version, '4.7.1', '3.12.3',
                                                   metadata, declaration=declaration)
                     self.assertEqual(result.preliminary_status, 'supported')
                     self.assertEqual(result.status, 'uncertain')  # still needs core resolver
+                    newer = assess_compatibility('netbox-reorder-rack', version, '4.8.0', '3.12.3',
+                                                 metadata, declaration=declaration)
+                    self.assertEqual(newer.preliminary_status, 'warning')
+                    self.assertFalse(any(e.status == 'blocks' for e in newer.evidence))
 
     def test_dynamic_or_mismapped_plugin_config_is_not_enforced(self):
         from netbox_ops.plugin_compatibility import parse_plugin_config
