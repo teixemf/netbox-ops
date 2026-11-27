@@ -577,5 +577,6 @@
   "upgrade_ltree_admin_fingerprint": "Impressão digital da revisão ltree: {fingerprint}",
   "upgrade_ltree_admin_unavailable": "Instalação automática indisponível para esta base de dados/esquema ou permissões; consultar o DBA.",
   "upgrade_ltree_admin_confirm": "Confirmar instalação de ltree na base de dados revista.",
-  "upgrade_ltree_admin_success": "ltree instalada e utilizável; backup da base de dados: {backup}"
+  "upgrade_ltree_admin_success": "ltree instalada e utilizável; backup da base de dados: {backup}",
+  "upgrade_overlap_review": "  {name}: local {local}; core {core}. Declaração local mantida; resolver em conjunto com o pin core exato."
 }

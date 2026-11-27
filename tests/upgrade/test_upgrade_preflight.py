@@ -122,11 +122,48 @@ class DependencyReviewTests(unittest.TestCase):
         self.assertIn('not run', summary)
         self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), self.local)
 
-    def test_unpinned_disabled_requirement_blocks_before_resolver(self):
-        (self.root / 'local_requirements.txt').write_bytes(b'disabled-plugin\n')
+    def test_unpinned_non_plugin_preference_and_reviewed_binding(self):
+        local = b'disabled-plugin  # preserve\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
         plan = self.review(self.build())
+        self.assertTrue(plan.can_execute)
+        self.assertIn('disabled-plugin==1.0', self.resolver.call_args.args[0])
+        review = plan.dependency_reviews[0]
+        self.assertFalse(review.local_diagnostics)
+        self.assertNotIn('disabled-plugin', dict(review.exact_pins))
+        self.assertEqual(dict(review.resolution.packages)['disabled-plugin'], '1.0')
+        pins = prepare_plugin_upgrade(plan, local, self.read.return_value, stage_index=0)
+        bound = bind_reviewed_dependencies(plan, 0, 'b' * 40, self.read.return_value, pins)
+        self.assertIn('disabled-plugin==1.0', bound.local_pins)
+        self.assertEqual(bound.requirements, local)
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
+
+    def test_unpinned_non_plugin_can_change_only_after_reviewed_resolution(self):
+        local = b'disabled-plugin[foo]  # preserve\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        preferred = self.resolver.return_value
+        changed = replace(preferred, packages=(('django', '6.1.0'), ('disabled-plugin', '2.0'),
+                                               ('transitive', '2.0')))
+        self.resolver.side_effect = [DependencyPreflight('blocked', 'conflict', True), changed]
+        plan = self.review(self.build())
+        self.assertTrue(plan.can_execute)
+        self.assertIn('disabled-plugin[foo]==1.0', self.resolver.call_args_list[0].args[0])
+        self.assertIn('disabled-plugin[foo]', self.resolver.call_args_list[1].args[0])
+        self.assertTrue(self.resolver.call_args_list[1].kwargs['allow_unpinned'])
+        self.assertIn(('disabled-plugin', '1.0', '2.0'), plan.dependency_reviews[0].changes)
+        pins = prepare_plugin_upgrade(plan, local, self.read.return_value, stage_index=0)
+        bound = bind_reviewed_dependencies(plan, 0, 'b' * 40, self.read.return_value, pins)
+        self.assertIn('disabled-plugin[foo]==2.0', bound.local_pins)
+        self.assertEqual(bound.requirements, local)
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
+
+    def test_bare_configured_plugin_remains_a_pin_blocker(self):
+        local = b'disabled-plugin\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        packages = (self.installed[0], replace(self.installed[1], modules=('disabled_plugin',)))
+        plan = self.review(self.build(inventory_packages=packages, enabled=('disabled_plugin',)))
         self.assertFalse(plan.can_execute)
-        self.assertIn('Pin unselected local packages', ' '.join(plan.blockers))
+        self.assertIn('Pin unselected configured plugins', ' '.join(plan.blockers))
         self.resolver.assert_not_called()
         item, = plan.dependency_reviews[0].local_diagnostics
         self.assertEqual((item.name, item.declaration, item.installed, item.stage, item.reason, item.action),
@@ -143,8 +180,8 @@ class DependencyReviewTests(unittest.TestCase):
         plan = self.review(self.build())
         self.assertFalse(plan.can_execute)
         diagnostics = {item.name: item for item in plan.dependency_reviews[0].local_diagnostics}
-        self.assertEqual(diagnostics['disabled-plugin'].reason, 'mismatched')
-        self.assertEqual(diagnostics['missing-package'].reason, 'missing')
+        self.assertNotIn('disabled-plugin', diagnostics)
+        self.assertNotIn('missing-package', diagnostics)
         self.assertEqual(diagnostics['private'].reason, 'ambiguous')
         self.assertTrue(all(item.action == 'manual-review' for item in diagnostics.values()))
         self.assertNotIn('secret', '\n'.join(summary_lines(plan, Translator('en'), details=True)))
@@ -155,7 +192,8 @@ class DependencyReviewTests(unittest.TestCase):
     def test_compatibility_block_keeps_independent_local_diagnostics_without_resolver(self):
         local = b'disabled-plugin\n'
         (self.root / 'local_requirements.txt').write_bytes(local)
-        base = self.build()
+        packages = (self.installed[0], replace(self.installed[1], modules=('disabled_plugin',)))
+        base = self.build(inventory_packages=packages, enabled=('disabled_plugin',))
         blocked = replace(base, blockers=('Plugin compatibility conflict',))
         plan = self.review(blocked)
         self.assertFalse(plan.can_execute)

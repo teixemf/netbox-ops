@@ -35,6 +35,7 @@ if [[ "$scenario" == cross-minor ]]; then
   plugin=netbox-reorder-rack
   old_plugin=1.1.4
   new_plugin=1.1.5
+  NEEDRESTART_MODE=l apt-get install -y --no-install-recommends libldap-dev libsasl2-dev libssl-dev python3.12-dev
 fi
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
@@ -58,7 +59,7 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
 elif [[ "$scenario" == cross-minor ]]; then
   printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
-  printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
+  printf '%s\n' 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0' >> "$root/local_requirements.txt"
 else
   printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
 fi
@@ -88,6 +89,9 @@ runuser -u postgres -- createdb --owner=netbox netbox
 # no fixture constraint, and executes the unmodified official script.
 if [[ "$old" == 4.7.2 || "$old" == 4.4.10 ]]; then
   printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
+  if [[ "$scenario" == cross-minor ]]; then
+    printf '%s\n' 'python-ldap==3.4.8' >> "$scratch/source-constraints.txt"
+  fi
   (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
 else
   (cd "$root" && PYTHON="$python" bash upgrade.sh)
@@ -184,28 +188,23 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   echo 'PASS: additional local package excluded from plugin selection'
 fi
 
-# Reproduce the reported incompatible plugin upgrade and local pin blocker
+# Reproduce the reported incompatible plugin upgrade and preserve a bare local dependency
 # against real published releases, before any maintenance begins.
 if [[ "$scenario" == cross-minor ]]; then
   # The source fixture installed the exact version. Simulate the operator's
   # existing bare declaration without changing any installed package.
-  sed -i 's/^tomli-w==1.2.0$/tomli-w  # preserve local intent/' "$root/local_requirements.txt"
+  sed -i -e 's/^tomli-w==1.2.0$/tomli-w  # preserve local intent/' \
+         -e 's/^django-auth-ldap==5.4.0$/django-auth-ldap  # preserve LDAP declaration/' "$root/local_requirements.txt"
   for unit in netbox netbox-rq; do
     systemctl show -p ActiveEnterTimestampMonotonic --value "$unit" > "$scratch/$unit"
   done
   python3 - "$target" "$plugin" "$new_plugin" <<'PY'
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
 sys.path.insert(0, '/opt/netbox-ops')
 from netbox_ops.config import load_config
-from netbox_ops.i18n import Translator
-from netbox_ops.tui import CursesMenu
-from netbox_ops.upgrade_dashboard import UpgradeDashboard
-from netbox_ops.upgrade_targets import TargetModel, TargetSelection
+from netbox_ops.plugin_inventory import inventory_plugins
 from netbox_ops.upgrade_ui import discover_context, make_plan
-from tests.helpers.fake_screen import FakeScreen
 
 target, plugin, version = sys.argv[1:]
 cfg = load_config()
@@ -222,34 +221,20 @@ assert all(r.resolution.status == 'not-run' for r in bad.dependency_reviews)
 assert requirements.read_bytes() == original
 print('PASS: real reorder-rack release rejected on NetBox 4.4.x')
 
+inventory = inventory_plugins(context.installation, local_pin_names=('tomli-w', 'django-auth-ldap', 'python-ldap'))
+assert not any(p.package in ('tomli-w', 'django-auth-ldap', 'python-ldap') for p in inventory.proposals)
 plan = make_plan(context, 'stack', target, {plugin: version})
-assert not plan.can_execute
-assert any(d.name == 'tomli-w' and d.installed == '1.2.0' and d.action == 'review-pin'
-           for r in plan.dependency_reviews for d in r.local_diagnostics)
-assert all(r.resolution.status == 'not-run' for r in plan.dependency_reviews)
+assert plan.can_execute, plan.blockers
+assert all(r.resolution.status == 'passed' and r.resolution.checked_core for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('tomli-w') == '1.2.0' for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('django-auth-ldap') == '5.4.0' for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('python-ldap') == '3.4.8' for r in plan.dependency_reviews)
+assert not any(d.name == 'tomli-w' for r in plan.dependency_reviews for d in r.local_diagnostics)
 assert any(r.ltree in ('installed', 'available') for r in plan.dependency_reviews)
-screen = FakeScreen([10, *map(ord, 'PIN'), 10, 10], dimensions=(16, 50))
-menu = CursesMenu(screen, Translator('en'))
-dashboard = UpgradeDashboard(menu)
-dashboard.cfg = cfg
-dashboard.model = TargetModel(context)
-dashboard.model.selection = TargetSelection(target, ((plugin, version),))
-dashboard.plan = plan
-dashboard.plan_selection = dashboard.model.selection
-assert dashboard._correctable_pins() == {'tomli-w'}
-assert dashboard._enabled('pins') and not dashboard._enabled('execute')
-# Only menu navigation is scripted; the displayed exact review, literal
-# PIN challenge, protected backup and actual mutation are not mocked.
-with ThreadPoolExecutor(max_workers=1) as pool, patch.object(menu, '_choose', side_effect=[0, 2]):
-    dashboard._review_plan_pins(pool)
-assert dashboard.plan is None and dashboard._revalidate_after_pins
-assert not dashboard._enabled('execute')
-assert requirements.read_bytes() == original.replace(b'tomli-w  #', b'tomli-w==1.2.0  #')
-backups = list(Path('/var/lib/netbox-ops/pin-recovery').glob('pins-*/local_requirements.txt'))
-assert len(backups) == 1 and backups[0].read_bytes() == original
-assert backups[0].stat().st_mode & 0o777 == 0o600
-assert backups[0].parent.stat().st_mode & 0o777 == 0o700
-print('PASS: contextual exact pin correction retained protected original')
+assert requirements.read_bytes() == original
+assert not list(Path('/var/lib/netbox-ops/pin-recovery').glob('pins-*/local_requirements.txt'))
+print('PASS: bare non-plugin requirement resolved at installed version without permanent pin')
+
 PY
   [[ $(git -C "$root" rev-parse HEAD) == "$commit" && ! -e "$marker" ]]
   [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
@@ -493,7 +478,10 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
 fi
 if [[ "$scenario" == cross-minor ]]; then
   grep -Fxq "$plugin==$new_plugin" "$root/local_requirements.txt"
-  grep -Fxq 'tomli-w==1.2.0  # preserve local intent' "$root/local_requirements.txt"
+  grep -Fxq 'tomli-w  # preserve local intent' "$root/local_requirements.txt"
+  grep -Fxq 'django-auth-ldap  # preserve LDAP declaration' "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import ldap, importlib.metadata as m; assert m.version("django-auth-ldap")=="5.4.0"; assert m.version("python-ldap")=="3.4.8"'
+  echo 'PASS: unpinned LDAP declaration preserved and native LDAP module imports'
   "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]; assert m.version("tomli-w")=="1.2.0"' "$plugin" "$new_plugin"
   curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
   python3 - "$root" "$new_plugin" <<'PY'

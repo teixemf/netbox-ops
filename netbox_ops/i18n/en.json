@@ -577,5 +577,6 @@
   "upgrade_ltree_admin_fingerprint": "ltree review fingerprint: {fingerprint}",
   "upgrade_ltree_admin_unavailable": "Automatic installation unavailable for this database/schema or permissions; ask your DBA.",
   "upgrade_ltree_admin_confirm": "Confirm installation of ltree in the reviewed database.",
-  "upgrade_ltree_admin_success": "ltree installed and usable; database backup: {backup}"
+  "upgrade_ltree_admin_success": "ltree installed and usable; database backup: {backup}",
+  "upgrade_overlap_review": "  {name}: local {local}; core {core}. Local declaration retained; resolve together with the exact core pin."
 }

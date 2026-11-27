@@ -76,7 +76,7 @@ class RequirementOverlap:
     name: str
     local_pin: str
     core_pin: str
-    status: str  # redundant, conflict, ambiguous
+    status: str  # redundant, review, conflict, ambiguous
 
 
 @dataclass(frozen=True)

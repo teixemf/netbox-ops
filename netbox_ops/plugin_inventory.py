@@ -335,40 +335,11 @@ def inventory_plugins(installation: GitNetBoxInstallation, *,
         suffix = before[len(before.rstrip('\r\n')):]
         after = f'{match.group(1)}{match.group(2)}{match.group(3) or ""}=={package.version}{match.group(4)}{suffix}'
         proposals.append(PinProposal(package.name, package.version, entry.number, before, after))
-    # Contextual review may explicitly request bare, already installed local
-    # packages. This does not make them eligible plugin upgrade targets.
-    requested = tuple(sorted(set(normalize_name(name) for name in local_pin_names)))
-    if requested and enabled is not None and not unknown_sources:
-        # Never propose a local pin for a core dependency or a complex file.
-        core = _read_regular(root / 'requirements.txt', _REQUIREMENTS_LIMIT)
-        core_text = core.decode('utf-8') if core is not None else ''
-        core_entries = _parse_requirements(core_text)
-        core_names = {normalize_name(item.name) for item in core_entries}
-        core_simple = bool(core_entries) and all(
-            not line.strip() or line.lstrip().startswith('#') or
-            (match := _HEAD.fullmatch(line)) is not None and _PIN_TAIL.fullmatch(match[4])
-            for line in core_text.splitlines())
-        existing = {normalize_name(item.package) for item in proposals}
-        simple = all(not line.strip() or line.lstrip().startswith('#') or
-                     (match := _HEAD.fullmatch(line.rstrip('\r\n'))) is not None
-                     and (_BARE_TAIL.fullmatch(match[4]) or _PIN_TAIL.fullmatch(match[4]))
-                     for line in lines)
-        for name in requested:
-            entries = groups.get(name, ())
-            matches = [p for p in installed if normalize_name(p.name) == name]
-            if (not simple or not core_simple or name in core_names or name in existing
-                    or len(entries) != 1 or entries[0].kind != 'bare' or len(matches) != 1
-                    or not _VERSION.fullmatch(matches[0].version)):
-                continue
-            entry = entries[0]
-            package = matches[0]
-            before = lines[entry.number - 1]
-            match = _HEAD.fullmatch(before.rstrip('\r\n'))
-            if match is None:
-                continue
-            suffix = before[len(before.rstrip('\r\n')):]
-            after = f'{match[1]}{match[2]}{match[3] or ""}=={package.version}{match[4]}{suffix}'
-            proposals.append(PinProposal(package.name, package.version, entry.number, before, after))
+    # Contextual review is restricted to the same configured plugin mapping.
+    # An arbitrary local package is never eligible for permanent pin changes.
+    requested = tuple(sorted(set(normalize_name(name) for name in local_pin_names)
+                             & {normalize_name(package.name) for module in enabled or ()
+                                if (package := resolve_plugin_package(installed, module)) is not None}))
     return PluginInventory(root, digest, declared, installed, enabled, tuple(proposals), tuple(warnings), requested)
 
 
@@ -421,8 +392,10 @@ def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
     if not unique or len(unique) != len(selected):
         raise PluginInventoryError('Select a nonempty set of distinct plugin packages')
     available = {normalize_name(item.package): item for item in inventory.proposals}
-    if len(available) != len(inventory.proposals) or any(name not in available for name in unique):
-        raise PluginInventoryError('Only unambiguous proposed pins can be approved')
+    eligible = set(dict(configured_plugin_packages(inventory)))
+    if (len(available) != len(inventory.proposals)
+            or any(name not in available or name not in eligible for name in unique)):
+        raise PluginInventoryError('Only unambiguous proposed pins for configured plugins can be approved')
     with ExclusiveLock():
         try:
             if upgrade_recovery_pending():
