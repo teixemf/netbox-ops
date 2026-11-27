@@ -118,7 +118,12 @@ readiness, the primary reason and the footer before expanding the table.
 Use side-by-side component and plan panels on wider screens; use a compact
 plan summary on narrow or short screens. D/E expose complete evidence. Exact
 validation runs in the existing read-only worker while retaining the dashboard;
-execution stays disabled until the matching plan has been accepted. Dynamic
+execution stays disabled until the matching plan has been accepted. For an
+actual offline curses capture (synthetic plan, no live installation), run
+`python -m tests.upgrade.terminal_dashboard_capture /tmp/dashboard.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite captures 50x16, 80x24, 120x30 and 160x45, including resize.
+Dynamic
 pin actions retain focus by identity, never implicitly move focus to execution.
 Discovery opens directly in Upgrade Management. Show unknown values until
 installed inventory is observed, then publish installed rows while official

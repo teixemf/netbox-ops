@@ -162,9 +162,9 @@ class UpgradeDashboard:
                 selection, self._validation_selection = self._validation_selection, None
                 try:
                     self._accept_validation(future.result(), selection)
-                except Exception:
+                except Exception as exc:
                     self._invalidate_plan()
-                    self.error = self.t('ut_validation_error')
+                    self.error = f'{self.t("ut_validation_error")} {safe_text(exc)}'
                 continue
             try:
                 result = future.result()
@@ -288,7 +288,7 @@ class UpgradeDashboard:
                 lines.append((t('ut_pin_review_from_plan'), 'title'))
         elif self.snapshot is not None and self.model is not None and self.snapshot.selection == self.model.selection:
             status = self.snapshot.status
-            lines.append((t('ut_preliminary_status', status=t('ut_' + status)), _STYLES[status]))
+            preliminary = (t('ut_preliminary_status', status=t('ut_' + status)), _STYLES[status])
             for row in self.snapshot.rows:
                 reasons = [e for e in row.assessment.evidence if e.status == 'blocks']
                 if reasons:
@@ -297,6 +297,7 @@ class UpgradeDashboard:
             else:
                 if self.snapshot.warnings:
                     lines.append((self.snapshot.warnings[0], 'warning'))
+            lines.append(preliminary)
             if self._enabled('validate'):
                 lines.append((t('ut_validate_next'), 'muted'))
         elif self._enabled('validate'):
@@ -558,9 +559,6 @@ class UpgradeDashboard:
                 menu._paint(detail_y, 2, w - 4, height)
                 menu._put(detail_y, 3, _clip(t('ut_plan') + ' | ' + t('ut_details_key'), width), 'section')
                 lines = self._overview_lines()
-                # On short terminals prefer the reason over the preliminary status.
-                if len(lines) > 2 and lines[1][1] not in ('failure', 'warning') and lines[2][1] in ('failure', 'warning'):
-                    lines[1], lines[2] = lines[2], lines[1]
                 for i, (line, style) in enumerate(lines[:height - 1]):
                     menu._put(detail_y + 1 + i, 3, _clip(line, width), style)
         menu.stdscr.refresh()

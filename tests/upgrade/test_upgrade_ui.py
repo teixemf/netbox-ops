@@ -807,6 +807,69 @@ class UpgradeTuiTests(InterfaceFixture):
                     self.assertEqual(dashboard.cursor, 24)
                     self.assertFalse(dashboard._enabled('execute'))
 
+    def test_real_curses_dashboard_capture(self):
+        import errno
+        import json
+        import os
+        import pty
+        import select
+        import subprocess
+        import sys
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for language, monochrome in (('en', False), ('pt', True)):
+                with self.subTest(language=language, monochrome=monochrome):
+                    output = Path(tmp) / f'{language}.json'
+                    master, slave = pty.openpty()
+                    env = dict(os.environ, TERM='xterm-256color', LINES='45', COLUMNS='160')
+                    env.pop('NO_COLOR', None)
+                    if monochrome:
+                        env['NO_COLOR'] = '1'
+                    proc = None
+                    terminal_output = bytearray()
+                    try:
+                        proc = subprocess.Popen(
+                            [sys.executable, '-m', 'tests.upgrade.terminal_dashboard_capture',
+                             str(output), language], stdin=slave, stdout=slave, stderr=slave, env=env)
+                        os.close(slave)
+                        slave = None
+                        deadline = time.monotonic() + 20
+                        while proc.poll() is None:
+                            self.assertLess(time.monotonic(), deadline, 'curses capture timed out')
+                            if select.select([master], [], [], 0.1)[0]:
+                                try:
+                                    terminal_output.extend(os.read(master, 65536))
+                                except OSError as exc:
+                                    if exc.errno != errno.EIO:
+                                        raise
+                        self.assertEqual(proc.returncode, 0, terminal_output.decode(errors='replace'))
+                    finally:
+                        if proc is not None and proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+                        if slave is not None:
+                            os.close(slave)
+                        os.close(master)
+                    frames = json.loads(output.read_text())
+                    t = Translator(language)
+                    self.assertEqual([(f['height'], f['width']) for f in frames],
+                                     [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160)])
+                    for frame in frames:
+                        self.assertEqual(frame['color'], not monochrome)
+                        lines = frame['lines']
+                        operations = next(i for i, line in enumerate(lines) if t('ut_operations') in line)
+                        readiness = next(i for i, line in enumerate(lines)
+                                         if t('upgrade_status_blocked') in line)
+                        self.assertLess(operations, readiness)
+                        self.assertLess(readiness, frame['height'] - 2)
+                        self.assertTrue(any('Incompatible plugin:' in line for line in lines))
+                        self.assertTrue(any('plugin-24' in line for line in lines))
+                        if frame['width'] in (50, 80, 120, 160):
+                            print(f"Actual curses capture: {language} {frame['width']}x{frame['height']}"
+                                  f" color={frame['color']}\n" + '\n'.join(lines))
+
     def test_dashboard_validation_stays_on_screen_and_rejects_stale_result(self):
         from concurrent.futures import Future
 
