@@ -293,7 +293,8 @@ class CursesMenu:
             return None
         lines: list[tuple[int | None, str, str]] = []
         select_to_row = []
-        if subtitles and len(subtitles) != len(entries) or details and len(details) != len(entries):
+        if ((subtitles and len(subtitles) != len(entries))
+                or (details and len(details) != len(entries))):
             raise ValueError('Selector descriptions must match entries')
         for i, (label, kind) in enumerate(entries):
             if i in headings:
@@ -342,13 +343,21 @@ class CursesMenu:
                 panel_width = min(w - 6, max(len(heading), *(len(label) for label in labels)) + 4)
                 detail_width = w - 6
                 detail_lines = []
+                detail_height = 0
                 if details:
-                    for text, style in details[index] if armed else ((self.t('tui_selector_focus'), 'muted'),):
-                        detail_lines.extend((part, style) for part in textwrap.wrap(
-                            safe_text(text), width=detail_width - 4))
-                # A heading, one list row and the footer must always fit.
-                detail_height = min(len(detail_lines) + 1, max(0, h - start - 6)) if details else 0
-                rows_visible = max(1, h - start - 4 - (detail_height + 1 if detail_height else 0))
+                    def wrapped(items):
+                        return [(part, style) for text, style in items for part in
+                                textwrap.wrap(safe_text(text), width=detail_width - 4)]
+                    prompt = wrapped(((self.t('tui_selector_focus'), 'muted'),))
+                    options = [wrapped(items) for items in details]
+                    detail_lines = options[index] if armed else prompt
+                    # Reserve the same detail space while focus changes. Keep
+                    # at least one option, one heading, and the panel gap.
+                    detail_height = min(max(map(len, [prompt, *options])) + 1,
+                                        max(0, h - start - 5))
+                rows_visible = max(1, h - start - 4)
+                if detail_height:
+                    rows_visible = max(1, h - start - 4 - detail_height)
                 scroll = min(scroll, max(0, len(lines) - rows_visible))
                 target = select_to_row[index] if armed else 0
                 if target < scroll:
@@ -357,6 +366,9 @@ class CursesMenu:
                     scroll = target - rows_visible + 1
                 visible = lines[scroll:scroll + rows_visible]
                 self._paint(start, 3, panel_width, len(visible) + 1)
+                if detail_height and len(lines) > rows_visible and armed:
+                    counter = f' {index + 1}/{len(entries)}'
+                    heading = heading[:max(0, panel_width - 4 - len(counter))] + counter
                 self._put(start, 5, heading[:panel_width - 4], 'section')
                 for y, (item_idx, label, style) in enumerate(visible, start + 1):
                     label = labels[scroll + y - start - 1][:panel_width - 4]
@@ -372,7 +384,7 @@ class CursesMenu:
                     self._put(detail_y, 5, detail_heading[:detail_width - 4], 'section')
                     for y, (text, style) in enumerate(detail_lines[:detail_height - 1], detail_y + 1):
                         self._put(y, 5, text, style)
-                if len(lines) > rows_visible and armed:
+                if not detail_height and len(lines) > rows_visible and armed:
                     self._put(h - 3, 3, f'{index + 1}/{len(entries)}', 'muted')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
@@ -2093,7 +2105,8 @@ class CursesMenu:
         kinds = ('db', 'media', 'all')
         entries = [(self.t('nbo_restore_' + kind), '') for kind in kinds]
         details = [((self.t('nbo_restore_' + kind + '_desc'), ''),
-                    (self.t('nbo_restore_scope_warning'), 'warning')) for kind in kinds]
+                    (self.t('nbo_restore_downtime_short'), 'warning'),
+                    (self.t('nbo_restore_safety_short'), 'warning')) for kind in kinds]
         result = self._choose(self.t('nbo_restore_choose'), entries, self.t('nbo_restore_scope_hint'),
                               escape_clears_selection=False,
                               overview=[(self.t('nbo_restore_source'), 'section'),

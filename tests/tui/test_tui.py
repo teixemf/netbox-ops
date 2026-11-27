@@ -134,6 +134,10 @@ class MenuNavigationTests(unittest.TestCase):
                     self.assertEqual(len(db_highlight), len(combined_highlight))
                     self.assertIn(menu.t('nbo_create_name_combined'), combined_highlight)
                     self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in cleared))
+                    combined_text = ' '.join(text for _, _, text, _ in combined)
+                    self.assertIn(menu.t('nbo_create_downtime_combined'), combined_text)
+                    self.assertNotIn(menu.t('nbo_create_downtime_combined'),
+                                     ' '.join(text for _, _, text, _ in db))
                     self.assertTrue(all(y < dimensions[0] for y, _, _, _ in combined))
 
     def test_restore_scope_preserves_explicit_focus_and_escape(self):
@@ -148,6 +152,18 @@ class MenuNavigationTests(unittest.TestCase):
             self.assertEqual(menu._choose_restore_scope(entry), result)
             self.assertTrue(any(text == 'backup.tar.gz' for _, _, text, _ in screen.frames[0]))
             self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in screen.frames[0]))
+
+    def test_restore_warning_fits_small_terminal(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        for language in ('en', 'pt'):
+            screen = FakeScreen([curses.KEY_DOWN, 27], dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator(language))
+            self.assertIsNone(menu._choose_restore_scope(SimpleNamespace(path=Path('backup.tar.gz'))))
+            visible = ' '.join(text for _, _, text, _ in screen.frames[-1])
+            self.assertIn(menu.t('nbo_restore_downtime_short'), visible)
+            self.assertIn(menu.t('nbo_restore_safety_short'), visible)
 
     def test_selector_long_list_remains_navigable(self):
         screen = FakeScreen([curses.KEY_DOWN, curses.KEY_END, 10], dimensions=(16, 50))

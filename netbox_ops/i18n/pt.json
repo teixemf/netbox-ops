@@ -205,6 +205,8 @@
   "nbo_create_detail_combined": "Base de dados e ficheiros; exclui configuração.",
   "nbo_create_downtime_live": "Os serviços NetBox não são parados.",
   "nbo_create_downtime_combined": "Pára temporariamente os serviços NetBox e RQ activos.",
+  "nbo_restore_downtime_short": "Pára temporariamente NetBox/RQ activos.",
+  "nbo_restore_safety_short": "Confirmação e backup de segurança.",
   "nbo_create_title": "Criar backup",
   "nbo_create_kind_db": "Base de dados / PostgreSQL",
   "nbo_create_kind_media": "Media / ficheiros carregados",
