@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from . import __version__
+from .backup_progress import (BackupProgress, BackupTask, BackupTaskEvent, batch_tasks,
+                              create_tasks, restore_tasks)
 from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
 from .journal import JournalPanel, JournalViewport
@@ -120,6 +122,7 @@ class CursesMenu:
         self.cpu_display: dict[str, str] = {}
         self._service_steps: list[tuple[str, str, str]] = []
         self._backup_steps: list[tuple[str, str, str]] = []
+        self._backup_step_indexes: dict[tuple[str, str], int] = {}
 
     def _init_screen(self) -> None:
         self.stdscr.keypad(True)
@@ -1714,46 +1717,46 @@ class CursesMenu:
                 typed += chr(key)
                 invalid = False
 
-    def _run_backup_job(self, title: str, worker) -> bool:
-        """Draw progress and keep the final tasks/results in that same panel.
-
-        The bar counts completed stages or files; it does not estimate bytes.
-        All curses access remains in the UI thread.
-        """
-        events: queue.SimpleQueue[tuple[str,int,int,str]] = queue.SimpleQueue()
-        progress: tuple[str, int, int, str] = ('prepare', 0, 1, '')
+    def _run_backup_job(self, title: str, worker, *, tasks: Sequence[BackupTask] = ()) -> bool:
+        """Report explicit task events; only the worker's result establishes success."""
+        events: queue.SimpleQueue[BackupTaskEvent] = queue.SimpleQueue()
+        progress = ('prepare', 0, sum(task.applicable for task in tasks), '')
         tick = 0
         self._backup_steps = []
-        self._backup_started_counts = {}
+        self._backup_step_indexes = {}
+        for task in tasks:
+            self._record_backup_step(BackupTaskEvent(
+                task, 'pending' if task.applicable else 'not_applicable', 0, progress[2]))
         self.stdscr.timeout(150)
         result = None
         error = ''
+
+        def drain():
+            nonlocal progress
+            while not events.empty():
+                event = events.get_nowait()
+                self._record_backup_step(event)
+                phase, _, _, detail = progress
+                if event.state == 'running':
+                    phase, detail = event.task.phase, event.task.detail
+                progress = phase, event.done, event.total, detail
+
         try:
+            # Display the plan before starting the worker.
+            self._draw_backup_progress(title, progress, tick)
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(worker, lambda name, done, total, detail='':
-                                     events.put((name, done, total, detail)))
+                future = pool.submit(worker, events.put)
                 while not future.done():
-                    while not events.empty():
-                        progress = events.get_nowait()
-                        self._record_backup_step(progress)
+                    drain()
                     self._draw_backup_progress(title, progress, tick)
                     tick += 1
                     self.stdscr.getch()  # No cancellation while a transaction runs.
-                while not events.empty():
-                    progress = events.get_nowait()
-                    self._record_backup_step(progress)
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    error = safe_text(exc)
-                    if self._backup_steps:
-                        name, _, info = self._backup_steps[-1]
-                        self._backup_steps[-1] = (name, 'error', info)
+                drain()
+                result = future.result()
+                progress = ('complete', progress[1], progress[2], '')
         except Exception as exc:
-            error = safe_text(exc)
-            if self._backup_steps:
-                name, _, info = self._backup_steps[-1]
-                self._backup_steps[-1] = (name, 'error', info)
+            error = safe_text(exc) or type(exc).__name__
+            drain()
         finally:
             self.stdscr.timeout(-1)
         self._draw_backup_progress(title, progress, tick,
@@ -1761,23 +1764,15 @@ class CursesMenu:
         self._wait_result_ack()
         return not bool(error)
 
-    def _record_backup_step(self, progress: tuple) -> None:
-        """Keep an inspectable task timeline, including individual batch files."""
-        phase, done, total, detail = progress
-        file_step = phase in ('verify', 'delete') and bool(detail)
-        key = f'{phase}:{detail}' if file_step else phase
-        if not hasattr(self, '_backup_started_counts'):
-            self._backup_started_counts = {}
-        if not self._backup_steps or self._backup_steps[-1][0] != key:
-            if self._backup_steps and self._backup_steps[-1][1] == 'running':
-                old = self._backup_steps[-1]
-                self._backup_steps[-1] = (old[0], 'done', old[2])
-            self._backup_steps.append((key, 'running', detail))
-            self._backup_started_counts[key] = done
-        completed = (phase == 'complete' or
-                     (file_step and done > self._backup_started_counts[key]))
-        if completed:
-            self._backup_steps[-1] = (key, 'done', detail)
+    def _record_backup_step(self, event: BackupTaskEvent) -> None:
+        """Update the exact task; never infer success from another task's arrival."""
+        key = event.task.key
+        row = (event.task.phase, event.state, safe_text(event.task.detail))
+        if key in self._backup_step_indexes:
+            self._backup_steps[self._backup_step_indexes[key]] = row
+        else:
+            self._backup_step_indexes[key] = len(self._backup_steps)
+            self._backup_steps.append(row)
 
     def _draw_backup_progress(self, title: str, progress: tuple, tick: int,
                               *, finished: bool = False, error: str = '',
@@ -1790,10 +1785,9 @@ class CursesMenu:
         phase, done, total, detail = progress
         self._put(4, 3, self.t('nbo_stage_'+phase), 'section')
         length = max(10, min(50, w-20))
-        if finished and not error:
-            done = total
         filled = round(length * done / total) if total else 0
-        self._put(7, 3, '['+'█'*filled+'░'*(length-filled)+'] '+f'{done}/{total}',
+        count = f'{done}/{total}' if total else '—'
+        self._put(7, 3, '['+'█'*filled+'░'*(length-filled)+'] '+count,
                   'failure' if error else 'title')
         status = (self.t('nbo_job_failed') if error else self.t('nbo_job_success')) if finished \
                  else self.t('nbo_working') + '.'*(1+(tick % 4))
@@ -1807,13 +1801,15 @@ class CursesMenu:
         elif detail:
             self._put(10, 3, detail[:max(8,w-9)], 'muted')
         self._put(12, 3, self.t('nbo_task_header'), 'section')
-        for i, (name, step_status, info) in enumerate(self._backup_steps[-max(1,h-17):]):
-            marker = 'OK' if step_status=='done' else ('!!' if step_status=='error' else '..')
-            step_phase = name.split(':',1)[0]
-            self._put(13+i, 4, f'{marker} {self.t("nbo_stage_"+step_phase)}'+
-                      (f' — {info}' if info else '')[:max(0,w-35)],
-                      'success' if step_status=='done' else
-                      ('failure' if step_status=='error' else 'muted'))
+        visible = max(1, h - 15)
+        active = next((i for i, (_, state, _) in enumerate(self._backup_steps)
+                       if state == ('failed' if error else 'running')), 0)
+        offset = max(0, active - visible + 1)
+        for i, (phase_name, step_status, info) in enumerate(self._backup_steps[offset:offset + visible]):
+            marker = self.t('nbo_task_state_' + step_status)
+            style = {'done': 'success', 'failed': 'failure', 'running': 'title'}.get(step_status, 'muted')
+            self._put(13 + i, 4, f'{marker} {self.t("nbo_stage_" + phase_name)}' +
+                      (f' — {info}' if info else '')[:max(0, w - 35)], style)
         self.stdscr.refresh()
 
     def _targets_summary(self, names: Sequence[str], width: int) -> str:
@@ -2403,7 +2399,8 @@ class CursesMenu:
                         if self._confirm_token(self.t('nbo_create_title'),
                                                self.t('nbo_confirm_create',kind=kind), 'CREATE'):
                             self._run_backup_job(self.t('nbo_create_title'),
-                                                 lambda cb: manager.backup(kind,progress=cb))
+                                                 lambda cb: manager.backup(kind, task_progress=cb),
+                                                 tasks=create_tasks(kind))
                             reload_inventory()
                     self.stdscr.timeout(120)
                 elif key in (ord('r'), ord('R')) and len(marked) == 1:
@@ -2443,11 +2440,12 @@ class CursesMenu:
                               f'{self._human_size(entry.size)}. '+self.t('nbo_restore_warning'))
                     if self._confirm_token(self.t('nbo_restore_choose'),notice,token):
                         def restore_worker(cb, item=entry, scope=only, unknown=accept_unknown):
-                            opts = {'only': scope, 'progress': cb}
+                            opts = {'only': scope, 'task_progress': cb}
                             if unknown:
                                 opts['accept_unknown'] = True
                             return manager.restore(item.kind, item.path, **opts)
-                        self._run_backup_job(self.t('nbo_restore_choose'), restore_worker)
+                        self._run_backup_job(self.t('nbo_restore_choose'), restore_worker,
+                                             tasks=restore_tasks(entry.kind, only))
                         reload_inventory()
                     self.stdscr.timeout(120)
                 elif key in (ord('d'), ord('D')) and marked:
@@ -2460,14 +2458,16 @@ class CursesMenu:
                                            target_names=[e.path.name for e in targets]):
                         self._run_backup_job(self.t('nbo_delete_title'),
                              lambda cb, paths=[e.path for e in targets]:
-                             self._delete_selected_job(manager, paths, cb))
+                             self._delete_selected_job(manager, paths, cb),
+                             tasks=batch_tasks('delete', (e.path.name for e in targets), prepare=True))
                         reload_inventory()
                     self.stdscr.timeout(120)
                 elif key in (ord('v'), ord('V')) and marked:
                     targets = marked
                     self.stdscr.timeout(-1)
                     if self._run_backup_job(self.t('nbo_verify_title'),
-                                            lambda cb, selected=targets: self._verify_job_many(manager, selected, cb)):
+                                            lambda cb, selected=targets: self._verify_job_many(manager, selected, cb),
+                                            tasks=batch_tasks('verify', (e.path.name for e in targets))):
                         verified.update(fingerprint(e) for e in targets)
                     self.stdscr.timeout(120)
                 # Enter on the file list remains a no-op; I opens the full
@@ -2478,24 +2478,21 @@ class CursesMenu:
 
     @staticmethod
     def _verify_job_many(manager, entries, cb):
-        cb('verify', 0, len(entries), '')
-        for i, entry in enumerate(entries):
-            cb('verify', i, len(entries), entry.path.name)
-            manager.verify(entry.kind, entry.path)
-            cb('verify', i+1, len(entries), entry.path.name)
-        cb('complete', len(entries), len(entries), '')
+        tracker = BackupProgress(batch_tasks('verify', (e.path.name for e in entries)), events=cb)
+        with tracker.operation():
+            for entry in entries:
+                with tracker.step('verify', entry.path.name):
+                    manager.verify(entry.kind, entry.path)
         return f'{len(entries)} backups verified'
 
     @staticmethod
     def _delete_selected_job(manager, paths, cb):
-        count, freed = manager.delete_backups(paths, progress=cb)
+        count, freed = manager.delete_backups(paths, task_progress=cb)
         return f'{count} backups deleted; {freed} bytes released'
 
     @staticmethod
     def _verify_job(manager, entry, cb):
-        cb('verify',0,1,'')
-        manager.verify(entry.kind,entry.path)
-        cb('complete',1,1,'')
+        CursesMenu._verify_job_many(manager, [entry], cb)
         return entry.path
 
     @staticmethod
