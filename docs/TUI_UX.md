@@ -78,9 +78,22 @@ remain accessible with D, including complete prerequisite reasons and stage evid
 An asterisk marks a changed target, not a checkbox. Move with arrows/j/k,
 Home/End and Page Up/Down. Enter opens the version picker, D opens scrollable
 component evidence and the complete plan, P reviews local pins, and Tab or
-Shift+Tab switches between rows and actions. The paged picker assesses the
-candidate against the selected platform; D shows evidence and F5 retries the
-page. Enter selects, Esc cancels. Incomplete evidence is not approval.
+Shift+Tab switches between rows and actions.
+
+The version picker opens with Keep installed version first, followed by all
+eligible discovered releases in descending order. It uses the available screen
+height and continuous navigation; Page Up/Down moves by the visible viewport.
+Listing and preliminary compatibility assessment run separately in one
+read-only worker. The selected batch is assessed using existing bounded
+requests, without replacing the picker or blocking navigation. Unassessed rows
+stay explicitly unchecked. Only the version cell highlights focus; status
+colours remain semantic and notes prioritize actual blocking/warning evidence.
+The installed plugin is assessed against the selected NetBox target too.
+D opens complete evidence, F5 retries release metadata and assessments within
+the inventory session (dashboard F5 refreshes official NetBox releases), Enter
+selects and Esc cancels. Cancellation may wait for a bounded in-flight lookup
+to finish before reusing the model. Discovery failure still permits retaining
+the installed version. Incomplete evidence is not approval.
 Discovery opens directly in Upgrade Management. Show unknown values until
 installed inventory is observed, then publish installed rows while official
 release lookup continues. DISCOVERY STATUS reports the actual inventory,

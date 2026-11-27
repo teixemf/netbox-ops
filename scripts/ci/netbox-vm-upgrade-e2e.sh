@@ -172,7 +172,6 @@ from netbox_ops.i18n import Translator
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_dashboard import UpgradeDashboard
 from netbox_ops.upgrade_plan import UpgradePlanError
-from netbox_ops.upgrade_targets import MAX_PICKER_ROWS
 from tests.helpers.fake_screen import FakeScreen
 
 scenario, target, plugin, plugin_target, status_url = sys.argv[1:]
@@ -225,22 +224,15 @@ else:
     raise AssertionError('Non-plugin accepted as target')
 
 def choose(component, version):
-    # Find the pinned fixture version using the public paged catalogue,
-    # then drive the actual picker with navigation keys, not private caches.
-    offset = 0
-    while True:
-        result = model.evaluate(model.request('catalogue', component, offset=offset))
-        assert model.accept(result)
-        positions = [i for i, row in enumerate(result.rows) if row.target == version]
-        if positions:
-            screen.keys = iter([curses.KEY_NPAGE] * (offset // MAX_PICKER_ROWS)
-                               + [curses.KEY_DOWN] * positions[0] + [10])
-            assert dashboard._picker(component) == version
-            model.select(component, version)
-            return
-        offset += MAX_PICKER_ROWS
-        if offset >= result.total:
-            raise AssertionError('Pinned fixture release missing from catalogue')
+    # Enumerate the full eligible list without assessing every version.
+    result = model.evaluate(model.request('listing', component))
+    assert model.accept(result)
+    installed = model.installed.netbox if component is None else dict(model.installed.plugins)[component]
+    assert result.rows[0].target == installed
+    position = next(i for i, row in enumerate(result.rows) if row.target == version)
+    screen.keys = iter([curses.KEY_DOWN] * position + [10])
+    assert dashboard._picker(component) == version
+    model.select(component, version)
 
 if scenario != 'plugins':
     choose(None, target)
