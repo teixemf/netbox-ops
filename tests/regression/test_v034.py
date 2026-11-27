@@ -104,7 +104,7 @@ class BackupView034Tests(unittest.TestCase):
     def test_select_all_then_tab_verify_executes_each_file(self):
         menu, screen = self.menu([ord('*'), 9, curses.KEY_RIGHT,
                                   10, 27, 27, 27], lang='en')
-        def no_side_effect(title, job):
+        def no_side_effect(title, job, *, tasks):
             job(lambda *args: None)
             return True
         with patch.object(menu, '_run_backup_job', side_effect=no_side_effect), \
@@ -129,7 +129,7 @@ class BackupView034Tests(unittest.TestCase):
                                   9, curses.KEY_RIGHT, curses.KEY_RIGHT,
                                   curses.KEY_RIGHT, 10, 27, 27, 27, 27])
         calls = []
-        def perform(title, worker):
+        def perform(title, worker, *, tasks):
             calls.append(title)
             worker(lambda *args: None)
             return True

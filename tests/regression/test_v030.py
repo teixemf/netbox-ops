@@ -192,7 +192,7 @@ class NewBackupTests(unittest.TestCase):
         stages=[]
         with patch('netbox_ops.backups.write_audit'):
             self.manager.backup('media',progress=lambda *args:stages.append(args))
-        self.assertEqual(stages[-1][:3],('complete',3,3))
+        self.assertEqual(stages[-1][:3],('complete',5,5))
         self.assertTrue(any(step[0]=='archive_media' for step in stages))
 
 
@@ -205,13 +205,13 @@ class NewCliAndTuiTests(unittest.TestCase):
              patch('netbox_ops.backups.BackupManager') as manager, \
              patch.object(menu, '_choose', return_value=2) as choose, \
              patch.object(menu, '_confirm_token', return_value=True) as confirm, \
-             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn: captured.append(fn)):
+             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn, *, tasks: captured.append(fn)):
             manager.return_value.quick_list.return_value = []
             menu._backups()
             self.assertEqual(len(captured), 1)
             captured[0](lambda *args: None)
             manager.return_value.backup.assert_called_once_with(
-                'combined', progress=unittest.mock.ANY)
+                'combined', task_progress=unittest.mock.ANY)
             self.assertIn('Combined', choose.call_args.args[1][2][0])
             confirm.assert_called_once()
 
@@ -234,14 +234,14 @@ class NewCliAndTuiTests(unittest.TestCase):
         with patch('netbox_ops.tui.load_config'), \
              patch('netbox_ops.backups.BackupManager') as manager, \
              patch('netbox_ops.tui.concurrent.futures.ThreadPoolExecutor', ImmediatePool), \
-             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn: captured.append(fn)):
+             patch.object(menu, '_run_backup_job', side_effect=lambda title, fn, *, tasks: captured.append(fn)):
             manager.return_value.quick_list.return_value = [entry]
             manager.return_value.describe_one.return_value = entry
             menu._backups()
             self.assertEqual(len(captured), 1)
             captured[0](lambda *args: None)
             manager.return_value.restore.assert_called_once_with(
-                'combined', entry.path, only='db', progress=unittest.mock.ANY)
+                'combined', entry.path, only='db', task_progress=unittest.mock.ANY)
 
     def test_full_cli_restore_only_options(self):
         parser=build_parser()
@@ -284,7 +284,7 @@ class NewCliAndTuiTests(unittest.TestCase):
         menu=CursesMenu(FakeScreen([curses.KEY_DOWN,32,-1,ord('r'),curses.KEY_DOWN,10,
                 *(ord(c) for c in 'RESTORE FULL DB'),10,27,27,27]),Translator('en'))
         captured=[]
-        def fake_job(title,worker):
+        def fake_job(title,worker,*,tasks):
             captured.append(worker)
         class ImmediatePool:
             def __init__(self, **kwargs): pass
@@ -302,7 +302,7 @@ class NewCliAndTuiTests(unittest.TestCase):
             menu._backups()
             self.assertEqual(len(captured),1)
             captured[0](lambda *args:None)
-            manager.return_value.restore.assert_called_once_with('full',entry.path,only='db',progress=unittest.mock.ANY)
+            manager.return_value.restore.assert_called_once_with('full',entry.path,only='db',task_progress=unittest.mock.ANY)
 
 
 if __name__=='__main__':

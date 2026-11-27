@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
+from .backup_progress import BackupProgress, ProgressCallback, TaskCallback, batch_tasks, create_tasks, restore_tasks
 from .config import Configuration
 from .netbox_version import read_netbox_version
 from .platform import pg_binary, PlatformError
@@ -78,14 +79,6 @@ def _backup_filename_time(path: Path) -> dt.datetime | None:
                 .replace(tzinfo=dt.timezone.utc) if match else None)
     except (OverflowError, ValueError):
         return None
-
-
-ProgressCallback = Callable[[str, int, int, str], None]
-
-
-def _progress(callback: ProgressCallback | None, title: str, done: int, total: int, detail: str = '') -> None:
-    if callback is not None:
-        callback(title, done, total, detail)
 
 
 def _run(argv: list[str], *, timeout: int = 600, stdin=None, stdout=None) -> str:
@@ -958,33 +951,38 @@ class BackupManager:
         disk = shutil.disk_usage(base)
         return occupied, max(0, disk.used - occupied), disk.free, disk.total, count
 
-    def delete_backups(self, paths: list[Path], progress: ProgressCallback | None = None) -> tuple[int, int]:
+    def delete_backups(self, paths: list[Path], progress: ProgressCallback | None = None, *,
+                       task_progress: TaskCallback | None = None) -> tuple[int, int]:
         """Delete only explicitly selected local backups with one preflight/lock.
 
         A failure aborts subsequent deletions; completed deletions cannot be undone.
         """
-        _require_root()
-        if not paths or len(set(paths)) != len(paths):
-            raise BackupError('Select distinct backups to delete')
-        with ExclusiveLock():
-            # Validate every target before deleting the first one.
-            targets = [self._owned_backup_path(path) for path in paths]
-            count = 0
-            total_bytes = 0
-            for path in targets:
-                _progress(progress, 'delete', count, len(targets), path.name)
-                freed = path.stat().st_size
-                path.unlink()
-                sidecar = Path(str(path) + '.json')
-                if sidecar.is_file() and not sidecar.is_symlink():
-                    freed += sidecar.stat().st_size
-                    sidecar.unlink()
-                count += 1
-                total_bytes += freed
-                write_audit(f'DELETE BACKUP path={path} bytes={freed}')
-                _progress(progress, 'delete', count, len(targets), path.name)
-            _progress(progress, 'complete', count, len(targets))
-            return count, total_bytes
+        tracker = BackupProgress(batch_tasks('delete', (p.name for p in paths), prepare=True),
+                                 progress, task_progress)
+        with tracker.operation():
+            tracker.start('prepare')
+            _require_root()
+            if not paths or len(set(paths)) != len(paths):
+                raise BackupError('Select distinct backups to delete')
+            with ExclusiveLock():
+                # Validate every target before deleting the first one.
+                targets = [self._owned_backup_path(path) for path in paths]
+                tracker.done('prepare')
+                count = 0
+                total_bytes = 0
+                for path in targets:
+                    tracker.start('delete', path.name)
+                    freed = path.stat().st_size
+                    path.unlink()
+                    sidecar = Path(str(path) + '.json')
+                    if sidecar.is_file() and not sidecar.is_symlink():
+                        freed += sidecar.stat().st_size
+                        sidecar.unlink()
+                    count += 1
+                    total_bytes += freed
+                    write_audit(f'DELETE BACKUP path={path} bytes={freed}')
+                    tracker.done('delete', path.name)
+                return count, total_bytes
 
     def _owned_backup_path(self, source: Path) -> Path:
         _safe_directory(self.directory)
@@ -1009,43 +1007,56 @@ class BackupManager:
             write_audit(f'DELETE BACKUP path={path} bytes={released}')
             return released
 
-    def backup(self, kind: str, progress: ProgressCallback | None = None) -> BackupReport:
-        _require_root()
-        if kind not in KINDS:
-            raise BackupError(f'Invalid backup kind: {kind}')
-        with ExclusiveLock():
-            _safe_directory(self.directory)  # Fail preflight before stopping NetBox.
-            if kind != 'combined':
-                return self._backup(kind, progress)
-            # A consistent DB + media/config snapshot requires quiescing writers.
-            # Preserve original service states; never start a previously stopped unit.
-            systemd = SystemdServices(self.cfg)
-            _progress(progress, 'stop_services', 0, 6)
-            active = _services_stop_for_restore(systemd)
-            _progress(progress, 'stop_services', 1, 6)
-            try:
-                return self._backup(kind, progress)
-            finally:
-                _progress(progress, 'restart_services', 5, 6)
-                _services_restart_after(systemd, active)
-                _progress(progress, 'complete', 6, 6)
+    def backup(self, kind: str, progress: ProgressCallback | None = None, *,
+               task_progress: TaskCallback | None = None) -> BackupReport:
+        tracker = BackupProgress(create_tasks(kind), progress, task_progress)
+        with tracker.operation():
+            tracker.start('preflight')
+            _require_root()
+            if kind not in KINDS:
+                raise BackupError(f'Invalid backup kind: {kind}')
+            with ExclusiveLock():
+                _safe_directory(self.directory)  # Fail preflight before stopping NetBox.
+                tracker.done('preflight')
+                if kind != 'combined':
+                    return self._backup(kind, tracker=tracker)
+                # A consistent DB + media/config snapshot requires quiescing writers.
+                # Preserve original service states; never start a previously stopped unit.
+                systemd = SystemdServices(self.cfg)
+                tracker.start('stop_services')
+                active = _services_stop_for_restore(systemd)
+                tracker.done('stop_services', skipped=not active)
+                try:
+                    return self._backup(kind, tracker=tracker)
+                except BaseException:
+                    tracker.fail_active()
+                    raise
+                finally:
+                    tracker.start('restart_services')
+                    _services_restart_after(systemd, active)
+                    tracker.done('restart_services', skipped=not active)
 
     def _backup(self, kind: str, progress: ProgressCallback | None = None,
-                *, purpose: str = 'manual') -> BackupReport:
+                *, purpose: str = 'manual', tracker: BackupProgress | None = None) -> BackupReport:
+        if tracker is None:
+            tracker = BackupProgress(create_tasks(kind, quiesce=False), progress)
+            with tracker.operation():
+                return self._backup(kind, purpose=purpose, tracker=tracker)
+        tracker.start('prepare')
         if purpose not in ('manual', 'pre_restore'):
             raise BackupError('Invalid backup purpose')
-        total = 6 if kind == 'combined' else 3
-        _progress(progress, 'prepare', 1 if kind != 'combined' else 2, total)
         directory = _safe_directory(self.directory)
         label = '-pre-restore' if purpose == 'pre_restore' else ''
         name = f'netbox-{kind}{label}-{_stamp()}-{uuid.uuid4().hex[:6]}'
         suffix = '.dump' if kind == 'db' else ('.media.tar.gz' if kind == 'media' else '.combined.tar.gz')
         output = _new_file(directory, name + suffix)
+        tracker.done('prepare')
         try:
             if kind == 'db':
-                _progress(progress, 'dump_db', 1, 3)
+                tracker.start('dump_db')
                 _db_dump(self.cfg, output)
-                _progress(progress, 'dump_db', 2, 3)
+                tracker.done('dump_db')
+                tracker.start('finalize')
                 manifest = _base_manifest(kind, self.cfg, purpose)
                 manifest['sha256'] = _sha256(output)
                 sidecar = _new_file(directory, output.name + '.json')
@@ -1055,16 +1066,18 @@ class BackupManager:
                 with tempfile.TemporaryDirectory(prefix='.nbo-build-', dir=directory) as temporary:
                     dump = None
                     if kind == 'combined':
-                        _progress(progress, 'dump_db', 2, 6)
+                        tracker.start('dump_db')
                         dump = Path(temporary) / 'netbox.dump'
                         _new_file(Path(temporary), 'netbox.dump')
                         _db_dump(self.cfg, dump)
-                        _progress(progress, 'dump_db', 3, 6)
-                    _progress(progress, 'archive_media', 3 if kind == 'combined' else 1, total)
+                        tracker.done('dump_db')
+                    tracker.start('archive_media')
                     archive_manifest = _create_archive(self.cfg, output, kind, dump, purpose)
-                    _progress(progress, 'archive_media', 4 if kind == 'combined' else 2, total)
-                _progress(progress, 'verify', 4 if kind == 'combined' else 2, total)
+                tracker.done('archive_media')
+                tracker.start('verify')
                 _validate_archive(output, kind, self.cfg)
+                tracker.done('verify')
+                tracker.start('finalize')
                 # Fast display metadata: no need to decompress a multi-GiB TAR
                 # merely to show its version/date. Integrity still uses verify().
                 sidecar = _new_file(directory, output.name + '.json')
@@ -1078,13 +1091,16 @@ class BackupManager:
                 }))
                 os.chmod(sidecar, 0o600)
             os.chmod(output, 0o600)
-            _progress(progress, 'complete', 5 if kind == 'combined' else 3, total)
             write_audit(f'BACKUP OK kind={kind} path={output} hash={_sha256(output)}')
-            return BackupReport(output, kind, f'SHA256={_sha256(output)}')
+            report = BackupReport(output, kind, f'SHA256={_sha256(output)}')
+            tracker.done('finalize')
+            return report
         except Exception as exc:
-            output.unlink(missing_ok=True)
-            Path(str(output) + '.json').unlink(missing_ok=True)
-            write_audit(f'BACKUP ERROR kind={kind} error={type(exc).__name__}')
+            tracker.fail_active()
+            with tracker.step('cleanup_backup'):
+                output.unlink(missing_ok=True)
+                Path(str(output) + '.json').unlink(missing_ok=True)
+                write_audit(f'BACKUP ERROR kind={kind} error={type(exc).__name__}')
             raise
 
     def verify(self, kind: str, source: Path) -> dict | None:
@@ -1100,133 +1116,151 @@ class BackupManager:
 
     def restore(self, kind: str, source: Path, *, only: str = 'all',
                 accept_unknown: bool = False, allow_mismatch: bool = False,
-                progress: ProgressCallback | None = None) -> BackupReport:
-        _require_root()
-        if kind not in RESTORE_KINDS:
-            raise BackupError(f'Invalid restore kind: {kind}')
-        if only not in ('db', 'media', 'all') or (kind not in COMBINED_KINDS and only != 'all'):
-            raise BackupError('Partial restore is only supported for combined backups')
-        restore_db = kind == 'db' or (kind in COMBINED_KINDS and only in ('all', 'db'))
-        restore_media = kind == 'media' or (kind in COMBINED_KINDS and only in ('all', 'media'))
-        total = 8
-        _progress(progress, 'prepare', 0, total)
-        with ExclusiveLock():
-            pending = _pending_recovery()
-            _safe_directory(self.directory)
-            if source.is_symlink():
-                raise BackupError('Refusing a symlinked backup source')
-            source = source.resolve(strict=True)
-            with tempfile.TemporaryDirectory(prefix='.nbo-restore-', dir=self.directory) as tmp:
-                stage = Path(tmp)
-                # Read from a private copy to avoid source changes between
-                # checksum verification and restore (e.g. a dump in /tmp).
-                protected = stage / ('incoming' + ('.dump' if kind == 'db' else '.tar.gz'))
-                shutil.copyfile(source, protected)
-                os.chmod(protected, 0o600)
-                sidecar = Path(str(source) + '.json')
-                if kind == 'db' and sidecar.exists():
-                    if sidecar.is_symlink():
-                        raise BackupError('Refusing a symlinked manifest')
-                    shutil.copyfile(sidecar, Path(str(protected) + '.json'))
-                _progress(progress, 'verify', 0, total)
-                manifest = self.verify(kind, protected)
-                _progress(progress, 'verify', 1, total)
-                if restore_db:
-                    _version_guard(manifest, accept_unknown=accept_unknown,
-                                   allow_mismatch=allow_mismatch)
-                db_source = protected
-                # A combined archive must be extracted even when ONLY its database
-                # is being restored. Previously full --only db skipped extraction
-                # but then referenced stage/database/netbox.dump (nonexistent).
-                if kind in COMBINED_KINDS or restore_media:
-                    _progress(progress, 'extract_media', 1, total)
-                    _validate_archive(protected, kind, self.cfg, extract_dir=stage)
-                _progress(progress, 'extract_media', 2, total)
-                if kind in COMBINED_KINDS:
-                    db_source = stage / 'database/netbox.dump'
-                if restore_db:
-                    _progress(progress, 'stage_db', 2, total)
-                    _preflight_db(self.cfg, db_source)
-                    staged_name = _stage_db(self.cfg, db_source)
-                else:
-                    staged_name = None
-                _progress(progress, 'stage_db', 3, total)
-                previous_name = None
-                old_services: list[str] = []
-                old_files_undo = None
-                swapped = False
-                try:
-                    systemd = SystemdServices(self.cfg)
-                    if staged_name:
-                        # The active database is still untouched and services are running.
-                        _progress(progress, 'verify_application', 3, total)
-                        _django_check(self.cfg, staged_name)
-                    _progress(progress, 'stop_services', 3, total)
-                    old_services = _services_stop_for_restore(systemd)
-                    _progress(progress, 'stop_services', 4, total)
-                    # Safety copies are created only after services have stopped.
-                    _progress(progress, 'safety_backup', 4, total)
+                progress: ProgressCallback | None = None,
+                task_progress: TaskCallback | None = None) -> BackupReport:
+        tracker = BackupProgress(restore_tasks(kind, only), progress, task_progress)
+        with tracker.operation():
+            tracker.start('prepare')
+            _require_root()
+            if kind not in RESTORE_KINDS:
+                raise BackupError(f'Invalid restore kind: {kind}')
+            if only not in ('db', 'media', 'all') or (kind not in COMBINED_KINDS and only != 'all'):
+                raise BackupError('Partial restore is only supported for combined backups')
+            restore_db = kind == 'db' or (kind in COMBINED_KINDS and only in ('all', 'db'))
+            restore_media = kind == 'media' or (kind in COMBINED_KINDS and only in ('all', 'media'))
+            with ExclusiveLock():
+                pending = _pending_recovery()
+                _safe_directory(self.directory)
+                if source.is_symlink():
+                    raise BackupError('Refusing a symlinked backup source')
+                source = source.resolve(strict=True)
+                with tempfile.TemporaryDirectory(prefix='.nbo-restore-', dir=self.directory) as tmp:
+                    stage = Path(tmp)
+                    # Read from a private copy to avoid source changes between
+                    # checksum verification and restore (e.g. a dump in /tmp).
+                    protected = stage / ('incoming' + ('.dump' if kind == 'db' else '.tar.gz'))
+                    shutil.copyfile(source, protected)
+                    os.chmod(protected, 0o600)
+                    sidecar = Path(str(source) + '.json')
+                    if kind == 'db' and sidecar.exists():
+                        if sidecar.is_symlink():
+                            raise BackupError('Refusing a symlinked manifest')
+                        shutil.copyfile(sidecar, Path(str(protected) + '.json'))
+                    tracker.done('prepare')
+                    tracker.start('verify')
+                    manifest = self.verify(kind, protected)
                     if restore_db:
-                        self._backup('db', purpose='pre_restore')
-                    if restore_media:
-                        self._backup('media', purpose='pre_restore')
-                    _progress(progress, 'safety_backup', 5, total)
-                    _progress(progress, 'replace', 5, total)
-                    if staged_name:
-                        previous_name = 'nbo_prev_' + uuid.uuid4().hex[:16]
-                        _terminate(self.cfg.database, cfg=self.cfg)
-                        _rename_db(self.cfg.database, previous_name, cfg=self.cfg)
-                        try:
-                            _rename_db(staged_name, self.cfg.database, cfg=self.cfg)
-                        except Exception:
-                            _rename_db(previous_name, self.cfg.database, cfg=self.cfg)
-                            previous_name = None
-                            raise
-                        swapped = True
+                        _version_guard(manifest, accept_unknown=accept_unknown,
+                                       allow_mismatch=allow_mismatch)
+                    tracker.done('verify')
+                    db_source = protected
+                    # A combined archive must be extracted even when ONLY its database
+                    # is being restored. Previously full --only db skipped extraction
+                    # but then referenced stage/database/netbox.dump (nonexistent).
+                    if kind in COMBINED_KINDS or restore_media:
+                        tracker.start('extract_media')
+                        _validate_archive(protected, kind, self.cfg, extract_dir=stage)
+                        tracker.done('extract_media')
+                    if kind in COMBINED_KINDS:
+                        db_source = stage / 'database/netbox.dump'
+                    if restore_db:
+                        tracker.start('stage_db')
+                        _preflight_db(self.cfg, db_source)
+                        staged_name = _stage_db(self.cfg, db_source)
+                        tracker.done('stage_db')
+                    else:
                         staged_name = None
-                    if restore_media:
-                        old_files_undo = _replace_artifacts(self.cfg, stage)
-                    _progress(progress, 'replace', 6, total)
-                    _progress(progress, 'restart_services', 7, total)
-                    _services_restart_after(systemd, old_services)
-                    if old_files_undo:
-                        old_files_undo(False)
-                        old_files_undo = None
-                    _progress(progress, 'complete', 8, total)
-                    write_audit(f'RESTORE OK kind={kind} only={only} source={source} previous_db={previous_name or "none"}')
-                    msg = f'Previous database preserved: {previous_name}' if previous_name else ''
-                    if restore_db:
-                        msg += '\nRedis cache and RQ data were preserved; check cache coherency before production use.'
-                    if pending:
-                        msg += '\nNetBox upgrade recovery remains pending; writers were not restarted.'
-                    return BackupReport(source, kind, msg)
-                except Exception as exc:
-                    if old_files_undo:
-                        try:
-                            old_files_undo(True)
-                        except Exception as undo_error:
-                            write_audit(f'RESTORE FILES ROLLBACK ERROR {undo_error}')
-                    if swapped and previous_name:
-                        try:
-                            for name in ('netbox-rq', 'netbox'):
-                                if name in old_services:
-                                    with contextlib.suppress(Exception):
-                                        systemd.stop([name])
-                            failed_name = 'nbo_failed_' + uuid.uuid4().hex[:16]
+                    previous_name = None
+                    old_services: list[str] = []
+                    old_files_undo = None
+                    swapped = False
+                    try:
+                        systemd = SystemdServices(self.cfg)
+                        if staged_name:
+                            # The active database is still untouched and services are running.
+                            with tracker.step('verify_application'):
+                                _django_check(self.cfg, staged_name)
+                        tracker.start('stop_services')
+                        old_services = _services_stop_for_restore(systemd)
+                        tracker.done('stop_services', skipped=not old_services)
+                        # Safety copies are created only after services have stopped.
+                        tracker.start('safety_backup')
+                        if restore_db:
+                            self._backup('db', purpose='pre_restore')
+                        if restore_media:
+                            self._backup('media', purpose='pre_restore')
+                        tracker.done('safety_backup')
+                        tracker.start('replace')
+                        if staged_name:
+                            previous_name = 'nbo_prev_' + uuid.uuid4().hex[:16]
                             _terminate(self.cfg.database, cfg=self.cfg)
-                            _rename_db(self.cfg.database, failed_name, cfg=self.cfg)
-                            _rename_db(previous_name, self.cfg.database, cfg=self.cfg)
-                            previous_name = None
-                            write_audit(f'RESTORE DB ROLLBACK OK failed_db={failed_name}')
-                        except Exception as rollback_error:
-                            write_audit(f'RESTORE DB ROLLBACK FAILED error={rollback_error}')
-                            raise BackupError(f'Restore failed ({exc}); automatic rollback FAILED '
-                                              f'({rollback_error}). Preserve database state.') from exc
-                    with contextlib.suppress(Exception):
+                            _rename_db(self.cfg.database, previous_name, cfg=self.cfg)
+                            try:
+                                _rename_db(staged_name, self.cfg.database, cfg=self.cfg)
+                            except Exception:
+                                _rename_db(previous_name, self.cfg.database, cfg=self.cfg)
+                                previous_name = None
+                                raise
+                            swapped = True
+                            staged_name = None
+                        if restore_media:
+                            old_files_undo = _replace_artifacts(self.cfg, stage)
+                        tracker.done('replace')
+                        tracker.start('restart_services')
                         _services_restart_after(systemd, old_services)
-                    write_audit(f'RESTORE ERROR kind={kind} error={type(exc).__name__}')
-                    raise
-                finally:
-                    if staged_name is not None:
+                        tracker.done('restart_services', skipped=not old_services)
+                        tracker.start('finalize')
+                        if old_files_undo:
+                            old_files_undo(False)
+                            old_files_undo = None
+                        write_audit(f'RESTORE OK kind={kind} only={only} source={source} previous_db={previous_name or "none"}')
+                        msg = f'Previous database preserved: {previous_name}' if previous_name else ''
+                        if restore_db:
+                            msg += '\nRedis cache and RQ data were preserved; check cache coherency before production use.'
+                        if pending:
+                            msg += '\nNetBox upgrade recovery remains pending; writers were not restarted.'
+                        tracker.done('finalize')
+                        return BackupReport(source, kind, msg)
+                    except Exception as exc:
+                        tracker.fail_active()
+                        if old_files_undo:
+                            try:
+                                with tracker.step('rollback_files'):
+                                    old_files_undo(True)
+                            except Exception as undo_error:
+                                write_audit(f'RESTORE FILES ROLLBACK ERROR {undo_error}')
+                        if swapped and previous_name:
+                            tracker.start('rollback_db')
+                            try:
+                                for name in ('netbox-rq', 'netbox'):
+                                    if name in old_services:
+                                        with contextlib.suppress(Exception):
+                                            systemd.stop([name])
+                                failed_name = 'nbo_failed_' + uuid.uuid4().hex[:16]
+                                _terminate(self.cfg.database, cfg=self.cfg)
+                                _rename_db(self.cfg.database, failed_name, cfg=self.cfg)
+                                _rename_db(previous_name, self.cfg.database, cfg=self.cfg)
+                                previous_name = None
+                                write_audit(f'RESTORE DB ROLLBACK OK failed_db={failed_name}')
+                                tracker.done('rollback_db')
+                            except Exception as rollback_error:
+                                tracker.fail_active()
+                                write_audit(f'RESTORE DB ROLLBACK FAILED error={rollback_error}')
+                                raise BackupError(f'Restore failed ({exc}); automatic rollback FAILED '
+                                                  f'({rollback_error}). Preserve database state.') from exc
                         with contextlib.suppress(Exception):
-                            _drop_db(staged_name, cfg=self.cfg)
+                            tracker.start('rollback_services')
+                            try:
+                                _services_restart_after(systemd, old_services)
+                            except Exception:
+                                tracker.fail_active()
+                                raise
+                            else:
+                                tracker.done('rollback_services', skipped=not old_services)
+                        write_audit(f'RESTORE ERROR kind={kind} error={type(exc).__name__}')
+                        raise
+                    finally:
+                        if staged_name is not None:
+                            with contextlib.suppress(Exception):
+                                with tracker.step('cleanup_db'):
+                                    _drop_db(staged_name, cfg=self.cfg)
