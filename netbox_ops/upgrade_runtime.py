@@ -5,13 +5,15 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from .backups import _sql
-from .config import Configuration
+from .config import Configuration, DATABASE_PATTERN
+from .platform import pg_binary
 from .restore_environment import netbox_runtime
 from .upgrade_discovery import GitNetBoxInstallation
 from .upgrade_execution import UpgradeExecutionError
@@ -147,7 +149,8 @@ SELECT
               OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper))
     ) AND has_database_privilege(current_database(), 'CREATE')
       AND COALESCE(has_schema_privilege(current_schema(), 'CREATE'), false),
-    COALESCE(has_schema_privilege(current_schema(), 'USAGE'), false)
+    COALESCE(has_schema_privilege(current_schema(), 'USAGE'), false),
+    COALESCE(host(inet_server_addr()), '')
 """
 
 _LTREE_PROBE = """
@@ -185,11 +188,93 @@ class LtreeEvidence:
     status: str
     details: tuple[str, ...] = ()
     identity: str = ''
+    admin_port: int | None = None
+
+
+# A narrow administrative path: explicit local Unix socket, postgres peer
+# login, same database/instance, no untrusted CREATE privileges in public.
+# Never run DDL in a remotely inferred or writable extension schema.
+_LTREE_ADMIN_GUARD = f"""
+    ({_IDENTITY_SQL}) = :'nbo_identity'
+    AND current_database() = :'nbo_database'
+    AND current_user = 'postgres' AND session_user = 'postgres'
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper)
+    AND NOT pg_is_in_recovery()
+    AND EXISTS (SELECT 1 FROM pg_available_extensions
+                WHERE name = 'ltree' AND default_version IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'ltree')
+    AND EXISTS (
+        SELECT 1 FROM pg_namespace n
+        JOIN pg_roles owner ON owner.oid = n.nspowner
+        WHERE n.nspname = 'public'
+          AND (owner.rolsuper OR (owner.rolname = 'pg_database_owner'
+               AND EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles o ON o.oid = d.datdba
+                           WHERE d.datname = current_database() AND o.rolsuper)))
+          AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
+                          WHERE a.grantee = 0 AND a.privilege_type = 'CREATE')
+          AND NOT EXISTS (SELECT 1 FROM pg_roles r WHERE NOT r.rolsuper
+                          AND r.rolname <> 'pg_database_owner'
+                          AND has_schema_privilege(r.oid, n.oid, 'CREATE'))
+    )
+"""
+
+
+def _ltree_admin_sql(cfg: Configuration, identity: str, port: int, *, install: bool = False,
+                     runner: Callable = subprocess.run) -> str:
+    """Run only the fixed local catalogue check or extension transaction."""
+    if (not DATABASE_PATTERN.fullmatch(cfg.database) or not 1 <= port <= 65535
+            or cfg.postgres_port not in (None, port)
+            or not re.fullmatch(re.escape(cfg.database) + r'\|' + str(port) + r'\|[0-9]+(?:\.[0-9]+)?', identity)
+            or any(name.startswith('PG') for name in os.environ)):
+        raise UpgradeExecutionError('Cannot verify a local PostgreSQL administrative connection')
+    try:
+        binary = Path(pg_binary('psql', cfg.pg_bin_directory))
+        if not binary.is_absolute():
+            raise ValueError
+        for path in (binary, *binary.parents, binary.resolve(strict=True), *binary.resolve(strict=True).parents):
+            info = path.stat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError
+        command = [
+            '/usr/sbin/runuser', '-u', 'postgres', '--', '/usr/bin/env', '-i',
+            'PATH=/usr/sbin:/usr/bin:/sbin:/bin', 'LANG=C.UTF-8', str(binary),
+            '-X', '-w', '-qAt', '-v', 'ON_ERROR_STOP=1',
+            '-h', '/var/run/postgresql', '-p', str(port), '-U', 'postgres',
+            '-d', cfg.database, '-v', 'nbo_identity=' + identity,
+            '-v', 'nbo_database=' + cfg.database, '-f', '-',
+        ]
+        transaction = "BEGIN;\n" if install else "BEGIN READ ONLY;\n"
+        transaction += ("SET LOCAL search_path = pg_catalog;\n"
+                        "SET LOCAL lock_timeout = '5s';\n"
+                        "SET LOCAL statement_timeout = '30s';\n")
+        if install:
+            transaction += (f"SELECT ({_LTREE_ADMIN_GUARD}) AS safe\n"
+                            "\\gset\n"
+                            "\\if :safe\n"
+                            "CREATE EXTENSION IF NOT EXISTS ltree WITH SCHEMA public;\n"
+                            "COMMIT;\nSELECT 'installed';\n"
+                            "\\else\nROLLBACK;\nSELECT 'blocked';\n\\endif\n")
+        else:
+            transaction += f"SELECT ({_LTREE_ADMIN_GUARD});\nROLLBACK;\n"
+        result = runner(command, input=transaction, cwd='/', env=upgrade_environment(binary),
+                        capture_output=True, text=True, timeout=60, check=False)
+        if result.returncode:
+            raise ValueError
+        return result.stdout.strip()
+    except Exception:
+        raise UpgradeExecutionError('Cannot verify or use the local PostgreSQL administrative connection') from None
+
+
+def _ltree_admin_available(cfg: Configuration, identity: str, port: int) -> bool:
+    try:
+        return _ltree_admin_sql(cfg, identity, port) == 't'
+    except UpgradeExecutionError:
+        return False
 
 
 def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
                 runner: Callable = subprocess.run, discover: Callable = netbox_runtime,
-                sql: Callable = _sql) -> LtreeEvidence:
+                sql: Callable = _sql, admin_probe: Callable = _ltree_admin_available) -> LtreeEvidence:
     """Match the backup database and check the service and migration roles."""
     rows = []
     details = []
@@ -222,11 +307,11 @@ def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
                 values = json.loads(result.stdout) if not result.returncode else None
                 if isinstance(values, dict) and values.get('status') in ('unknown', 'mismatch'):
                     return LtreeEvidence(values['status'], tuple(details), identity)
-                if (not isinstance(values, list) or len(values) != 12
-                        or any(type(x) is not str for x in values[:7])
-                        or any(type(x) is not bool for x in values[7:])):
+                if (not isinstance(values, list) or len(values) != 13
+                        or any(type(x) is not str for x in (*values[:7], values[12]))
+                        or any(type(x) is not bool for x in values[7:12])):
                     return LtreeEvidence('unknown', tuple(details), identity)
-                actual, version, role, session, schema, search, extension, installed, usable, available, permitted, usage = values
+                actual, version, role, session, schema, search, extension, installed, usable, available, permitted, usage, address = values
                 if actual != expected:
                     return LtreeEvidence('mismatch', tuple(details), identity)
                 # Only catalogue fields; never subprocess errors or connection strings.
@@ -237,7 +322,7 @@ def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
                                f'session={fields[2]}, schema={fields[3]}, search_path={fields[4]}, '
                                f'extension_schema={fields[5]}, installed={installed}, '
                                f'usable={usable}, available={available}, install_allowed={permitted}')
-                rows.append((migration, schema, installed, usable, available, permitted, usage))
+                rows.append((migration, schema, installed, usable, available, permitted, usage, address))
     except Exception:
         return LtreeEvidence('unknown', tuple(details), identity)
     if not rows:
@@ -254,4 +339,13 @@ def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
         status = 'unusable'
     else:
         status = 'available'
-    return LtreeEvidence(status, tuple(details), identity)
+    admin_port = None
+    if (status == 'permission' and all(row[1] == 'public' and row[6]
+            and row[7] in ('127.0.0.1', '::1') for row in rows)):
+        try:
+            port = int(expected.split('|')[1])
+            if admin_probe(cfg, expected, port):
+                admin_port = port
+        except (ValueError, IndexError, UpgradeExecutionError):
+            pass  # The native path remains blocked; no speculative admin action.
+    return LtreeEvidence(status, tuple(details), identity, admin_port)

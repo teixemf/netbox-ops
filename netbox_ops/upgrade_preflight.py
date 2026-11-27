@@ -75,7 +75,8 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                         }
                         blockers.append(prefix + 'PostgreSQL ltree: ' + guidance.get(evidence.status, 'unverified'))
                 ltree = evidence.status
-                ltree_fields = dict(ltree_details=evidence.details, ltree_identity=evidence.identity)
+                ltree_fields = dict(ltree_details=evidence.details, ltree_identity=evidence.identity,
+                                    ltree_admin_port=evidence.admin_port)
                 # A blocked requirements stage must not hide independent
                 # prerequisite checks or the remaining targets' evidence.
                 diagnostics = diagnose_local_requirements(plan, local, core, index)

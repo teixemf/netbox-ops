@@ -183,8 +183,8 @@ def prepare_combined_stages(
             if tuple(map(int, planned.netbox_version.split('.')[:2])) >= (4, 7):
                 evidence = probe_ltree(cfg, live)
                 review = plan.dependency_reviews[index]
-                if (evidence.status, evidence.details, evidence.identity) != (
-                        review.ltree, review.ltree_details, review.ltree_identity):
+                if (evidence.status, evidence.details, evidence.identity, evidence.admin_port) != (
+                        review.ltree, review.ltree_details, review.ltree_identity, review.ltree_admin_port):
                     raise UpgradeExecutionError('PostgreSQL ltree prerequisites changed after approval')
             download(pins, live, wheelhouse)
             resolved = _resolve(pins, live, approval, resolver, wheelhouse=wheelhouse)
