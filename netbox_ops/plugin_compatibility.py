@@ -610,14 +610,23 @@ def parse_plugin_config(source_text: str, module: str, version: str,
     for node in config.body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names = [target.id for target in targets if isinstance(target, ast.Name)]
+            if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                return None
+            # A call/comprehension can modify class state even in an unrelated field.
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError):
+                return None
+            names = [targets[0].id]
             for name in names:
                 if name not in tracked:
                     continue
                 if name in fields or len(targets) != 1:
                     return None
                 fields[name] = node.value
-        elif not isinstance(node, (ast.Expr, ast.Pass)):
+        elif not (isinstance(node, ast.Pass) or
+                  isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                  and isinstance(node.value.value, str)):
             # Conditional/dynamic assignments, methods and other class behavior
             # are outside the conservative literal-declaration subset.
             return None
@@ -641,17 +650,23 @@ def parse_plugin_config(source_text: str, module: str, version: str,
     if (len(bindings) != 1 or not isinstance(bindings[0].value, ast.Name)
             or bindings[0].value.id != config.name):
         return None
-    # Reject reassignment of the imported base, exported config or class name.
+    # Only the conventional declaration is evidence of a hard gate. Do not
+    # attempt to reason about arbitrary module-level execution or rebinding.
+    if not (tree.body.index(imports[0]) < tree.body.index(config) < tree.body.index(bindings[0])):
+        return None
+    if (len(imports[0].names) != 1 or len(bindings[0].targets) != 1):
+        return None
+    protected = {'PluginConfig', 'config', config.name}
     for node in tree.body:
         if node is config or node is bindings[0] or node in imports:
             continue
-        if any((isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del))
-                and child.id in ('PluginConfig', 'config', config.name))
-               or (isinstance(child, ast.Attribute) and isinstance(child.ctx, (ast.Store, ast.Del))
-                   and child.attr in tracked)
-               or (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
-                   and child.func.id in ('setattr', 'delattr', 'exec', 'eval')) for child in ast.walk(node)):
-            return None
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id not in protected
+                and isinstance(node.value, ast.Constant)):
+            continue
+        return None
     return CompatibilityDeclaration(source, minimum, maximum, enforced=True)
 
 
