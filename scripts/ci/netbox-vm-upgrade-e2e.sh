@@ -107,6 +107,55 @@ wait_health() {
   return 1
 }
 wait_health "$old"
+if [[ "$scenario" == cross-minor ]]; then
+  # This disposable database has no ltree yet. Exercise both the denied
+  # migration role and the verified administrative path before the real
+  # native migration scenario. Never change roles in production code.
+  [[ $(runuser -u postgres -- psql -X -At -d netbox -c "SELECT count(*) FROM pg_extension WHERE extname='ltree'") == 0 ]]
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE netbox OWNER TO postgres'
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d netbox -c 'REVOKE CREATE ON DATABASE netbox FROM netbox; REVOKE CREATE ON SCHEMA public FROM PUBLIC, netbox; GRANT USAGE ON SCHEMA public TO netbox'
+  install -d -m 0700 "$scratch/ltree-backups"
+  python3 - "$scratch/ltree-backups" <<'PY'
+import sys
+from dataclasses import replace
+from pathlib import Path
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.config import load_config
+from netbox_ops.upgrade_execution import UpgradeExecutionError
+from netbox_ops.upgrade_ltree import build_ltree_review, apply_ltree_review
+
+cfg = replace(load_config(), backup_directory=Path(sys.argv[1]))
+review = build_ltree_review(cfg)
+assert review.evidence.status == 'permission', review.evidence
+assert review.fingerprint and review.evidence.admin_port, review.evidence
+try:
+    apply_ltree_review(cfg, review, 'wrong fingerprint')
+except UpgradeExecutionError:
+    pass
+else:
+    raise AssertionError('Unapproved ltree action accepted')
+assert not list(cfg.backup_directory.iterdir())
+assert build_ltree_review(cfg) == review
+backup = apply_ltree_review(cfg, review, review.fingerprint)
+assert backup.is_file()
+observed = build_ltree_review(cfg)
+assert observed.evidence.status == 'installed' and observed.fingerprint is None, observed
+try:
+    apply_ltree_review(cfg, review, review.fingerprint)
+except UpgradeExecutionError:
+    pass
+else:
+    raise AssertionError('Stale ltree approval accepted')
+print('PASS: real denied migration role, verified local administrative ltree installation and stale approval')
+PY
+  wait_health "$old"
+  # Restore the disposable fixture's initial owner/extension state so the
+  # unchanged upstream upgrade script must still exercise native creation.
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d netbox -c 'DROP EXTENSION ltree'
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE netbox OWNER TO netbox'
+  [[ $(runuser -u postgres -- psql -X -At -d netbox -c "SELECT count(*) FROM pg_extension WHERE extname='ltree'") == 0 ]]
+  wait_health "$old"
+fi
 (cd "$root/netbox" && runuser -u netbox -- "$root/venv/bin/python" manage.py shell -c \
   "from extras.models import Tag; Tag.objects.create(name='Upgrade CI',slug='upgrade-ci',color='123456')")
 media="$root/netbox/media/upgrade-ci.txt"

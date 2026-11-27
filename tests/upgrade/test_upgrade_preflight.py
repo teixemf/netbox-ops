@@ -284,3 +284,52 @@ class LtreeProbeTests(unittest.TestCase):
              False, False, True, True, True, '127.0.0.1']))
         self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
                                      discover=discover, sql=Mock(return_value=identity)).status, 'mismatch')
+
+    def test_admin_offer_requires_local_matching_public_schema_and_verified_admin(self):
+        root = Path('/opt/netbox')
+        live = SimpleNamespace(root=root, python=root / 'venv/bin/python')
+        runtime = SimpleNamespace(python=live.python, working_directory=root / 'netbox',
+                                  username='nobody', environment={})
+        identity = 'netbox|5432|1234'
+        local = [identity, '160015', 'netbox', 'netbox', 'public', 'public', '',
+                 False, False, True, False, True, '127.0.0.1']
+        for address, schema, approved, expected in (
+            ('127.0.0.1', 'public', True, 5432),
+            ('10.0.0.8', 'public', True, None),
+            ('127.0.0.1', 'custom', True, None),
+            ('127.0.0.1', 'public', False, None),
+        ):
+            with self.subTest(address=address, schema=schema, approved=approved):
+                row = list(local)
+                row[4], row[12] = schema, address
+                admin = Mock(return_value=approved)
+                result = probe_ltree(
+                    Configuration(DEFAULT_UNITS), live,
+                    runner=Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps(row))),
+                    discover=Mock(return_value=runtime), sql=Mock(return_value=identity),
+                    admin_probe=admin,
+                )
+                self.assertEqual(result.status, 'permission')
+                self.assertEqual(result.admin_port, expected)
+                if address != '127.0.0.1' or schema != 'public':
+                    admin.assert_not_called()
+
+    def test_native_installability_uses_migration_not_service_create_privilege(self):
+        root = Path('/opt/netbox')
+        live = SimpleNamespace(root=root, python=root / 'venv/bin/python')
+        runtime = SimpleNamespace(python=live.python, working_directory=root / 'netbox',
+                                  username='nobody', environment={})
+        identity = 'netbox|5432|1234'
+        service = [identity, '160015', 'netbox', 'netbox', 'public', 'public', '',
+                   False, False, True, False, True, '127.0.0.1']
+        migration = list(service)
+        migration[10] = True
+        runner = Mock(side_effect=[SimpleNamespace(returncode=0, stdout=json.dumps(row))
+                                   for row in (service, migration, service, migration)])
+        admin = Mock()
+        result = probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
+                             discover=Mock(return_value=runtime), sql=Mock(return_value=identity),
+                             admin_probe=admin)
+        self.assertEqual(result.status, 'available')
+        self.assertIsNone(result.admin_port)
+        admin.assert_not_called()
