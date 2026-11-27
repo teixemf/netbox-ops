@@ -37,7 +37,9 @@ class BackupProgressLayoutTests(unittest.TestCase):
                 self.assertEqual(any(text == menu.t('nbo_stage_' + task.phase)
                                      for _, _, text, _ in frame), task.applicable)
                 if task.applicable:
-                    y = next(y for y, _, text, _ in frame if text == menu.t('nbo_stage_' + task.phase))
+                    y = next(y for y, x, text, _ in frame
+                             if menu._panels[1][1] < y < menu._panels[1][3] and x > 3
+                             and text == menu.t('nbo_stage_' + task.phase))
                     self.assertTrue(any(row == y and x == 3 and not text.strip()
                                         for row, x, text, _ in frame))
             self.assertNotIn('N/A', ' '.join(text for _, _, text, _ in frame))
