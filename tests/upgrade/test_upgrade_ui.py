@@ -968,20 +968,26 @@ class UpgradeTuiTests(InterfaceFixture):
                     frames = json.loads(output.read_text())
                     t = Translator(language)
                     self.assertEqual([(f['height'], f['width']) for f in frames],
-                                     [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160)])
+                                     [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
+                                      (30, 120), (16, 50)])
                     for frame in frames:
                         self.assertEqual(frame['color'], not monochrome)
                         lines = frame['lines']
                         operations = next(i for i, line in enumerate(lines) if t('ut_operations') in line)
-                        readiness = next(i for i, line in enumerate(lines)
-                                         if t('upgrade_status_blocked') in line)
+                        if frame['scenario'] == 'blocked':
+                            readiness = next(i for i, line in enumerate(lines)
+                                             if t('upgrade_status_blocked') in line)
+                            self.assertTrue(any('Incompatible plugin:' in line for line in lines))
+                            self.assertTrue(any('plugin-24' in line for line in lines))
+                        else:
+                            readiness = next(i for i, line in enumerate(lines) if t('ut_no_changes') in line)
+                            self.assertTrue(any(t('ut_unchanged') in line for line in lines))
+                            self.assertFalse(any('Warning' in line or 'Aviso' in line for line in lines))
                         self.assertLess(operations, readiness)
                         self.assertLess(readiness, frame['height'] - 2)
-                        self.assertTrue(any('Incompatible plugin:' in line for line in lines))
-                        self.assertTrue(any('plugin-24' in line for line in lines))
                         if frame['width'] in (50, 80, 120, 160):
                             print(f"Actual curses capture: {language} {frame['width']}x{frame['height']}"
-                                  f" color={frame['color']}\n" + '\n'.join(lines))
+                                  f" color={frame['color']} scenario={frame['scenario']}\n" + '\n'.join(lines))
 
     def test_dashboard_validation_stays_on_screen_and_rejects_stale_result(self):
         from concurrent.futures import Future

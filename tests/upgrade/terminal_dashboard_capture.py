@@ -14,9 +14,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from netbox_ops.i18n import Translator
+from netbox_ops.plugin_compatibility import CompatibilityEvidence
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_dashboard import UpgradeDashboard
-from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+from netbox_ops.upgrade_targets import TargetAssessment, TargetRow, TargetSnapshot
 from tests.upgrade.test_upgrade_ui import UpgradeTuiTests
 
 
@@ -41,9 +42,26 @@ def capture(screen, language):
                 curses.resizeterm(h, w)
                 assert dashboard._draw()
                 assert dashboard.cursor == 24 and not dashboard._enabled('execute')
-                result.append(dict(height=h, width=w, color=bool(menu.colors),
+                result.append(dict(scenario='blocked', height=h, width=w, color=bool(menu.colors),
                                    lines=[screen.instr(y, 0).decode('utf-8', errors='replace').rstrip()
                                           for y in range(h)]))
+        dashboard.model.reset()
+        dashboard._invalidate_plan()
+        dashboard.cursor = dashboard.scroll = 0
+        request = dashboard.model.request('assess')
+        warning = TargetAssessment('warning', 'installed', (
+            CompatibilityEvidence('PyPI', 'Release metadata unavailable', 'unknown'),
+        ))
+        rows = tuple(TargetRow(row.component, row.current, row.current, warning)
+                     for row in dashboard._rows())
+        dashboard.snapshot = TargetSnapshot(request, request.selection, rows, 'warning', (), False)
+        for h, w in ((30, 120), (16, 50)):
+            curses.resizeterm(h, w)
+            assert dashboard._draw()
+            assert not dashboard._enabled('validate') and not dashboard._enabled('execute')
+            result.append(dict(scenario='unchanged', height=h, width=w, color=bool(menu.colors),
+                               lines=[screen.instr(y, 0).decode('utf-8', errors='replace').rstrip()
+                                      for y in range(h)]))
         return result
     finally:
         fixture.doCleanups()
