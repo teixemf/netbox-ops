@@ -723,6 +723,38 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('execute'))
         execute.assert_not_called()
 
+    def test_contextual_pin_review_filters_manual_blockers_and_invalidates_plan(self):
+        from netbox_ops.plugin_compatibility import DependencyPreflight
+        from netbox_ops.upgrade_plan import LocalRequirementDiagnostic, StageDependencyReview
+
+        dashboard, menu = self._dashboard()
+        plan = self.build()
+        items = (LocalRequirementDiagnostic('example-plugin', 'example-plugin', '1.0.0',
+                                            '4.4.2', 'unpinned', 'review-pin'),
+                 LocalRequirementDiagnostic('django', 'django==5.2.6', '5.2.6',
+                                            '4.4.2', 'overlap', 'manual-review'))
+        report = StageDependencyReview('4.4.2', 'b' * 40, 'hash', (),
+                                       DependencyPreflight('not-run', 'Blocked'), (), 'not-required',
+                                       local_diagnostics=items)
+        dashboard.plan = replace(plan, blockers=('Review requirements',), dependency_reviews=(report,))
+        dashboard.plan_selection = dashboard.model.selection
+        self.assertEqual(dashboard._correctable_pins(), {'example-plugin'})
+        inventory = replace(self.inventory, local_pin_names=('example-plugin',))
+        pool = Mock()
+        with (patch('netbox_ops.upgrade_dashboard.inventory_plugins', return_value=inventory) as read,
+              patch.object(menu, '_review_plugin_pins', return_value=False) as review,
+              patch.object(dashboard, '_discover') as discover):
+            dashboard._review_plan_pins(pool)
+            review.assert_called_once_with(dashboard.title, inventory, eligible={'example-plugin'})
+            read.assert_called_once_with(self.installation, local_pin_names=('example-plugin',))
+            discover.assert_not_called()
+            self.assertIsNotNone(dashboard.plan)
+            review.return_value = True
+            dashboard._review_plan_pins(pool)
+            discover.assert_called_once_with(pool)
+            self.assertTrue(dashboard._revalidate_after_pins)
+        self.assertFalse(dashboard._enabled('execute'))
+
     def test_failed_recalculation_does_not_reuse_previous_review(self):
         dashboard, menu = self._dashboard()
         with (patch('netbox_ops.upgrade_dashboard.make_plan', side_effect=[self.build(), None]),

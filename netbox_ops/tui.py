@@ -1254,12 +1254,14 @@ class CursesMenu:
             self._show_lines(title, [(self.t('upgrade_success', recovery=result.directory), 'success')])
         return True
 
-    def _review_plugin_pins(self, title, inventory) -> bool:
+    def _review_plugin_pins(self, title, inventory, *, eligible=None) -> bool:
         """Select, display and explicitly approve exact pin corrections."""
         from .plugin_pin_ui import build_pin_review, pin_review_lines, apply_pin_review
         from .plugin_inventory import PluginInventoryError, normalize_name
 
-        available = tuple(normalize_name(p.package) for p in inventory.proposals)
+        proposals = tuple(p for p in inventory.proposals
+                          if eligible is None or normalize_name(p.package) in eligible)
+        available = tuple(normalize_name(p.package) for p in proposals)
         if not available:
             review = build_pin_review(inventory, ())
             self._show_lines(title, [(line, '') for line in pin_review_lines(review, self.t)],
@@ -1270,7 +1272,7 @@ class CursesMenu:
             entries = [(self.t('upgrade_select_all'), ''), (self.t('upgrade_clear_all'), ''),
                        (self.t('upgrade_pin_review', count=len(selected)), '')]
             entries.extend((f'[{"x" if name in selected else " "}] {name}=={proposal.version}', '')
-                           for name, proposal in zip(available, inventory.proposals))
+                           for name, proposal in zip(available, proposals))
             choice = self._choose(title, entries, self.t('tui_back_hint'))
             if not isinstance(choice, int):
                 return False

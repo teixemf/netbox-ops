@@ -18,7 +18,7 @@ from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
 from .upgrade_diagnostics import run_checked
 from .upgrade_process import run_managed
-from .upgrade_plan import RequirementOverlap, UpgradePlan
+from .upgrade_plan import LocalRequirementDiagnostic, RequirementOverlap, UpgradePlan
 from .upgrade_recovery import _read_config
 from .upgrade_runtime import upgrade_environment
 from .upgrade_services import require_quiesced_writers
@@ -75,6 +75,87 @@ def _parse(raw: bytes) -> tuple[list[str], dict[str, tuple[int, re.Match]]]:
             raise UpgradeExecutionError('Duplicate package requirement needs manual review')
         result[name] = (index, match)
     return lines, result
+
+
+def diagnose_local_requirements(plan: UpgradePlan, local: bytes | None, core: bytes,
+                                stage_index: int) -> tuple[LocalRequirementDiagnostic, ...]:
+    """Read-only evidence; never display arbitrary requirement text or URLs."""
+    inventory = plan.source.inventory
+    stage = plan.stages[stage_index]
+    digest = None if local is None else hashlib.sha256(local).hexdigest()
+    if digest != inventory.requirements_hash:
+        return ()
+    try:
+        _, core_entries = _parse(core)
+        lines = (local or b'').decode('utf-8').splitlines()
+    except (UnicodeError, UpgradeExecutionError):
+        return ()
+    installed = {}
+    for package in inventory.packages:
+        installed.setdefault(normalize_name(package.name), []).append(package.version)
+    selected = set(dict(plan.selected_plugins)) if stage_index == len(plan.stages) - 1 else set()
+    configured = dict(configured_plugin_packages(inventory))
+    entries = {}
+    diagnostics = []
+
+    def record(name, declaration, reason, action='manual-review'):
+        versions = installed.get(name, ())
+        actual = versions[0] if len(versions) == 1 else None
+        diagnostics.append(LocalRequirementDiagnostic(name, declaration, actual, stage.netbox_version, reason, action))
+
+    for index, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        match = _LINE.fullmatch(line)
+        if match is None:
+            # Do not expose pip options, comments or credentials in URL/VCS requirements.
+            head = re.match(r'^[ \t]*([A-Za-z0-9][A-Za-z0-9_.-]{0,127})(?=[ \t\[<>=!~;@]|$)', line)
+            name = normalize_name(head[1]) if head else f'line {index}'
+            record(name, f'line {index}: complex requirement', 'ambiguous')
+            if head:
+                entries.setdefault(name, []).append(None)
+            continue
+        entries.setdefault(normalize_name(match[2]), []).append(match)
+    for name, matches in sorted(entries.items()):
+        if len(matches) != 1:
+            record(name, 'multiple declarations', 'ambiguous')
+            continue
+        match = matches[0]
+        if match is None:
+            continue
+        version = match[4]
+        declaration = match[2] + (match[3] or '') + (f'=={version}' if version else '')
+        versions = installed.get(name, ())
+        actual = versions[0] if len(versions) == 1 else None
+        if name in core_entries:
+            core_match = core_entries[name][1]
+            if not version or match[3] or name in configured or version != core_match[4]:
+                record(name, declaration, 'overlap')
+            continue
+        if name in selected:
+            continue
+        if len(versions) != 1:
+            record(name, declaration, 'missing' if not versions else 'ambiguous')
+        elif not version:
+            action = 'review-pin' if actual and _STABLE.fullmatch(actual) and inventory.enabled is not None else 'manual-review'
+            record(name, declaration, 'unpinned', action)
+        elif version != actual:
+            record(name, declaration, 'mismatched')
+    for name, version in sorted(configured.items()):
+        if name not in selected and name not in entries:
+            record(name, 'no local requirement', 'missing',
+                   'review-pin' if _STABLE.fullmatch(version) else 'manual-review')
+    if inventory.enabled is None:
+        record('PLUGINS', 'dynamic configuration', 'ambiguous')
+    else:
+        for module in inventory.enabled:
+            if resolve_plugin_package(inventory.packages, module) is None:
+                record('PLUGINS', 'unmapped configured module', 'ambiguous')
+    # Unknown includes/complex declarations may change the meaning of simple
+    # pins. Keep all such cases manual until the operator resolves ambiguity.
+    if any(item.reason == 'ambiguous' for item in diagnostics):
+        diagnostics = [replace(item, action='manual-review') for item in diagnostics]
+    return tuple(diagnostics)
 
 
 def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,

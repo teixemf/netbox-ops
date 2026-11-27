@@ -117,6 +117,18 @@ while it runs, changes and execution are disabled. Suggest continues a partial
 search or explicitly recomputes plugin targets without changing NetBox.
 Reset restores installed versions; refresh preserves valid intent and clears
 review. Full validation derives the exact changed pins and existing operation.
+A failed local requirements check names the affected package, declaration,
+installed version, stage, reason and next action in both CLI and TUI.
+Use D then Enter Review pins (or P in the dashboard) for correctable exact
+pins. Bare, uniquely installed local dependencies may be reviewed in this
+context without becoming plugin upgrade targets. Existing mismatched pins,
+missing packages, complex declarations and local/core overlaps require
+manual review. Only explicitly approved changes are written under the
+existing lock and inventory revalidation; original requirements and their
+permissions/hash are retained in a protected pin-recovery directory outside
+the NetBox checkout before replacement. A successful correction invalidates
+the prior plan, refreshes inventory and rebuilds validation; no package
+installation or service action is authorized by pin review.
 Only an executable plan matching the current selection enables review and
 execution. The existing exact fingerprint, confirmation, revalidation, health
 and recovery gates remain unchanged. On narrow terminals use D for full

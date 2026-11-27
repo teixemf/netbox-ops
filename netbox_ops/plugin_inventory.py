@@ -9,6 +9,7 @@ import ast
 import csv
 import hashlib
 import io
+import json
 import os
 import re
 import stat
@@ -29,6 +30,7 @@ _PIN_TAIL = re.compile(r'^[ \t]*==[ \t]*([0-9][A-Za-z0-9.+_-]*)(?:[ \t]*#[^\r\n]
 _METADATA_LIMIT = 128 * 1024
 _RECORD_LIMIT = 4 * 1024 * 1024
 _REQUIREMENTS_LIMIT = 1024 * 1024
+_PIN_RECOVERY_DIRECTORY = Path('/var/lib/netbox-ops/pin-recovery')
 
 
 class PluginInventoryError(Exception):
@@ -68,6 +70,7 @@ class PluginInventory:
     enabled: tuple[str, ...] | None
     proposals: tuple[PinProposal, ...]
     warnings: tuple[str, ...]
+    local_pin_names: tuple[str, ...] = ()
 
 
 def normalize_name(name: str) -> str:
@@ -271,7 +274,8 @@ def _installed_packages(root: Path, python_version: str) -> tuple[InstalledPacka
     return tuple(sorted(packages, key=lambda p: normalize_name(p.name)))
 
 
-def inventory_plugins(installation: GitNetBoxInstallation) -> PluginInventory:
+def inventory_plugins(installation: GitNetBoxInstallation, *,
+                      local_pin_names: Sequence[str] = ()) -> PluginInventory:
     """Build proposals only for reliably matched enabled plugins; never write."""
     root = installation.root
     text, digest = _requirements(root)
@@ -331,7 +335,81 @@ def inventory_plugins(installation: GitNetBoxInstallation) -> PluginInventory:
         suffix = before[len(before.rstrip('\r\n')):]
         after = f'{match.group(1)}{match.group(2)}{match.group(3) or ""}=={package.version}{match.group(4)}{suffix}'
         proposals.append(PinProposal(package.name, package.version, entry.number, before, after))
-    return PluginInventory(root, digest, declared, installed, enabled, tuple(proposals), tuple(warnings))
+    # Contextual review may explicitly request bare, already installed local
+    # packages. This does not make them eligible plugin upgrade targets.
+    requested = tuple(sorted(set(normalize_name(name) for name in local_pin_names)))
+    if requested and enabled is not None and not unknown_sources:
+        # Never propose a local pin for a core dependency or a complex file.
+        core = _read_regular(root / 'requirements.txt', _REQUIREMENTS_LIMIT)
+        core_text = core.decode('utf-8') if core is not None else ''
+        core_entries = _parse_requirements(core_text)
+        core_names = {normalize_name(item.name) for item in core_entries}
+        core_simple = bool(core_entries) and all(
+            not line.strip() or line.lstrip().startswith('#') or
+            (match := _HEAD.fullmatch(line)) is not None and _PIN_TAIL.fullmatch(match[4])
+            for line in core_text.splitlines())
+        existing = {normalize_name(item.package) for item in proposals}
+        simple = all(not line.strip() or line.lstrip().startswith('#') or
+                     (match := _HEAD.fullmatch(line.rstrip('\r\n'))) is not None
+                     and (_BARE_TAIL.fullmatch(match[4]) or _PIN_TAIL.fullmatch(match[4]))
+                     for line in lines)
+        for name in requested:
+            entries = groups.get(name, ())
+            matches = [p for p in installed if normalize_name(p.name) == name]
+            if (not simple or not core_simple or name in core_names or name in existing
+                    or len(entries) != 1 or entries[0].kind != 'bare' or len(matches) != 1
+                    or not _VERSION.fullmatch(matches[0].version)):
+                continue
+            entry = entries[0]
+            package = matches[0]
+            before = lines[entry.number - 1]
+            match = _HEAD.fullmatch(before.rstrip('\r\n'))
+            if match is None:
+                continue
+            suffix = before[len(before.rstrip('\r\n')):]
+            after = f'{match[1]}{match[2]}{match[3] or ""}=={package.version}{match[4]}{suffix}'
+            proposals.append(PinProposal(package.name, package.version, entry.number, before, after))
+    return PluginInventory(root, digest, declared, installed, enabled, tuple(proposals), tuple(warnings), requested)
+
+
+def _save_pin_backup(root: Path, raw: bytes, mode: int, group: int) -> Path:
+    """Retain exact original bytes outside the Git checkout before replacement."""
+    from .upgrade_execution import UpgradeExecutionError
+    from .upgrade_recovery import _private_directory, _write_private
+
+    parent = _PIN_RECOVERY_DIRECTORY.parent
+    try:
+        # The shared state directory may not exist on a fresh installation.
+        # Validate its existing ancestors before creating it; never follow a
+        # symlink or create an arbitrary chain of missing directories.
+        for item in parent.parents:
+            info = item.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+                raise PluginInventoryError('Unsafe pin recovery directory')
+        if parent.resolve() != parent:
+            raise PluginInventoryError('Unsafe pin recovery directory')
+        parent.mkdir(mode=0o700, exist_ok=True)
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
+            raise PluginInventoryError('Unsafe pin recovery directory')
+        _PIN_RECOVERY_DIRECTORY.mkdir(mode=0o700, exist_ok=True)
+        _private_directory(_PIN_RECOVERY_DIRECTORY)
+        directory = Path(tempfile.mkdtemp(prefix='pins-', dir=_PIN_RECOVERY_DIRECTORY))
+        _private_directory(directory)
+        _write_private(directory / 'local_requirements.txt', raw)
+        record = {'root': str(root), 'sha256': hashlib.sha256(raw).hexdigest(),
+                  'mode': mode, 'gid': group}
+        _write_private(directory / 'recovery.json', json.dumps(record).encode('utf-8'))
+        for path in (directory, _PIN_RECOVERY_DIRECTORY, parent):
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        return directory
+    except (OSError, UpgradeExecutionError) as exc:
+        raise PluginInventoryError('Cannot save protected original requirements; no pins changed') from exc
 
 
 def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
@@ -355,7 +433,8 @@ def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
         state = inspect_git_installation(inventory.root)
         if state.root != inventory.root:
             raise PluginInventoryError('NetBox installation changed before approval')
-        current = inventory_plugins(state)
+        current = (inventory_plugins(state, local_pin_names=inventory.local_pin_names)
+                   if inventory.local_pin_names else inventory_plugins(state))
         if (current.requirements_hash != inventory.requirements_hash or
                 current.enabled != inventory.enabled or
                 current.packages != inventory.packages or
@@ -389,8 +468,10 @@ def apply_approved_pins(inventory: PluginInventory, selected: Sequence[str],
                     or existing.st_nlink != 1 or mode & 0o7022):
                 raise PluginInventoryError('Local requirements must be a safe root-controlled file')
             group = existing.st_gid
-        # Keep audit failure from occurring *after* the replacement.
-        write_audit('plugin requirements: approved exact pins: ' + ','.join(unique))
+        # Keep audit/backup failure from occurring *after* replacement.
+        backup = _save_pin_backup(inventory.root, text.encode('utf-8'), mode, group) if existing else None
+        write_audit('plugin requirements: approved exact pins: ' + ','.join(unique)
+                    + (f'; original saved in {backup}' if backup else ''))
         fd, temporary = tempfile.mkstemp(prefix='.netbox-ops-pins-', dir=inventory.root)
         try:
             with os.fdopen(fd, 'wb') as stream:
