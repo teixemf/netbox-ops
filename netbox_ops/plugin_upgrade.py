@@ -44,6 +44,8 @@ class PluginUpgrade:
     selected: tuple[tuple[str, str], ...]
     wheelhouse: Path | None = None
     overlaps: tuple[RequirementOverlap, ...] = ()
+    # Temporary preference only; never written to local_requirements.txt.
+    preferred_local: tuple[str, ...] = ()
 
 
 class RequirementOverlapError(UpgradeExecutionError):
@@ -52,7 +54,7 @@ class RequirementOverlapError(UpgradeExecutionError):
     def __init__(self, overlaps: tuple[RequirementOverlap, ...]):
         self.overlaps = overlaps
         details = '; '.join(f'{o.name}: local {o.local_pin}, core {o.core_pin} ({o.status})'
-                            for o in overlaps if o.status != 'redundant')
+                            for o in overlaps if o.status in ('conflict', 'ambiguous'))
         super().__init__('Local/core requirement overlap: ' + details +
                          '. Review local purpose and pins or choose another target; no files changed.')
 
@@ -129,10 +131,10 @@ def diagnose_local_requirements(plan: UpgradePlan, local: bytes | None, core: by
         actual = versions[0] if len(versions) == 1 else None
         if name in core_entries:
             core_match = core_entries[name][1]
-            if not version or match[3] or name in configured or version != core_match[4]:
+            if name in configured or (version and version != core_match[4]):
                 record(name, declaration, 'overlap')
             continue
-        if name in selected:
+        if name in selected or name not in configured:
             continue
         if len(versions) != 1:
             record(name, declaration, 'missing' if not versions else 'ambiguous')
@@ -234,14 +236,16 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         local_pin = f'{local_match[2]}{local_match[3] or ""}' + (
             f'=={local_match[4]}' if local_match[4] else '')
         core_pin = f'{core_match[2]}{core_match[3] or ""}=={core_match[4]}'
-        if not local_match[4] or local_match[3] or name in configured:
+        if name in configured:
             status = 'ambiguous'
-        elif local_match[4] != core_match[4]:
+        elif local_match[4] and local_match[4] != core_match[4]:
             status = 'conflict'
+        elif not local_match[4] or local_match[3]:
+            status = 'review'
         else:
             status = 'redundant'
         overlaps.append(RequirementOverlap(name, local_pin, core_pin, status))
-    if any(overlap.status != 'redundant' for overlap in overlaps):
+    if any(overlap.status in ('conflict', 'ambiguous') for overlap in overlaps):
         raise RequirementOverlapError(tuple(overlaps))
     for module in inventory.enabled:
         package = resolve_plugin_package(inventory.packages, module)
@@ -251,15 +255,23 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         if name not in selected and name not in entries:
             raise UpgradeExecutionError('Pin unselected configured plugins before upgrading')
     local_pins = []
+    preferred = []
     for name, (index, match) in entries.items():
         version = selected.get(name, match[4])
-        if not version or (name not in selected and installed.get(name) != version):
-            raise UpgradeExecutionError('Pin unselected local packages to their installed versions')
+        declaration = match[2] + (match[3] or '')
+        if name in configured and (not version or (name not in selected and installed.get(name) != version)):
+            raise UpgradeExecutionError('Pin unselected configured plugins to their installed versions')
         if name in selected:
             ending = lines[index][len(lines[index].rstrip('\r\n')):]
-            lines[index] = f'{match[1]}{match[2]}{match[3] or ""}=={version}{match[5]}{ending}'
-        local_pins.append(f'{match[2]}{match[3] or ""}=={version}')
-        expected[name] = version
+            lines[index] = f'{match[1]}{declaration}=={version}{match[5]}{ending}'
+        if version:
+            local_pins.append(f'{declaration}=={version}')
+            expected[name] = version
+        else:
+            local_pins.append(declaration)
+            actual = installed.get(name)
+            if name not in core_entries and actual and re.fullmatch(r'[0-9][A-Za-z0-9.+_-]*', actual):
+                preferred.append(f'{declaration}=={actual}')
     newline = '\r\n' if local and b'\r\n' in local else '\n'
     for name, version in selected.items():
         if name in entries:
@@ -274,13 +286,16 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         raise UpgradeExecutionError('Prepared pins differ from the approved plugin versions')
     return PluginUpgrade(digest, ''.join(lines).encode('utf-8'), tuple(core_pins),
                          tuple(local_pins), tuple(sorted(expected.items())),
-                         tuple(sorted(selected.items())), overlaps=tuple(overlaps))
+                         tuple(sorted(selected.items())), overlaps=tuple(overlaps),
+                         preferred_local=tuple(preferred))
 
 
 def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
                                core: bytes, pins: PluginUpgrade) -> PluginUpgrade:
     """Bind downloaded artifacts to the exact approved stage dependency report."""
     if not plan.dependency_reviews:
+        if any('==' not in pin for pin in pins.local_pins):
+            raise UpgradeExecutionError('Unpinned local requirements require an approved full dependency report')
         return pins  # Internal callers still perform a full execution preflight.
     review = plan.dependency_reviews[index]
     if (review.version != plan.stages[index].netbox_version or review.commit != commit
@@ -292,7 +307,17 @@ def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
     expected = dict(review.resolution.packages)
     if any(expected.get(name) != version for name, version in pins.expected):
         raise UpgradeExecutionError('Approved resolver report does not match exact requirements')
-    return replace(pins, expected=tuple(sorted(expected.items())))
+    bound = []
+    for declaration in pins.local_pins:
+        if '==' in declaration:
+            bound.append(declaration)
+            continue
+        name = normalize_name(declaration.split('[', 1)[0])
+        version = expected.get(name)
+        if not isinstance(version, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+_-]*', version):
+            raise UpgradeExecutionError('Approved resolver report does not bind a local requirement')
+        bound.append(f'{declaration}=={version}')
+    return replace(pins, local_pins=tuple(bound), expected=tuple(sorted(expected.items())))
 
 
 def verify_reviewed_resolution(plan: UpgradePlan, index: int, resolution) -> None:

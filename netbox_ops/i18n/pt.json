@@ -567,5 +567,6 @@
   "nbo_create_downtime_live": "Os serviços NetBox não são parados.",
   "nbo_create_downtime_combined": "Pára temporariamente os serviços NetBox e RQ activos.",
   "nbo_restore_downtime_short": "Pára temporariamente NetBox/RQ activos.",
-  "nbo_restore_safety_short": "Confirmação e backup de segurança."
+  "nbo_restore_safety_short": "Confirmação e backup de segurança.",
+  "upgrade_overlap_review": "  {name}: local {local}; core {core}. Declaração local mantida; resolver em conjunto com o pin core exato."
 }

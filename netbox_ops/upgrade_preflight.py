@@ -10,7 +10,7 @@ from typing import Callable
 from .config import Configuration
 from .plugin_compatibility import CompatibilityError, DependencyPreflight, isolated_dependency_preflight
 from .plugin_inventory import normalize_name
-from .plugin_upgrade import RequirementOverlapError, diagnose_local_requirements, prepare_plugin_upgrade
+from .plugin_upgrade import PluginUpgrade, RequirementOverlapError, diagnose_local_requirements, prepare_plugin_upgrade
 from .upgrade_checkout import _run_git
 from .upgrade_combined import download_stage_wheels
 from .upgrade_execution import UpgradeExecutionError
@@ -29,6 +29,31 @@ def target_requirements(pinned: PinnedStage, scratch: Path, *, git: Callable = _
     if git(scratch, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}']) != pinned.commit:
         raise UpgradeExecutionError('Target release commit changed during dependency review')
     return git(scratch, ['show', pinned.commit + ':requirements.txt']).encode('utf-8')
+
+
+def _review_resolution(pins: PluginUpgrade, live, scratch: Path, resolver, download) -> DependencyPreflight:
+    """Prefer installed bare local versions; retry the actual declaration if necessary."""
+    preferred = {pin.split('==', 1)[0]: pin for pin in pins.preferred_local}
+    candidates = []
+    if preferred:
+        candidates.append(replace(pins, local_pins=tuple(preferred.get(pin, pin) for pin in pins.local_pins)))
+    candidates.append(pins)
+    for attempt, candidate in enumerate(candidates):
+        options = {'allow_unpinned': True} if any('==' not in pin for pin in candidate.local_pins) else {}
+        result = resolver(candidate.local_pins, candidate.core_pins, live.python_version,
+                          interpreter=live.python, **options)
+        if result.status == 'unknown':
+            wheelhouse = scratch / f'wheels-{attempt}'
+            try:
+                download(candidate, live, wheelhouse)
+            except UpgradeExecutionError:
+                pass
+            else:
+                result = resolver(candidate.local_pins, candidate.core_pins, live.python_version,
+                                  interpreter=live.python, wheelhouse=wheelhouse, **options)
+        if result.status == 'passed' and result.checked_core:
+            return result
+    return result
 
 
 def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
@@ -88,17 +113,9 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                         (), ltree, overlaps, diagnostics,
                     ))
                     continue
-                result = resolver(pins.local_pins, pins.core_pins, live.python_version,
-                                  interpreter=live.python)
-                if result.status == 'unknown':
-                    wheelhouse = Path(temp) / f'wheels-{index}'
-                    try:
-                        download(pins, live, wheelhouse)
-                    except UpgradeExecutionError:
-                        pass  # A network/build error is uncertainty, not a proven conflict.
-                    else:
-                        result = resolver(pins.local_pins, pins.core_pins, live.python_version,
-                                          interpreter=live.python, wheelhouse=wheelhouse)
+                scratch = Path(temp) / f'resolver-{index}'
+                scratch.mkdir(mode=0o700)
+                result = _review_resolution(pins, live, scratch, resolver, download)
                 if result.status == 'blocked':
                     blockers.append(prefix + 'Python dependency resolution confirmed a conflict')
                 elif result.status != 'passed' or not result.checked_core:
