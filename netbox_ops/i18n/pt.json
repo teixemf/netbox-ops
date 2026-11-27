@@ -544,7 +544,7 @@
   "ut_note_target": "Alvo",
   "ut_unavailable": "Versão indisponível",
   "ut_plan_mismatch": "O plano não corresponde às versões exatas selecionadas.",
-  "ut_no_changes": "Plano: Sem alterações",
+  "ut_no_changes": "Sem alterações planeadas",
   "ut_preliminary_status": "Preliminar: {status}",
   "ut_preliminary_short": "Preliminar",
   "tui_selector_options": "OPÇÕES",
@@ -570,5 +570,7 @@
   "nbo_restore_safety_short": "Confirmação e backup de segurança.",
   "ut_validating": "A validar alvos exatos…",
   "ut_validation_error": "A validação falhou. Repita ou reveja os alvos.",
-  "ut_review_next": "Próximo passo: Rever e executar"
+  "ut_review_next": "Próximo passo: Rever e executar",
+  "ut_unchanged": "Sem alteração",
+  "ut_discovery_incomplete_retry": "Descoberta incompleta — D detalhes / F5 repetir"
 }

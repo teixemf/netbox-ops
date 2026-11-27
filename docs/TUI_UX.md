@@ -125,6 +125,10 @@ in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
 The regression suite captures 50x16, 80x24, 120x30 and 160x45, including resize.
 Dynamic
 pin actions retain focus by identity, never implicitly move focus to execution.
+With no changed targets, use neutral Unchanged labels unless there is a real
+compatibility, runtime or inventory problem; this is not verification. Raw
+evidence stays available on E. Once discovery finishes, restore the plan
+panels, with an explicit incomplete/failure summary and D/F5 retry guidance.
 Discovery opens directly in Upgrade Management. Show unknown values until
 installed inventory is observed, then publish installed rows while official
 release lookup continues. DISCOVERY STATUS reports the actual inventory,

@@ -433,9 +433,12 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('validate'))
         self.assertFalse(dashboard._enabled('execute'))
         self.assertTrue(dashboard._draw())
-        self.assertTrue(any('Failed' in text for _, _, text, _ in menu.stdscr.frames[-1]))
+        self.assertTrue(any(menu.t('upgrade_discovery_error') in text
+                            for _, _, text, _ in menu.stdscr.frames[-1]))
+        self.assertFalse(any(text == menu.t('ut_discovery_heading')
+                             for _, _, text, _ in menu.stdscr.frames[-1]))
 
-    def test_completed_discovery_hides_panel_but_partial_discovery_does_not(self):
+    def test_completed_discovery_returns_to_plan_even_when_partial(self):
         from concurrent.futures import Future
         from netbox_ops.upgrade_targets import TargetSnapshot
 
@@ -452,8 +455,11 @@ class UpgradeTuiTests(InterfaceFixture):
             if partial:
                 self.assertEqual(dashboard._discovery_states['assessment'], 'partial')
             self.assertTrue(dashboard._draw())
-            self.assertEqual(any(text == menu.t('ut_discovery_heading')
-                                 for _, _, text, _ in menu.stdscr.frames[-1]), partial)
+            self.assertFalse(any(text == menu.t('ut_discovery_heading')
+                                 for _, _, text, _ in menu.stdscr.frames[-1]))
+            if partial:
+                self.assertIn((menu.t('ut_discovery_incomplete_retry'), 'warning'),
+                              dashboard._overview_lines())
             self.assertFalse(dashboard._enabled('execute'))
 
     def test_picker_scrolls_continuous_catalogue_and_keeps_status_colors(self):
@@ -525,6 +531,44 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('execute'))
         self.assertIsNone(dashboard.plan)
         self.assertIn(menu.t('ut_no_changes'), [line for line, _ in dashboard._plan_lines()])
+
+    def test_noop_presentation_does_not_change_compatibility_or_hide_real_conflict(self):
+        from netbox_ops.plugin_compatibility import CompatibilityEvidence
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow, TargetSnapshot
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard.model.reset()
+            request = dashboard.model.request('assess')
+            warning = TargetAssessment('warning', 'installed', (
+                CompatibilityEvidence('PyPI', 'Release metadata unavailable', 'unknown'),
+                CompatibilityEvidence('PyPI Requires-Dist', 'No explicit NetBox distribution dependency', 'warns'),
+            ))
+            rows = tuple(TargetRow(row.component, row.current, row.current, warning)
+                         for row in dashboard._rows())
+            dashboard.snapshot = TargetSnapshot(request, request.selection, rows, 'warning', (), False)
+            for dimensions in ((16, 50), (45, 160)):
+                menu.stdscr.dimensions = dimensions
+                dashboard._draw()
+                self.assertIn(menu.t('ut_no_changes'), ' '.join(text for _, _, text, _ in menu.stdscr.frames[-1]))
+                for row in rows:
+                    self.assertEqual(dashboard._row_status(row), (menu.t('ut_unchanged'), 'muted'))
+                    self.assertEqual(row.assessment.status, 'warning')
+            conflict = replace(warning, status='conflict', evidence=(
+                CompatibilityEvidence('PluginConfig', 'Known incompatibility', 'blocks'),))
+            blocked = replace(rows[1], assessment=conflict)
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(replace(rows[0], assessment=conflict), blocked),
+                                         status='conflict')
+            self.assertEqual(dashboard._row_status(blocked)[1], 'failure')
+            self.assertTrue(any(style == 'failure' and 'Known incompatibility' in line
+                                for line, style in dashboard._overview_lines()))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=rows, status='warning')
+            dashboard.model.selection = replace(dashboard.model.selection, netbox='4.4.2')
+            self.assertEqual(dashboard._row_status(rows[1])[1], 'warning')
+            dashboard.model.selection = replace(dashboard.model.installed,
+                                                plugins=(('example-plugin', '2.0.0'),))
+            self.assertEqual(dashboard._row_status(rows[0])[1], 'warning')
+            self.assertFalse(dashboard._enabled('execute'))
 
     def test_dashboard_stale_worker_result_does_not_replace_reset_intent(self):
         from concurrent.futures import Future
