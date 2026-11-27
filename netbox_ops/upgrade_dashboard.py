@@ -150,15 +150,46 @@ class UpgradeDashboard:
                 rows.append((self.t('upgrade_dependency_status', version=stage.netbox_version,
                                     status=self.t('upgrade_dependency_' + status)),
                              {'passed': 'success', 'blocked': 'failure'}.get(status, 'warning')))
-        return rows
+        return [rows[1], rows[2], rows[3], rows[0], *rows[4:]]
 
     def _component_lines(self, row):
         return [(self._name(row.component), 'title'),
-                (f'{row.current} -> {row.target}', 'muted'),
+                (f'{self.t("ut_col_current")}: {row.current}', 'muted'),
+                (f'{self.t("ut_col_target")}: {row.target}', 'muted'),
                 (self._status(row.assessment), _STYLES[row.assessment.status]),
                 *((f'{item.source}: {item.detail}',
                    {'blocks': 'failure', 'warns': 'warning', 'unknown': 'warning'}.get(item.status, 'muted'))
                   for item in row.assessment.evidence)]
+
+    def _compact_component_lines(self, row, width):
+        lines = self._component_lines(row)
+        evidence = lines[4:]
+        result = lines[:4]
+        # Put blocking/uncertain reasons before ordinary supporting evidence.
+        attention = [line for line in evidence if line[1] in ('warning', 'failure')]
+        if attention:
+            result.append(attention[0])
+        checks = row.assessment.prerequisites
+        if checks and width >= 34:
+            headers = [self.t('ut_col_status'), self.t('ut_col_component'),
+                       self.t('ut_col_current'), self.t('ut_col_required')]
+            status_width = max(len(headers[0]), len(self.t('ut_warning')), len(self.t('ut_conflict')))
+            current_width = max(len(headers[2]), 7)
+            required_width = max(len(headers[3]), 8)
+            name_width = width - status_width - current_width - required_width - 3
+            if name_width >= 8:
+                widths = (status_width, name_width, current_width, required_width)
+                result.append((self._row_text(headers, widths), 'muted'))
+                # The full stage-specific explanations remain in D.
+                for stage, item in sorted(checks, key=lambda check: check[1].status == 'ok'):
+                    state = {'ok': 'supported', 'blocked': 'conflict', 'unknown': 'warning'}[item.status]
+                    name = item.name if len({version for version, _ in checks}) == 1 else f'{stage}: {item.name}'
+                    result.append((self._row_text((self.t('ut_' + state), name,
+                                                   item.installed or '?', item.required), widths),
+                                   _STYLES[state]))
+        if not checks:
+            result.extend(line for line in evidence if line not in attention[:1])
+        return result
 
     def _details(self, row):
         lines = [(self.t('ut_preliminary'), 'section'), *self._component_lines(row)]
@@ -170,6 +201,37 @@ class UpgradeDashboard:
         if self._plan_matches():
             lines.extend((line, '') for line in summary_lines(self.plan, self.t, details=True))
         self.menu._show_lines(self.title, lines, allow_quit=True)
+
+    def _table_widths(self, rows, width):
+        t = self.t
+        names = [t('ut_group_core'), t('ut_group_plugins'),
+                 *('  ' + self._name(row.component) for row in rows)]
+        headers = [t('ut_col_' + key) for key in ('current', 'target', 'status')]
+        minimum = [max(8, len(t('ut_group_plugins'))), len(headers[0]), len(headers[1]), len(headers[2])]
+        preferred = [max(map(len, names)), max(len(headers[0]), *(len(row.current) for row in rows)),
+                     max(len(headers[1]), *(len(row.target) + 1 for row in rows)),
+                     max(len(headers[2]), *(len(self._status(row.assessment)) for row in rows))]
+        widths = [max(low, high) for low, high in zip(minimum, preferred)]
+        gap = 3 if sum(widths) + 9 <= width else 1
+        excess = max(0, sum(widths) + 3 * gap - width)
+        for index in (0, 1, 2, 3):
+            reduction = min(excess, widths[index] - minimum[index])
+            widths[index] -= reduction
+            excess -= reduction
+        return widths, gap
+
+    @staticmethod
+    def _visible_components(rows, start, budget):
+        """Group labels consume screen rows, not selectable component indices."""
+        visible = []
+        remaining = budget
+        for index in range(start, len(rows)):
+            cost = 3 if index == 1 and start == 0 else 1
+            if remaining < cost:
+                break
+            visible.append(index)
+            remaining -= cost
+        return visible
 
     def _draw(self):
         menu, t = self.menu, self.t
@@ -185,45 +247,62 @@ class UpgradeDashboard:
         labels = [t('ut_action_' + a + ('_short' if compact else '')) for a in _ACTIONS]
         self.positions = menu._backup_action_positions(labels, width)
         action_height = 2 + self.positions[-1][1]
-        detail_height = 2 if h < 21 else min(7, max(3, (h - 12) // 2))
-        visible = max(1, h - 2 - 5 - 1 - action_height - detail_height)
-        self.scroll = max(0, min(self.scroll, len(rows) - visible))
-        if self.cursor < self.scroll:
-            self.scroll = self.cursor
-        if self.cursor >= self.scroll + visible:
-            self.scroll = self.cursor - visible + 1
-        counts_y = 5 + visible
-        action_y = counts_y + 1
-        detail_y = action_y + action_height
-        menu._paint(3, 2, w - 4, action_y - 3)
+        gap = 1 if h >= 22 else 0
+        side_by_side = w >= 82 and h >= 21
+        detail_height = min(12, max(5, (h - 12) // 2)) if side_by_side else 2
+        budget = max(1, h - 2 - 3 - 3 - action_height - detail_height - 2 * gap)
+        self.scroll = max(0, min(self.scroll, self.cursor, len(rows) - 1))
+        visible = self._visible_components(rows, self.scroll, budget)
+        while self.cursor not in visible:
+            self.scroll += 1
+            visible = self._visible_components(rows, self.scroll, budget)
+        # Reclaim earlier rows when a resize gives us more room.
+        while self.scroll > 0:
+            earlier = self._visible_components(rows, self.scroll - 1, budget)
+            if self.cursor not in earlier:
+                break
+            self.scroll -= 1
+            visible = earlier
+        table_rows = len(visible) + (2 if 0 in visible and 1 in visible else 0)
+        counts_y = 5 + table_rows
+        action_y = counts_y + 1 + gap
+        detail_y = action_y + action_height + gap
+        menu._paint(3, 2, w - 4, counts_y - 2)
         menu._paint(action_y, 2, w - 4, action_height)
         menu._put(3, 3, t('ut_available'), 'section')
-        headers = [t('ut_col_' + key) for key in ('component', 'current', 'target', 'status')]
-        status_width = max(len(headers[3]), *(len(self._status(row.assessment)) for row in rows))
-        status_width = min(12, status_width)
-        version_width = min(16, max(9, len(headers[1]), len(headers[2]),
-                                    *(len(row.target) + 1 for row in rows), *(len(row.current) for row in rows)))
-        version_width = min(version_width, max(8, (width - status_width - 13) // 2))
-        widths = (width - status_width - 2 * version_width - 3, version_width, version_width, status_width)
-        menu._put(4, 3, self._row_text(headers, widths), 'muted')
-        for i, row in enumerate(rows[self.scroll:self.scroll + visible], self.scroll):
-            y = 5 + i - self.scroll
-            selected = i == self.cursor and not self.actions_focused
+        widths, column_gap = self._table_widths(rows, width)
+        offsets = [0]
+        for cell in widths[:-1]:
+            offsets.append(offsets[-1] + cell + column_gap)
+        table_width = offsets[-1] + widths[-1]
+        group = t('ut_group_core' if self.scroll == 0 else 'ut_group_plugins')
+        menu._put(4, 3, group, 'section')
+        for i, key in enumerate(('current', 'target', 'status'), 1):
+            menu._put(4, 3 + offsets[i], t('ut_col_' + key), 'muted')
+        y = 5
+        for index in visible:
+            row = rows[index]
+            if index == 1 and self.scroll == 0:
+                y += 1
+                menu._put(y, 3, t('ut_group_plugins'), 'section')
+                y += 1
+            selected = index == self.cursor and not self.actions_focused
             target = ('*' if row.target != row.current else '') + row.target
-            values = (self._name(row.component), row.current, target, self._status(row.assessment))
+            values = ('  ' + self._name(row.component), row.current, target, self._status(row.assessment))
             if selected:
-                menu._put(y, 3, ' ' * width, 'selected')
-            menu._put(y, 3, self._row_text(values, widths), 'selected' if selected else '')
-            if not selected:
-                menu._put(y, 3 + sum(widths[:3]) + 3,
-                          _clip(values[3], widths[3]), _STYLES[row.assessment.status])
+                menu._put(y, 3, ' ' * table_width, 'selected')
+            for i, value in enumerate(values):
+                style = 'selected' if selected else ''
+                if i == 3 and (not selected or menu.colors):
+                    style = _STYLES[row.assessment.status]
+                menu._put(y, 3 + offsets[i], _clip(value, widths[i]), style)
+            y += 1
         count = sum(row.current != row.target for row in rows)
         note = (t('ut_checking') if self.future is not None else t('ut_partial')
                 if self.snapshot and self.snapshot.partial else t('ut_details_key')
-                if self.error or self.snapshot and self.snapshot.warnings else '')
+                if self.error or self.snapshot and self.snapshot.warnings else t('ut_preliminary_short'))
         counts = t('ut_counts', count=len(rows), changed=count)
-        note = note or t('ut_preliminary_short')
-        menu._put(counts_y, 3, _clip(f'{note} | {counts}', width), 'muted')
+        menu._put(counts_y, 3, _clip(f'{counts} | {note}', width), 'muted')
         menu._put(action_y, 3, t('ut_operations'), 'section')
         for i, (x, line) in enumerate(self.positions):
             enabled = self._enabled(_ACTIONS[i])
@@ -233,21 +312,24 @@ class UpgradeDashboard:
                       'selected' if focused else 'title' if enabled else 'muted')
         row = rows[self.cursor]
         if detail_y < h - 2:
-            if w >= 82 and detail_height >= 3:
+            if side_by_side:
                 split = w // 2
-                menu._paint(detail_y, 2, split - 3, h - 2 - detail_y)
-                menu._paint(detail_y, split + 1, w - split - 3, h - 2 - detail_y)
+                component = self._compact_component_lines(row, split - 5)
+                plan = self._plan_lines()
+                height = min(h - 2 - detail_y, max(len(component), len(plan)) + 1, detail_height)
+                menu._paint(detail_y, 2, split - 3, height)
+                menu._paint(detail_y, split + 1, w - split - 3, height)
                 menu._put(detail_y, 3, t('ut_component_details'), 'section')
                 menu._put(detail_y, split + 2, t('ut_plan'), 'section')
-                for i, (line, style) in enumerate(self._component_lines(row)[:h - 3 - detail_y]):
+                for i, (line, style) in enumerate(component[:height - 1]):
                     menu._put(detail_y + 1 + i, 3, _clip(line, split - 5), style)
-                for i, (line, style) in enumerate(self._plan_lines()[:h - 3 - detail_y]):
+                for i, (line, style) in enumerate(plan[:height - 1]):
                     menu._put(detail_y + 1 + i, split + 2, _clip(line, w - split - 5), style)
             else:
-                menu._paint(detail_y, 2, w - 4, h - 2 - detail_y)
+                menu._paint(detail_y, 2, w - 4, min(2, h - 2 - detail_y))
                 menu._put(detail_y, 3, _clip(t('ut_details_key') + ': ' + self._name(row.component), width), 'section')
                 if detail_y + 1 < h - 2:
-                    line, style = self._plan_lines()[0]
+                    line, style = self._plan_lines()[3]
                     menu._put(detail_y + 1, 3, _clip(line, width), style)
         menu.stdscr.refresh()
         return True

@@ -17,7 +17,7 @@ from .plugin_compatibility import (
     CompatibilityError, CompatibilityEvidence, ReleaseCatalog, _release_key,
     discover_stable_releases, fetch_pypi_json, fetch_release_declaration, review_plugin_upgrade,
 )
-from .upgrade_discovery import check_prerequisites
+from .upgrade_discovery import Prerequisite, check_prerequisites
 from .upgrade_execution import UpgradeExecutionError
 from .upgrade_plan import UpgradePlanError, _number, required_netbox_path
 from .upgrade_ui import UpgradeContext, discover_context, official_tags
@@ -79,6 +79,7 @@ class TargetAssessment:
     availability: str  # installed | verified | unavailable | unknown
     evidence: tuple[CompatibilityEvidence, ...] = ()
     pending: bool = False
+    prerequisites: tuple[tuple[str, Prerequisite], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -359,6 +360,7 @@ class TargetModel:
                         'unavailable' if self.context.tags else 'unknown')
         evidence = []
         statuses = []
+        prerequisites = []
         if not self.context.tags:
             statuses.append('warning')
             evidence.append(_evidence('Release discovery', 'Official NetBox releases unavailable', 'unknown'))
@@ -378,6 +380,7 @@ class TargetModel:
                 stage, self.context.installation.python_version,
                 postgres_version=self.context.postgres, redis_version=self.context.redis,
             ):
+                prerequisites.append((stage, item))
                 statuses.append({'ok': 'supported', 'blocked': 'conflict', 'unknown': 'warning'}[item.status])
                 evidence.append(_evidence(f'{stage}: {item.name}',
                                           f'{item.detail} ({item.installed or "?"}; {item.required})',
@@ -395,7 +398,8 @@ class TargetModel:
             statuses.append('warning')
             evidence.append(_evidence('Inventory', 'Some configured plugins could not be reliably mapped', 'unknown'))
         return TargetAssessment(_status(statuses), availability, tuple(evidence),
-                                any(row.assessment.pending for row in (*plugin_rows, *earlier)))
+                                any(row.assessment.pending for row in (*plugin_rows, *earlier)),
+                                tuple(prerequisites))
 
     def _rows(self, selection, budget):
         current = dict(self.installed.plugins)

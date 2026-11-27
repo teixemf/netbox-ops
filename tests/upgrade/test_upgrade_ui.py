@@ -306,12 +306,64 @@ class UpgradeTuiTests(InterfaceFixture):
                     screen = menu.stdscr
                     frame = screen.frames[-1]
                     header = ' '.join(text for y, _, text, _ in frame if y == 4)
-                    for key in ('component', 'current', 'target', 'status'):
+                    self.assertIn(menu.t('ut_group_core'), header)
+                    self.assertNotIn(menu.t('ut_col_component'), header)
+                    for key in ('current', 'target', 'status'):
                         self.assertIn(menu.t('ut_col_' + key), header)
                     self.assertIn('*4.4.2', ' '.join(text for _, _, text, _ in frame))
                     self.assertNotIn('django', ' '.join(text for _, _, text, _ in frame))
                     self.assertTrue(any(attr == curses.A_REVERSE for _, _, _, attr in frame))
                     self.assertEqual(screen.wait_ms, -1)
+
+    def test_grouped_dashboard_uses_content_width_and_keeps_group_navigation(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(dimensions=(45, 140), language=language)
+            rows = (TargetRow(None, '4.4.0', '4.4.2', TargetAssessment('supported', 'verified')),
+                    TargetRow('example-plugin', '1.0.0', '2.0.0',
+                              TargetAssessment('warning', 'verified')))
+            with patch.object(dashboard, '_rows', return_value=rows):
+                dashboard._draw()
+                frame = menu.stdscr.frames[-1]
+                heading = next(y for y, _, text, _ in frame if text == menu.t('ut_group_plugins'))
+                netbox = next(y for y, _, text, _ in frame if text == '  NetBox')
+                plugin = next(y for y, _, text, _ in frame if text == '  example-plugin')
+                self.assertEqual((heading, plugin), (netbox + 2, netbox + 3))
+                counts = next(y for y, _, text, _ in frame if menu.t('ut_counts', count=2, changed=2) in text)
+                self.assertEqual(counts, plugin + 1)
+                self.assertTrue(any(y == netbox and attr == curses.A_REVERSE and len(text) < 100
+                                    for y, _, text, attr in frame))
+                self.assertLess(next(y for y, _, text, _ in frame if text == menu.t('ut_operations')), 15)
+                menu.stdscr.dimensions = (16, 50)
+                dashboard.cursor = 1
+                dashboard._draw()
+                frame = menu.stdscr.frames[-1]
+                self.assertTrue(any(y == 4 and text == menu.t('ut_group_plugins') for y, _, text, _ in frame))
+                self.assertTrue(any(text.strip().startswith('example') for _, _, text, _ in frame))
+                self.assertEqual(dashboard.cursor, 1)
+                self.assertTrue(any(menu.t('ut_operations') in text for _, _, text, _ in frame))
+
+    def test_dashboard_scrolls_many_plugins_without_selecting_group_labels(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        dashboard, menu = self._dashboard(dimensions=(24, 100))
+        rows = tuple(TargetRow(None if i == 0 else f'plugin-{i:02}', '1.0.0', '2.0.0',
+                               TargetAssessment('unchecked', 'unknown')) for i in range(25))
+        with patch.object(dashboard, '_rows', return_value=rows):
+            dashboard.cursor = 24
+            dashboard._draw()
+            frame = menu.stdscr.frames[-1]
+            self.assertTrue(any('plugin-24' in text for _, _, text, _ in frame))
+            self.assertTrue(any(y == 4 and text == menu.t('ut_group_plugins') for y, _, text, _ in frame))
+            dashboard.cursor = 0
+            dashboard._draw()
+            self.assertEqual(dashboard.scroll, 0)
+            self.assertTrue(any(text == '  NetBox' for _, _, text, _ in menu.stdscr.frames[-1]))
+            with patch.object(dashboard, '_rows', return_value=rows[:1]):
+                dashboard._draw()
+                self.assertFalse(any(text == menu.t('ut_group_plugins')
+                                     for _, _, text, _ in menu.stdscr.frames[-1]))
 
     def test_dashboard_picker_cancel_and_confirm_preserve_other_targets(self):
         for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, 10], '4.4.1')):

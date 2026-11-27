@@ -42,9 +42,11 @@ versions are prerequisites in details; self-upgrade remains separate.
 NETBOX-OPS                    v0.6.1 EN
 Upgrade management
 AVAILABLE UPGRADES
-COMPONENT            CURRENT    TARGET     STATUS
-NetBox               4.4.9      *4.7.6     OK
-example-plugin       1.0.0      *2.0.0     Warning
+Core                 CURRENT    TARGET     STATUS
+  NetBox             4.4.9      *4.7.6     OK
+
+Plugins
+  example-plugin     1.0.0      *2.0.0     Warning
 Components: 2 | Changes: 2
 UPGRADE OPERATIONS
 [Suggest targets] [Reset targets] [Validate] [Refresh]
@@ -56,6 +58,10 @@ Warning                           Stages: ?
 Q Quit | Esc Back | Enter Open | Tab Actions | D Details | P Pins | F5 Refresh
 ```
 
+The aligned table sizes columns to content and groups Core and Plugins without
+selectable group headings. On short screens, the current group remains visible
+above the scroll window. Counts and operations follow the visible rows; details
+remain accessible with D, including complete prerequisite reasons and stage evidence.
 An asterisk marks a changed target, not a checkbox. Move with arrows/j/k,
 Home/End and Page Up/Down. Enter opens the version picker, D opens scrollable
 component evidence and the complete plan, P reviews local pins, and Tab or

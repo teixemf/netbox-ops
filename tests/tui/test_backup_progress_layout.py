@@ -53,8 +53,9 @@ class BackupProgressLayoutTests(unittest.TestCase):
             result = BackupReport(Path(long_path), 'db',
                                   'Previous database preserved: nbo_previous\n'
                                   'Redis cache and RQ data were preserved; check cache coherency.')
-            draw = lambda: menu._draw_backup_progress('Verify', ('complete', 18, 18, ''), 0,
-                                                     finished=True, result=result)
+            def draw():
+                menu._draw_backup_progress('Verify', ('complete', 18, 18, ''), 0,
+                                           finished=True, result=result)
             draw()
             menu._scroll_backup_progress(curses.KEY_END, finished=True)
             draw()
