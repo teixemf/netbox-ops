@@ -1,11 +1,12 @@
 """Read-only checks that the backup and upgrade target the running installation."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pwd
 import subprocess
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -119,53 +120,99 @@ def validate_upgrade_runtime(
             'could not be matched'
         ) from None
 
-# NetBox 4.7+: ltree is trusted; a missing extension requires CREATE on the
-# database and target schema. Query catalogs only, never CREATE EXTENSION.
-_LTREE_SQL = """
+# NetBox 4.7+: catalogue availability is distinct from installation privileges.
+# Use a read-only transaction; never create extensions during plan review.
+_LTREE_SQL = f"""
 SELECT
+    ({_IDENTITY_SQL}),
+    current_setting('server_version_num'), current_user::text,
+    session_user::text, COALESCE(current_schema(), ''), current_setting('search_path'),
+    COALESCE((SELECT n.nspname FROM pg_extension e JOIN pg_namespace n
+              ON n.oid = e.extnamespace WHERE e.extname = 'ltree'), ''),
     EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'ltree'),
     EXISTS (
         SELECT 1 FROM pg_extension e
         JOIN pg_type t ON t.typnamespace = e.extnamespace AND t.typname = 'ltree'
-        WHERE e.extname = 'ltree'
-          AND pg_type_is_visible(t.oid)
+        WHERE e.extname = 'ltree' AND pg_type_is_visible(t.oid)
           AND has_schema_privilege(e.extnamespace, 'USAGE')
           AND has_type_privilege(t.oid, 'USAGE')
     ),
+    EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'ltree'
+            AND default_version IS NOT NULL),
     EXISTS (
         SELECT 1 FROM pg_available_extensions a
         JOIN pg_available_extension_versions v
           ON v.name = a.name AND v.version = a.default_version
-        WHERE a.name = 'ltree' AND (v.trusted OR NOT v.superuser)
-    ),
-    has_database_privilege(current_database(), 'CREATE')
-        AND COALESCE(has_schema_privilege(current_schema(), 'CREATE'), false)
+        WHERE a.name = 'ltree' AND (v.trusted OR NOT v.superuser
+              OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper))
+    ) AND has_database_privilege(current_database(), 'CREATE')
+      AND COALESCE(has_schema_privilege(current_schema(), 'CREATE'), false),
+    COALESCE(has_schema_privilege(current_schema(), 'USAGE'), false)
 """
+
 _LTREE_PROBE = """
 import json, os
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
-from django.db import connections
-with connections['default'].cursor() as cursor:
-    cursor.execute(%r)
-    print(json.dumps(cursor.fetchone()))
+from django.conf import settings
+from django.db import connections, transaction
+db = settings.DATABASES.get('default', {})
+if (set(settings.DATABASES) != {'default'}
+        or db.get('ENGINE') != 'django.db.backends.postgresql'
+        or db.get('NAME') != os.environ.pop('NBO_EXPECTED_DB')):
+    print(json.dumps({'status': 'mismatch'}))
+else:
+    migration = os.environ.pop('NBO_MIGRATION_CONTEXT') == '1'
+    # Do not assume the root upgrade script can use a service account's
+    # peer/OS-user-dependent database authentication.
+    if migration and (not db.get('USER') or not db.get('HOST')
+                      or str(db['HOST']).startswith('/')):
+        print(json.dumps({'status': 'unknown'}))
+    else:
+        with transaction.atomic(using='default'):
+            with connections['default'].cursor() as cursor:
+                cursor.execute('SET TRANSACTION READ ONLY')
+                cursor.execute(%r)
+                row = cursor.fetchone()
+        if migration and row[3] != db['USER']:
+            print(json.dumps({'status': 'mismatch'}))
+        else:
+            print(json.dumps(row))
 """ % _LTREE_SQL
 
 
+@dataclass(frozen=True)
+class LtreeEvidence:
+    status: str
+    details: tuple[str, ...] = ()
+    identity: str = ''
+
+
 def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
-                runner: Callable = subprocess.run, discover: Callable = netbox_runtime) -> str:
-    """Check both actual service and restricted script environments without writes."""
-    states = []
+                runner: Callable = subprocess.run, discover: Callable = netbox_runtime,
+                sql: Callable = _sql) -> LtreeEvidence:
+    """Match the backup database and check the service and migration roles."""
+    rows = []
+    details = []
+    identity = ''
     try:
+        expected = sql(_IDENTITY_SQL, database=cfg.database, cfg=cfg)
+        if not expected.startswith(cfg.database + '|'):
+            return LtreeEvidence('mismatch')
+        identity = hashlib.sha256(expected.encode()).hexdigest()
         for name in ('netbox', 'netbox-rq'):
             service_cfg = replace(cfg, units={**cfg.units, 'netbox': cfg.units[name]})
             runtime = discover(service_cfg, runner=runner)
             if runtime.python != live.python or runtime.working_directory != live.root / 'netbox':
-                return 'unknown'
+                return LtreeEvidence('mismatch', tuple(details), identity)
             account = (pwd.getpwuid(int(runtime.username)) if runtime.username.isdigit()
                        else pwd.getpwnam(runtime.username))
             if account.pw_uid == 0:
-                return 'unknown'
-            for env in (runtime.environment, upgrade_environment(live.python)):
+                return LtreeEvidence('unknown', tuple(details), identity)
+            for migration, environment in ((False, runtime.environment),
+                                           (True, upgrade_environment(live.python))):
+                env = dict(environment)
+                env['NBO_EXPECTED_DB'] = cfg.database
+                env['NBO_MIGRATION_CONTEXT'] = str(int(migration))
                 result = runner(
                     [str(runtime.python), '-c', _LTREE_PROBE], cwd=runtime.working_directory,
                     env=env, user=account.pw_uid, group=account.pw_gid,
@@ -173,18 +220,38 @@ def probe_ltree(cfg: Configuration, live: GitNetBoxInstallation, *,
                     capture_output=True, text=True, timeout=30, check=False,
                 )
                 values = json.loads(result.stdout) if not result.returncode else None
-                if not isinstance(values, list) or len(values) != 4 or any(type(x) is not bool for x in values):
-                    return 'unknown'
-                installed, usable, available, permitted = values
-                if installed:
-                    states.append('installed' if usable else 'permission')
-                elif not available:
-                    states.append('missing')
-                else:
-                    states.append('available' if permitted else 'permission')
+                if isinstance(values, dict) and values.get('status') in ('unknown', 'mismatch'):
+                    return LtreeEvidence(values['status'], tuple(details), identity)
+                if (not isinstance(values, list) or len(values) != 12
+                        or any(type(x) is not str for x in values[:7])
+                        or any(type(x) is not bool for x in values[7:])):
+                    return LtreeEvidence('unknown', tuple(details), identity)
+                actual, version, role, session, schema, search, extension, installed, usable, available, permitted, usage = values
+                if actual != expected:
+                    return LtreeEvidence('mismatch', tuple(details), identity)
+                # Only catalogue fields; never subprocess errors or connection strings.
+                fields = tuple(''.join(c if c.isprintable() else '?' for c in x)[:160]
+                               for x in (version, role, session, schema, search, extension))
+                context = 'migration' if migration else 'service'
+                details.append(f'{name} / {context}: PostgreSQL={fields[0]}, role={fields[1]}, '
+                               f'session={fields[2]}, schema={fields[3]}, search_path={fields[4]}, '
+                               f'extension_schema={fields[5]}, installed={installed}, '
+                               f'usable={usable}, available={available}, install_allowed={permitted}')
+                rows.append((migration, schema, installed, usable, available, permitted, usage))
     except Exception:
-        return 'unknown'
-    for status in ('missing', 'permission', 'unknown', 'available'):
-        if status in states:
-            return status
-    return 'installed' if states else 'unknown'
+        return LtreeEvidence('unknown', tuple(details), identity)
+    if not rows:
+        status = 'unknown'
+    elif all(row[2] for row in rows):
+        status = 'installed' if all(row[3] for row in rows) else 'unusable'
+    elif any(row[2] for row in rows):
+        status = 'unknown'
+    elif not all(row[4] for row in rows):
+        status = 'missing' if not any(row[4] for row in rows) else 'unknown'
+    elif not all(row[5] for row in rows if row[0]):
+        status = 'permission'
+    elif len({row[1] for row in rows}) != 1 or not all(row[1] and row[6] for row in rows):
+        status = 'unusable'
+    else:
+        status = 'available'
+    return LtreeEvidence(status, tuple(details), identity)
