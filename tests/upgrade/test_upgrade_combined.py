@@ -1,6 +1,8 @@
 """Combined upgrade tests with no network, migrations or service mutations."""
 import hashlib
+import io
 import tempfile
+import zipfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +12,7 @@ from unittest.mock import Mock, patch
 from netbox_ops.plugin_compatibility import DependencyPreflight, PluginCompatibility, PluginReview
 from netbox_ops.plugin_inventory import InstalledPackage, PluginInventory
 from netbox_ops.upgrade_combined import (
-    download_stage_wheels, prepare_combined_stages, recheck_combined_stage, run_combined_stage,
+    _build_ldap_wheel, download_stage_wheels, prepare_combined_stages, recheck_combined_stage, run_combined_stage,
     probe_server_versions,
 )
 from netbox_ops.config import Configuration, DEFAULT_UNITS
@@ -155,6 +157,50 @@ class CombinedStageTests(unittest.TestCase):
         command = runner.call_args.args[0]
         self.assertIn('--only-binary=:all:', command)
         self.assertFalse(any(arg.startswith('--no-binary') for arg in command))
+
+    def test_ldap_wheel_uses_isolated_exact_source_build_only(self):
+        pins = replace(self.prepare()[1].pins, ldap_source_pin='python-ldap==3.4.8',
+                       local_pins=('example-plugin==1.5.0', 'django-auth-ldap'))
+        directory = self.root / 'ldap-wheels'
+        raw = io.BytesIO()
+        with zipfile.ZipFile(raw, 'w') as archive:
+            archive.writestr('python_ldap-3.4.8.dist-info/METADATA', 'Name: python-ldap')
+        filename = 'python_ldap-3.4.8-cp312-cp312-linux_x86_64.whl'
+        def run(command, **kwargs):
+            if command[0] == 'systemd-run':
+                self.assertIn('--property=DynamicUser=yes', command)
+                self.assertIn('--property=ProtectSystem=strict', command)
+                self.assertIn('--property=PrivateTmp=yes', command)
+                self.assertIn('--property=NoNewPrivileges=yes', command)
+                self.assertIn('python-ldap==3.4.8', command)
+                return SimpleNamespace(returncode=0, stdout=filename.encode() + b'\n' + raw.getvalue())
+            self.assertIn('--find-links', command)
+            self.assertIn('python-ldap==3.4.8', command)
+            self.assertNotIn('--no-binary=python-ldap', command)
+            self.assertIn('--only-binary=:all:', command)
+            self.assertEqual((directory / filename).read_bytes(), raw.getvalue())
+            (directory / 'fixture.whl').touch()
+            return SimpleNamespace(returncode=0)
+        runner = Mock(side_effect=run)
+        download_stage_wheels(pins, self.install, directory, runner=runner)
+        self.assertEqual(runner.call_count, 2)
+
+    def test_ldap_wheel_refuses_unsafe_pin_or_filename(self):
+        runner = Mock(return_value=SimpleNamespace(returncode=0, stdout=b'../unexpected.whl\ninvalid'))
+        with self.assertRaisesRegex(UpgradeExecutionError, 'exact verified'):
+            _build_ldap_wheel('arbitrary==1.0', self.install, self.root, runner=runner)
+        runner.assert_not_called()
+        with self.assertRaisesRegex(UpgradeExecutionError, 'Isolated python-ldap wheel build'):
+            _build_ldap_wheel('python-ldap==3.4.8', self.install, self.root, runner=runner)
+        self.assertFalse(list(self.root.glob('*.whl')))
+
+    def test_ldap_wheel_failure_stops_transient_unit(self):
+        runner = Mock(return_value=SimpleNamespace(returncode=1))
+        with patch('netbox_ops.upgrade_combined._stop_ldap_builder') as stop:
+            with self.assertRaisesRegex(UpgradeExecutionError, 'Isolated python-ldap wheel build'):
+                _build_ldap_wheel('python-ldap==3.4.8', self.install, self.root, runner=runner)
+        unit = next(arg.split('=', 1)[1] for arg in runner.call_args.args[0] if arg.startswith('--unit='))
+        stop.assert_called_once_with(unit)
 
     def test_psycopg_build_failure_has_safe_prerequisite_hint(self):
         pins = self.prepare()[1].pins

@@ -35,6 +35,7 @@ if [[ "$scenario" == cross-minor ]]; then
   plugin=netbox-reorder-rack
   old_plugin=1.1.4
   new_plugin=1.1.5
+  NEEDRESTART_MODE=l apt-get install -y --no-install-recommends libldap-dev libsasl2-dev libssl-dev python3.12-dev
 fi
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
@@ -58,7 +59,7 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
 elif [[ "$scenario" == cross-minor ]]; then
   printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
-  printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
+  printf '%s\n' 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0' >> "$root/local_requirements.txt"
 else
   printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
 fi
@@ -88,6 +89,9 @@ runuser -u postgres -- createdb --owner=netbox netbox
 # no fixture constraint, and executes the unmodified official script.
 if [[ "$old" == 4.7.2 || "$old" == 4.4.10 ]]; then
   printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
+  if [[ "$scenario" == cross-minor ]]; then
+    printf '%s\n' 'python-ldap==3.4.8' >> "$scratch/source-constraints.txt"
+  fi
   (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
 else
   (cd "$root" && PYTHON="$python" bash upgrade.sh)
@@ -140,7 +144,8 @@ fi
 if [[ "$scenario" == cross-minor ]]; then
   # The source fixture installed the exact version. Simulate the operator's
   # existing bare declaration without changing any installed package.
-  sed -i 's/^tomli-w==1.2.0$/tomli-w  # preserve local intent/' "$root/local_requirements.txt"
+  sed -i -e 's/^tomli-w==1.2.0$/tomli-w  # preserve local intent/' \
+         -e 's/^django-auth-ldap==5.4.0$/django-auth-ldap  # preserve LDAP declaration/' "$root/local_requirements.txt"
   for unit in netbox netbox-rq; do
     systemctl show -p ActiveEnterTimestampMonotonic --value "$unit" > "$scratch/$unit"
   done
@@ -167,12 +172,14 @@ assert all(r.resolution.status == 'not-run' for r in bad.dependency_reviews)
 assert requirements.read_bytes() == original
 print('PASS: real reorder-rack release rejected on NetBox 4.4.x')
 
-inventory = inventory_plugins(context.installation, local_pin_names=('tomli-w',))
-assert not any(p.package == 'tomli-w' for p in inventory.proposals)
+inventory = inventory_plugins(context.installation, local_pin_names=('tomli-w', 'django-auth-ldap', 'python-ldap'))
+assert not any(p.package in ('tomli-w', 'django-auth-ldap', 'python-ldap') for p in inventory.proposals)
 plan = make_plan(context, 'stack', target, {plugin: version})
 assert plan.can_execute, plan.blockers
 assert all(r.resolution.status == 'passed' and r.resolution.checked_core for r in plan.dependency_reviews)
 assert all(dict(r.resolution.packages).get('tomli-w') == '1.2.0' for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('django-auth-ldap') == '5.4.0' for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('python-ldap') == '3.4.8' for r in plan.dependency_reviews)
 assert not any(d.name == 'tomli-w' for r in plan.dependency_reviews for d in r.local_diagnostics)
 assert any(r.ltree in ('installed', 'available') for r in plan.dependency_reviews)
 assert requirements.read_bytes() == original
@@ -423,6 +430,9 @@ fi
 if [[ "$scenario" == cross-minor ]]; then
   grep -Fxq "$plugin==$new_plugin" "$root/local_requirements.txt"
   grep -Fxq 'tomli-w  # preserve local intent' "$root/local_requirements.txt"
+  grep -Fxq 'django-auth-ldap  # preserve LDAP declaration' "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import ldap, importlib.metadata as m; assert m.version("django-auth-ldap")=="5.4.0"; assert m.version("python-ldap")=="3.4.8"'
+  echo 'PASS: unpinned LDAP declaration preserved and native LDAP module imports'
   "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]; assert m.version("tomli-w")=="1.2.0"' "$plugin" "$new_plugin"
   curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
   python3 - "$root" "$new_plugin" <<'PY'

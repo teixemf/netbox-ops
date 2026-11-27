@@ -164,7 +164,7 @@ def _stop_ldap_builder(unit: str, *, cleanup: Callable = subprocess.run) -> None
 
 def _build_ldap_wheel(pin: str, live: GitNetBoxInstallation, directory: Path, *,
                       runner: Callable = run_managed) -> Path:
-    match = re.fullmatch(r'python-ldap==([0-9]+(?:\\.[0-9]+){0,4}(?:\\.post[0-9]+)?)', pin)
+    match = re.fullmatch(r'python-ldap==([0-9]+(?:\.[0-9]+){0,4}(?:\.post[0-9]+)?)', pin)
     if match is None:
         raise UpgradeExecutionError('LDAP wheel build requires an exact verified python-ldap version')
     unit = 'netbox-ops-ldap-' + secrets.token_hex(8) + '.service'
@@ -187,13 +187,13 @@ def _build_ldap_wheel(pin: str, live: GitNetBoxInstallation, directory: Path, *,
     except BaseException:
         _stop_ldap_builder(unit)
         raise
-    name, separator, raw = result.stdout.partition(b'\\n')
+    name, separator, raw = result.stdout.partition(b'\n')
     try:
         filename = name.decode('ascii')
     except UnicodeDecodeError:
         raise CommandFailure('wheel.ldap', 'artifacts') from None
     if (not separator or not re.fullmatch(r'python_ldap-' + re.escape(match[1])
-            + r'-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\\.whl', filename)
+            + r'-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\.whl', filename)
             or not zipfile.is_zipfile(io.BytesIO(raw))):
         raise CommandFailure('wheel.ldap', 'artifacts')
     wheel = directory / filename

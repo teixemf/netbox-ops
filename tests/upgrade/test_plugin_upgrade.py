@@ -185,6 +185,21 @@ class PluginUpgradeTests(_PluginFixture):
         with self.assertRaisesRegex(UpgradeExecutionError, 'approved full dependency report'):
             bind_reviewed_dependencies(plan, 0, self.installation.commit, CORE, prepared)
 
+    def test_ldap_source_exception_requires_declared_ldap_and_known_version(self):
+        raw = LOCAL + b'django-auth-ldap  # preserve\r\n'
+        packages = self.packages + (InstalledPackage('django-auth-ldap', '5.4.0', ()),
+                                    InstalledPackage('python-ldap', '3.4.8', ()))
+        inventory = replace(self.inventory, requirements_hash=hashlib.sha256(raw).hexdigest(),
+                            packages=packages)
+        plan = replace(self.plan, source=replace(self.plan.source, inventory=inventory))
+        pins = self.prepare(plan, local=raw)
+        self.assertEqual(pins.ldap_source_pin, 'python-ldap==3.4.8')
+        self.assertTrue(pins.requirements.endswith(raw[len(LOCAL):]))
+        self.assertNotIn('python-ldap', dict(pins.expected))
+        unrelated = replace(inventory, requirements_hash=hashlib.sha256(LOCAL).hexdigest())
+        unrelated_plan = replace(plan, source=replace(plan.source, inventory=unrelated))
+        self.assertIsNone(self.prepare(unrelated_plan).ldap_source_pin)
+
     def test_core_versions_must_match_installed_release(self):
         with self.assertRaises(UpgradeExecutionError):
             self.prepare(core=b'Django==5.2.7\n')
