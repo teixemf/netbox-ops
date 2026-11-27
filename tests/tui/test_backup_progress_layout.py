@@ -34,14 +34,40 @@ class BackupProgressLayoutTests(unittest.TestCase):
             self.assertEqual(menu._panels[2][1] - menu._panels[1][3], 1)
             self.assertLess(menu._panels[2][3], 38)
             for task in tasks:
-                self.assertTrue(any(text == menu.t('nbo_stage_' + task.phase)
-                                    for _, _, text, _ in frame))
-            extraction = next(y for y, _, text, _ in frame
-                              if text == menu.t('nbo_stage_extract_media'))
-            self.assertTrue(any(y == extraction and text.strip() == '● N/A'
-                                for y, _, text, _ in frame))
-            self.assertTrue(any(text == menu.t('nbo_backup_result_pending') for _, _, text, _ in frame))
+                self.assertEqual(any(text == menu.t('nbo_stage_' + task.phase)
+                                     for _, _, text, _ in frame), task.applicable)
+                if task.applicable:
+                    y = next(y for y, x, text, _ in frame
+                             if menu._panels[1][1] < y < menu._panels[1][3] and x > 3
+                             and text == menu.t('nbo_stage_' + task.phase))
+                    self.assertTrue(any(row == y and x == 3 and not text.strip()
+                                        for row, x, text, _ in frame))
+            self.assertNotIn('N/A', ' '.join(text for _, _, text, _ in frame))
+            self.assertNotIn(menu.t('nbo_task_state_pending'), ' '.join(text for _, _, text, _ in frame))
+            self.assertNotIn(menu.t('nbo_backup_result_pending'), ' '.join(text for _, _, text, _ in frame))
             self.assertNotIn(menu.t('nbo_job_success'), [text for _, _, text, _ in frame])
+
+    def test_task_states_preserve_failure_skipped_and_unrun(self):
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (40, 120)):
+                menu, screen = self.menu(language, dimensions)
+                for phase, state in (('prepare', 'done'), ('verify', 'failed'),
+                                     ('extract_media', 'not_applicable'), ('stage_db', 'skipped'),
+                                     ('finalize', 'pending')):
+                    menu._record_backup_step(BackupTaskEvent(BackupTask(phase), state, 1, 4))
+                menu._draw_backup_progress('Restore', ('verify', 1, 4, ''), 0,
+                                           finished=True, error='failure')
+                frames = [screen.frames[-1]]
+                for key in (curses.KEY_HOME, curses.KEY_END):
+                    menu._scroll_backup_progress(key, finished=True)
+                    menu._draw_backup_progress('Restore', ('verify', 1, 4, ''), 0,
+                                               finished=True, error='failure')
+                    frames.append(screen.frames[-1])
+                text = ' '.join(value for frame in frames for _, _, value, _ in frame)
+                for state in ('done', 'failed', 'skipped', 'not_run'):
+                    self.assertIn(menu.t('nbo_task_state_' + state), text)
+                self.assertNotIn(menu.t('nbo_stage_extract_media'), text)
+                self.assertEqual(menu._backup_steps[-1][1], 'pending')
 
     def test_compact_scroll_and_resize_preserve_all_task_and_result_content(self):
         for language in LANGUAGES:

@@ -513,19 +513,25 @@ class UpgradeDashboard:
     def _discovery_lines(self, width, *, compact):
         styles = {'done': 'success', 'running': 'title', 'failed': 'failure',
                   'partial': 'warning'}
+        tasks = [(task, state) for task, state in self._discovery_states.items()
+                 if state != 'not_applicable']
         if not compact:
-            labels = [(self.t('nbo_task_state_' + state) if state != 'partial' else self.t('ut_discovery_partial'),
+            labels = [((self.t('nbo_task_state_' + state) if state != 'partial'
+                        else self.t('ut_discovery_partial')) if state != 'pending' else '',
                        self.t('ut_discovery_' + task), styles.get(state, 'muted'))
-                      for task, state in self._discovery_states.items()]
-            state_width = max(len(state) for state, _, _ in labels)
+                      for task, state in tasks]
+            state_width = max((len(state) for state, _, _ in labels), default=0)
+            # Reserve the column even when every task is still unstarted.
+            state_width = max(state_width, *(len(self.t('nbo_task_state_' + state))
+                                             for state in ('running', 'done', 'failed', 'not_run')))
             lines = [(f'{state:<{state_width}}  {task}', style) for state, task, style in labels]
             if self.future is None:
                 lines.append((self.t('ut_discovery_retry'), 'warning'))
             return lines
-        # Two short labels per row fit the minimum 50x16 terminal.
-        labels = [(self.t('ut_discovery_state_' + state), self.t('ut_discovery_short_' + task))
-                  for task, state in self._discovery_states.items()]
-        return [(' | '.join(f'{state} {task}' for state, task in labels[i:i + 2]), 'muted')
+        # Compact layout keeps unstarted tasks visible without a status label.
+        labels = [((self.t('ut_discovery_state_' + state) + ' ') if state != 'pending' else '')
+                  + self.t('ut_discovery_short_' + task) for task, state in tasks]
+        return [(' | '.join(labels[i:i + 2]), 'muted')
                 for i in range(0, len(labels), 2)]
 
     def _picker_notes(self, row, latest, suggested, selected):
