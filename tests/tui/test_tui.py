@@ -168,6 +168,7 @@ class MenuNavigationTests(unittest.TestCase):
     def test_real_curses_backup_and_restore_selector_capture(self):
         import json
         import tempfile
+        from pathlib import Path
         from tests.helpers.terminal_capture import run_capture
 
         with tempfile.TemporaryDirectory() as tmp:
