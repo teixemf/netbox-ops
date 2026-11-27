@@ -466,6 +466,8 @@
   "upgrade_ltree_missing": "extension unavailable",
   "upgrade_ltree_permission": "insufficient privileges",
   "upgrade_ltree_unknown": "unverified",
+  "upgrade_ltree_unusable": "type or schema/search path unusable",
+  "upgrade_ltree_mismatch": "database or runtime mismatch",
   "ut_required_actions": "REQUIRED ACTIONS",
   "ut_validation": "VALIDATION",
   "ut_validate_next": "Validate selected targets before execution.",
@@ -568,5 +570,13 @@
   "nbo_create_downtime_combined": "Stops active NetBox and RQ services temporarily.",
   "nbo_restore_downtime_short": "Stops active NetBox/RQ temporarily.",
   "nbo_restore_safety_short": "Confirmation and precautionary backup.",
+  "ut_action_ltree": "Install ltree",
+  "ut_action_ltree_short": "ltree",
+  "ut_ltree_review_from_plan": "Review Install ltree; verified local administrator available.",
+  "upgrade_ltree_admin_review": "Database {database}, local PostgreSQL port {port}, schema public. Create a verified database backup in {backup}, then install ltree only. No service restart or role changes.",
+  "upgrade_ltree_admin_fingerprint": "ltree review fingerprint: {fingerprint}",
+  "upgrade_ltree_admin_unavailable": "Automatic installation unavailable for this database/schema or permissions; ask your DBA.",
+  "upgrade_ltree_admin_confirm": "Confirm installation of ltree in the reviewed database.",
+  "upgrade_ltree_admin_success": "ltree installed and usable; database backup: {backup}",
   "upgrade_overlap_review": "  {name}: local {local}; core {core}. Local declaration retained; resolve together with the exact core pin."
 }

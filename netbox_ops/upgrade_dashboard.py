@@ -90,7 +90,10 @@ class UpgradeDashboard:
                 and dict(self.plan.selected_plugins) == pins)
 
     def _actions(self):
-        return (*_ACTIONS[:-1], 'pins', _ACTIONS[-1]) if self._correctable_pins() else _ACTIONS
+        contextual = (('pins',) if self._correctable_pins() else ())
+        if self._ltree_action_review() is not None:
+            contextual += ('ltree',)
+        return (*_ACTIONS[:-1], *contextual, _ACTIONS[-1])
 
     def _enabled(self, action):
         if self.future is not None:
@@ -101,6 +104,8 @@ class UpgradeDashboard:
             return self._plan_matches() and self.plan.can_execute
         if action == 'pins':
             return bool(self._correctable_pins())
+        if action == 'ltree':
+            return self._ltree_action_review() is not None
         if action == 'validate':
             return self.model.selection != self.model.installed
         return True
@@ -238,6 +243,8 @@ class UpgradeDashboard:
             lines.extend((blocker, 'failure') for blocker in dict.fromkeys(plan.blockers))
             if self._correctable_pins():
                 lines.append((t('ut_pin_review_from_plan'), 'title'))
+            if self._ltree_action_review() is not None:
+                lines.append((t('ut_ltree_review_from_plan'), 'title'))
             lines.extend((warning, 'warning') for warning in dict.fromkeys(plan.warnings))
         lines.append((t('ut_validation'), 'section'))
         reviews = {review.version: review for review in plan.dependency_reviews}
@@ -336,6 +343,49 @@ class UpgradeDashboard:
         manual = {item.name for item in diagnostics if item.action != 'review-pin'}
         eligible = set(dict(configured_plugin_packages(self.model.context.inventory)))
         return ({item.name for item in diagnostics if item.action == 'review-pin'} - manual) & eligible
+
+    def _ltree_action_review(self):
+        if not self._plan_matches():
+            return None
+        reviews = [item for item in self.plan.dependency_reviews if item.ltree != 'not-required']
+        if not reviews or any(item.ltree != 'permission' or item.ltree_admin_port is None for item in reviews):
+            return None
+        first = reviews[0]
+        if any((item.ltree_identity, item.ltree_admin_port, item.ltree_details) !=
+               (first.ltree_identity, first.ltree_admin_port, first.ltree_details) for item in reviews):
+            return None
+        return first
+
+    def _review_ltree(self, pool):
+        from .upgrade_ltree import apply_ltree_review, build_ltree_review, ltree_review_lines
+
+        planned = self._ltree_action_review()
+        if planned is None:
+            return
+        review = self.menu._upgrade_job(self.title, lambda _: build_ltree_review(self.cfg))
+        if review is None:
+            return
+        if (not review.fingerprint or (review.evidence.identity, review.evidence.admin_port, review.evidence.details) !=
+                (planned.ltree_identity, planned.ltree_admin_port, planned.ltree_details)):
+            self._invalidate_plan()
+            self.menu._show_lines(self.title, [(self.t('ut_plan_mismatch'), 'failure')])
+            self._discover(pool)
+            return
+        lines = [(line, '') for line in ltree_review_lines(review, self.t)]
+        if not self.menu._show_lines(self.title, lines, self.t('upgrade_review_hint'), allow_quit=True):
+            return
+        if not self.menu._confirm_token(self.title, self.t('upgrade_ltree_admin_confirm'), 'INSTALL LTREE',
+                                        target_names=(review.database,), summary=lines):
+            return
+        # Once the operator attempts installation, always invalidate and
+        # rediscover, even when verification fails after the fixed DDL.
+        self._revalidate_after_pins = True
+        self._invalidate_plan()
+        result = self.menu._upgrade_job(
+            self.title, lambda progress: apply_ltree_review(self.cfg, review, review.fingerprint, progress=progress))
+        if result is not None:
+            self.menu._show_lines(self.title, [(self.t('upgrade_ltree_admin_success', backup=result), 'success')])
+        self._discover(pool)
 
     def _review_plan_pins(self, pool):
         menu = self.menu
@@ -822,6 +872,8 @@ class UpgradeDashboard:
                             self._discover(pool, 'assess' if self.model else 'suggest')
                         elif action == 'pins':
                             self._review_plan_pins(pool)
+                        elif action == 'ltree':
+                            self._review_ltree(pool)
                         elif action == 'execute':
                             operation, _, _ = self.model.selection.plan_arguments(self.model.installed)
                             if menu._execute_reviewed_upgrade(self.title, self.cfg, operation, self.plan):

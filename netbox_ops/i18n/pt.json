@@ -466,6 +466,8 @@
   "upgrade_ltree_missing": "extensão indisponível",
   "upgrade_ltree_permission": "permissões insuficientes",
   "upgrade_ltree_unknown": "não verificada",
+  "upgrade_ltree_unusable": "tipo ou esquema/search path inutilizável",
+  "upgrade_ltree_mismatch": "base de dados ou runtime não correspondente",
   "ut_required_actions": "AÇÕES NECESSÁRIAS",
   "ut_validation": "VALIDAÇÃO",
   "ut_validate_next": "Valide os alvos selecionados antes de executar.",
@@ -568,5 +570,13 @@
   "nbo_create_downtime_combined": "Pára temporariamente os serviços NetBox e RQ activos.",
   "nbo_restore_downtime_short": "Pára temporariamente NetBox/RQ activos.",
   "nbo_restore_safety_short": "Confirmação e backup de segurança.",
+  "ut_action_ltree": "Instalar ltree",
+  "ut_action_ltree_short": "ltree",
+  "ut_ltree_review_from_plan": "Rever Instalar ltree; administrador local verificado disponível.",
+  "upgrade_ltree_admin_review": "Base de dados {database}, PostgreSQL local porta {port}, esquema public. Criar backup verificado em {backup} e instalar apenas ltree. Sem reiniciar serviços nem alterar papéis.",
+  "upgrade_ltree_admin_fingerprint": "Impressão digital da revisão ltree: {fingerprint}",
+  "upgrade_ltree_admin_unavailable": "Instalação automática indisponível para esta base de dados/esquema ou permissões; consultar o DBA.",
+  "upgrade_ltree_admin_confirm": "Confirmar instalação de ltree na base de dados revista.",
+  "upgrade_ltree_admin_success": "ltree instalada e utilizável; backup da base de dados: {backup}",
   "upgrade_overlap_review": "  {name}: local {local}; core {core}. Declaração local mantida; resolver em conjunto com o pin core exato."
 }
