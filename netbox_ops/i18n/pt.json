@@ -466,6 +466,8 @@
   "upgrade_ltree_missing": "extensão indisponível",
   "upgrade_ltree_permission": "permissões insuficientes",
   "upgrade_ltree_unknown": "não verificada",
+  "upgrade_ltree_unusable": "tipo ou esquema/search path inutilizável",
+  "upgrade_ltree_mismatch": "base de dados ou runtime não correspondente",
   "ut_required_actions": "AÇÕES NECESSÁRIAS",
   "ut_validation": "VALIDAÇÃO",
   "ut_validate_next": "Valide os alvos selecionados antes de executar.",

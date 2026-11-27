@@ -466,6 +466,8 @@
   "upgrade_ltree_missing": "extension unavailable",
   "upgrade_ltree_permission": "insufficient privileges",
   "upgrade_ltree_unknown": "unverified",
+  "upgrade_ltree_unusable": "type or schema/search path unusable",
+  "upgrade_ltree_mismatch": "database or runtime mismatch",
   "ut_required_actions": "REQUIRED ACTIONS",
   "ut_validation": "VALIDATION",
   "ut_validate_next": "Validate selected targets before execution.",

@@ -100,6 +100,8 @@ class StageDependencyReview:
     ltree: str
     overlaps: tuple[RequirementOverlap, ...] = ()
     local_diagnostics: tuple[LocalRequirementDiagnostic, ...] = ()
+    ltree_details: tuple[str, ...] = ()
+    ltree_identity: str = ''
 
 
 @dataclass(frozen=True)
@@ -276,7 +278,7 @@ def _fingerprint(plan: UpgradePlan) -> str:
         'blockers': plan.blockers,
         'dependency_reviews': [(r.version, r.commit, r.core_hash, r.exact_pins,
                                 r.resolution.status, r.resolution.checked_core, r.resolution.packages,
-                                r.resolution.detail, r.changes, r.ltree,
+                                r.resolution.detail, r.changes, r.ltree, r.ltree_details, r.ltree_identity,
                                 [(o.name, o.local_pin, o.core_pin, o.status) for o in r.overlaps],
                                 [(d.name, d.declaration, d.installed, d.stage, d.reason, d.action)
                                  for d in r.local_diagnostics])

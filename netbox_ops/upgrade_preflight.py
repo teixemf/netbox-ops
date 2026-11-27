@@ -17,7 +17,7 @@ from .upgrade_execution import UpgradeExecutionError
 from .upgrade_git import OFFICIAL_REMOTE, PinnedStage, pin_release_stages
 from .upgrade_plan import StageDependencyReview, UpgradePlan, _fingerprint
 from .upgrade_recovery import _read_config
-from .upgrade_runtime import probe_ltree
+from .upgrade_runtime import LtreeEvidence, probe_ltree
 
 
 def target_requirements(pinned: PinnedStage, scratch: Path, *, git: Callable = _run_git) -> bytes:
@@ -61,11 +61,21 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                         else _read_config(live.root, 'requirements.txt'))
                 if core is None:
                     raise UpgradeExecutionError('NetBox core requirements are missing')
-                ltree = 'not-required'
+                evidence = LtreeEvidence('not-required')
                 if tuple(map(int, stage.netbox_version.split('.')[:2])) >= (4, 7):
-                    ltree = ltree_probe(cfg, live) if cfg is not None else 'unknown'
-                    if ltree not in ('installed', 'available'):
-                        blockers.append(prefix + 'PostgreSQL ltree availability or permissions not verified')
+                    evidence = ltree_probe(cfg, live) if cfg is not None else LtreeEvidence('unknown')
+                    if evidence.status != 'installed' and (evidence.status != 'available' or stage.kind != 'netbox'):
+                        guidance = {
+                            'missing': 'extension files unavailable; ask the DBA to install the matching PostgreSQL extension package',
+                            'permission': 'migration role lacks extension creation privileges; ask the DBA',
+                            'unusable': 'extension type or schema/search path unusable; ask the DBA',
+                            'mismatch': 'database or runtime does not match the backup target',
+                            'available': 'extension not installed; plugin-only operation cannot create core extensions',
+                            'unknown': 'extension prerequisites unverified; inspect database connection and permissions',
+                        }
+                        blockers.append(prefix + 'PostgreSQL ltree: ' + guidance.get(evidence.status, 'unverified'))
+                ltree = evidence.status
+                ltree_fields = dict(ltree_details=evidence.details, ltree_identity=evidence.identity)
                 # A blocked requirements stage must not hide independent
                 # prerequisite checks or the remaining targets' evidence.
                 diagnostics = diagnose_local_requirements(plan, local, core, index)
@@ -73,7 +83,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                     reviews.append(StageDependencyReview(
                         stage.netbox_version, pinned.commit, hashlib.sha256(core).hexdigest(), (),
                         DependencyPreflight('not-run', 'Plan has independent compatibility or prerequisite blockers'),
-                        (), ltree, local_diagnostics=diagnostics,
+                        (), ltree, local_diagnostics=diagnostics, **ltree_fields,
                     ))
                     continue
                 try:
@@ -85,7 +95,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                     reviews.append(StageDependencyReview(
                         stage.netbox_version, pinned.commit, hashlib.sha256(core).hexdigest(), (),
                         DependencyPreflight('not-run', 'Requirements could not be safely prepared'),
-                        (), ltree, overlaps, diagnostics,
+                        (), ltree, overlaps, diagnostics, **ltree_fields,
                     ))
                     continue
                 result = resolver(pins.local_pins, pins.core_pins, live.python_version,
@@ -111,7 +121,7 @@ def review_plan_dependencies(plan: UpgradePlan, cfg: Configuration | None, *,
                                        for name, version in expected.items() if previous.get(name) != version))
                 reviews.append(StageDependencyReview(stage.netbox_version, pinned.commit,
                                                      hashlib.sha256(core).hexdigest(), pins.expected,
-                                                     result, changes, ltree, pins.overlaps))
+                                                     result, changes, ltree, pins.overlaps, **ltree_fields))
                 previous.update(expected)
     except UpgradeExecutionError as exc:
         # These helpers raise fixed local messages; never display arbitrary
