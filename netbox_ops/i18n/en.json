@@ -567,5 +567,6 @@
   "nbo_create_downtime_live": "NetBox services are not stopped.",
   "nbo_create_downtime_combined": "Stops active NetBox and RQ services temporarily.",
   "nbo_restore_downtime_short": "Stops active NetBox/RQ temporarily.",
-  "nbo_restore_safety_short": "Confirmation and precautionary backup."
+  "nbo_restore_safety_short": "Confirmation and precautionary backup.",
+  "upgrade_overlap_review": "  {name}: local {local}; core {core}. Local declaration retained; resolve together with the exact core pin."
 }

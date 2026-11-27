@@ -444,15 +444,21 @@ def assess_upgrade_stages(package: str, version: str, netbox_steps: Sequence[str
 def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequence[str],
                                   python_version: str, *, runner: Callable = run_managed,
                                   interpreter: Path | None = None,
-                                  wheelhouse: Path | None = None) -> DependencyPreflight:
+                                  wheelhouse: Path | None = None,
+                                  allow_unpinned: bool = False) -> DependencyPreflight:
     """Use pip's dry-run wheel-only resolver; no installation or builds.
 
     A caller must supply vetted target NetBox core pins and every plugin pin
     for a meaningful full conflict check; missing core pins never confirms it.
+    Only the shared local-requirements planner may permit validated bare names
+    and extras. Exact core pins remain mandatory for a full verification.
     """
     pins = tuple(plugin_pins) + tuple(core_pins)
-    if not pins or not all(isinstance(p, str) and _PIN.fullmatch(p) for p in pins):
-        raise CompatibilityError('Resolver accepts only exact safe package pins')
+    bare = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?')
+    if (not pins or not all(isinstance(p, str) and _PIN.fullmatch(p) for p in core_pins)
+            or not all(isinstance(p, str) and (_PIN.fullmatch(p) or (allow_unpinned and bare.fullmatch(p)))
+                       for p in plugin_pins)):
+        raise CompatibilityError('Resolver accepts only exact safe pins or explicitly permitted bare local requirements')
     match = re.fullmatch(r'(\d+)\.(\d+)(?:\.\d+)?', python_version)
     if match is None:
         raise CompatibilityError('Resolver requires a numeric target Python version')
@@ -500,8 +506,9 @@ def isolated_dependency_preflight(plugin_pins: Sequence[str], core_pins: Sequenc
                     raise ValueError
                 packages[key] = version
             for pin in pins:
-                name, version = pin.split('==', 1)
-                if packages.get(normalize_name(name.split('[', 1)[0])) != version:
+                name, separator, version = pin.partition('==')
+                resolved = packages.get(normalize_name(name.split('[', 1)[0]))
+                if resolved is None or (separator and resolved != version):
                     raise ValueError
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
             return DependencyPreflight('unknown', 'No valid isolated resolver report')
