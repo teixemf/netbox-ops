@@ -452,6 +452,24 @@ class NewServiceTuiTests(unittest.TestCase):
             menu._manage()
         executed.assert_not_called()
 
+    def test_service_progress_shows_planned_rows_without_pending_labels(self):
+        for language in ('en', 'pt'):
+            screen = FakeScreen(dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator(language))
+            menu._service_steps = [(name, 'pending', '') for name in
+                                   ('redis', 'postgresql', 'netbox', 'netbox-rq', 'nginx')]
+            menu._draw_progress('restart', 0, 5, 'redis', 'pending', '')
+            frame = screen.frames[-1]
+            for name in ('redis', 'postgresql', 'netbox', 'netbox-rq', 'nginx'):
+                self.assertTrue(any(text.endswith(name) for _, _, text, _ in frame))
+            self.assertNotIn(menu.t('nbo_task_state_pending'), ' '.join(text for _, _, text, _ in frame))
+            menu._draw_progress('restart', 0, 5, 'redis', 'error', 'failure',
+                                finished=True, failed=True, summary='Failure')
+            text = ' '.join(value for _, _, value, _ in screen.frames[-1])
+            self.assertIn(menu.t('nbo_task_state_failed'), text)
+            self.assertIn(menu.t('nbo_task_state_not_run'), text)
+            self.assertEqual(menu._service_steps[-1][1], 'pending')
+
     def test_progress_bar_counts_actual_completions(self):
         screen = FakeScreen([])
         menu = CursesMenu(screen, Translator('en'))

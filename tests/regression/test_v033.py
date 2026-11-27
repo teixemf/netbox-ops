@@ -56,7 +56,9 @@ class V033Tests(unittest.TestCase):
         show.assert_not_called()
         words=' '.join(w[2] for w in screen.frames[-1])
         self.assertIn('denied',words)
-        self.assertIn('!!',words)
+        self.assertIn('Failed: redis', words)
+        self.assertTrue(any(text.strip() == m.t('nbo_task_state_failed')
+                            for _, _, text, _ in screen.frames[-1]))
         self.assertNotIn('100%',words)
 
     def test_successful_backup_final_panel_not_extra_result_screen(self):

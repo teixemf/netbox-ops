@@ -203,15 +203,22 @@ required service restart and cleanup. Legacy progress callbacks retain the
 four-argument signature with task-based counters.
 
 Present PROGRESS, TASKS / STATUS and RESULT as separate top-aligned panels.
-Keep the planned rows stable and show a text state before each task name;
-colour reinforces the state, not the entire row. Wrap long names and result
+Keep applicable planned rows stable. Leave the status column blank before
+a task starts, and omit non-applicable tasks. Show Running, OK, Failed,
+Skipped and Not run when meaningful; never infer completion. The result panel
+has a neutral dash until an outcome exists. Colour reinforces the state,
+not the entire row. Wrap long names and result
 messages without losing characters. Up/Down and Page Up/Down scroll tasks,
 with automatic active-task following until the operator scrolls manually.
 After completion, Tab switches between task and result scrolling; a visible
 focus marker works without colour. Enter/Esc/Space acknowledges the final
 result. Q and other cancellation keys remain disabled while the worker runs.
 Resize clamps both viewports and keeps the outcome accessible at 50x16.
-Services and upgrade progress views retain their existing layout.
+Apply the same presentation to planned service actions and upgrade discovery.
+Service batches show the applicable service list and observed outcomes;
+read-only discovery omits non-applicable phases. Upgrade execution and
+self-upgrade report actual phases, without adding fabricated task lists.
+Recovery-pending conditions remain explicit; internal states are unchanged.
 
 ## Backup inventory counters
 
