@@ -221,8 +221,11 @@ applied migrations; there is no automatic full rollback.
 
 ## CLI and terminal interface
 
-Upgrade NetBox opens a single editable dashboard with planned changes,
-operations and overall readiness. Choose exact NetBox and/or plugin targets.
+Upgrade NetBox first shows read-only inventory and discovery progress, then
+opens a single editable dashboard with planned changes, operations and overall
+readiness. Failed discovery stays on the progress screen with details and retry;
+partial results can continue only with an accepted current inventory and
+snapshot. Choose exact NetBox and/or plugin targets.
 Validate after edits, review the compact plan with D and technical evidence
 with E before approving. Unchanged rows are neutral when no changes are
 planned and no real conflict is known; this does not verify compatibility. An edited
