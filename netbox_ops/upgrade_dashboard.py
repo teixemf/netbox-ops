@@ -773,7 +773,12 @@ class UpgradeDashboard:
         if self.future is not None:
             return False
         if key == curses.KEY_F5:
-            if self._discovery_screen == 'full':
+            # A bounded assessment/suggestion can continue with the current
+            # model's caches. Refresh inventory when it or releases failed.
+            continue_assessment = (self._discovery_can_continue()
+                                   and all(self._discovery_states.get(task) == 'done'
+                                           for task in ('inventory', 'releases')))
+            if self._discovery_screen == 'full' and not continue_assessment:
                 self._discover(pool, self._discovery_request)
             else:
                 self._start(pool, self._discovery_request)

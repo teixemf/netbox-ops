@@ -473,6 +473,11 @@ class UpgradeTuiTests(InterfaceFixture):
                 dashboard._draw()
                 self.assertFalse(any(text == menu.t('ut_operations')
                                      for _, _, text, _ in menu.stdscr.frames[-1]))
+                with patch.object(dashboard, '_start') as start, patch.object(dashboard, '_discover') as discover:
+                    pool = Mock()
+                    dashboard._discovery_key(curses.KEY_F5, pool)
+                    start.assert_called_once_with(pool, dashboard._discovery_request)
+                    discover.assert_not_called()
                 dashboard._discovery_key(10, Mock())
             self.assertIsNone(dashboard._discovery_screen)
             if partial:
