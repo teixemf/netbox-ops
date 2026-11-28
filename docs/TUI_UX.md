@@ -112,6 +112,23 @@ the inventory session (dashboard F5 refreshes official NetBox releases), Enter
 selects and Esc cancels. Cancellation may wait for a bounded in-flight lookup
 to finish before reusing the model. Discovery failure still permits retaining
 the installed version. Incomplete evidence is not approval.
+Upgrade NetBox opens directly into the planned changes dashboard. Operations
+stay immediately below the scrollable target table. Reserve rows for overall
+readiness, the primary reason and the footer before expanding the table.
+Use side-by-side component and plan panels on wider screens; use a compact
+plan summary on narrow or short screens. D/E expose complete evidence. Exact
+validation runs in the existing read-only worker while retaining the dashboard;
+execution stays disabled until the matching plan has been accepted. For an
+actual offline curses capture (synthetic plan, no live installation), run
+`python -m tests.upgrade.terminal_dashboard_capture /tmp/dashboard.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite captures 50x16, 80x24, 120x30 and 160x45, including resize.
+Dynamic
+pin actions retain focus by identity, never implicitly move focus to execution.
+With no changed targets, use neutral Unchanged labels unless there is a real
+compatibility, runtime or inventory problem; this is not verification. Raw
+evidence stays available on E. Once discovery finishes, restore the plan
+panels, with an explicit incomplete/failure summary and D/F5 retry guidance.
 Discovery opens directly in Upgrade Management. Show unknown values until
 installed inventory is observed, then publish installed rows while official
 release lookup continues. DISCOVERY STATUS reports the actual inventory,

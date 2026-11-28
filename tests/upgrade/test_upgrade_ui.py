@@ -433,9 +433,12 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('validate'))
         self.assertFalse(dashboard._enabled('execute'))
         self.assertTrue(dashboard._draw())
-        self.assertTrue(any('Failed' in text for _, _, text, _ in menu.stdscr.frames[-1]))
+        self.assertTrue(any(menu.t('ut_discovery_failed_retry') in text
+                            for _, _, text, _ in menu.stdscr.frames[-1]))
+        self.assertFalse(any(text == menu.t('ut_discovery_heading')
+                             for _, _, text, _ in menu.stdscr.frames[-1]))
 
-    def test_completed_discovery_hides_panel_but_partial_discovery_does_not(self):
+    def test_completed_discovery_returns_to_plan_even_when_partial(self):
         from concurrent.futures import Future
         from netbox_ops.upgrade_targets import TargetSnapshot
 
@@ -452,8 +455,11 @@ class UpgradeTuiTests(InterfaceFixture):
             if partial:
                 self.assertEqual(dashboard._discovery_states['assessment'], 'partial')
             self.assertTrue(dashboard._draw())
-            self.assertEqual(any(text == menu.t('ut_discovery_heading')
-                                 for _, _, text, _ in menu.stdscr.frames[-1]), partial)
+            self.assertFalse(any(text == menu.t('ut_discovery_heading')
+                                 for _, _, text, _ in menu.stdscr.frames[-1]))
+            if partial:
+                self.assertIn((menu.t('ut_discovery_incomplete_retry'), 'warning'),
+                              dashboard._overview_lines())
             self.assertFalse(dashboard._enabled('execute'))
 
     def test_picker_scrolls_continuous_catalogue_and_keeps_status_colors(self):
@@ -525,6 +531,55 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('execute'))
         self.assertIsNone(dashboard.plan)
         self.assertIn(menu.t('ut_no_changes'), [line for line, _ in dashboard._plan_lines()])
+
+    def test_noop_presentation_does_not_change_compatibility_or_hide_real_conflict(self):
+        from netbox_ops.plugin_compatibility import CompatibilityEvidence
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow, TargetSnapshot
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard.model.reset()
+            request = dashboard.model.request('assess')
+            warning = TargetAssessment('warning', 'installed', (
+                CompatibilityEvidence('PyPI', 'Release metadata unavailable', 'unknown'),
+                CompatibilityEvidence('PyPI Requires-Dist', 'No explicit NetBox distribution dependency', 'warns'),
+            ))
+            rows = tuple(TargetRow(row.component, row.current, row.current, warning)
+                         for row in dashboard._rows())
+            dashboard.snapshot = TargetSnapshot(request, request.selection, rows, 'warning', (), False)
+            for dimensions in ((16, 50), (45, 160)):
+                menu.stdscr.dimensions = dimensions
+                dashboard._draw()
+                self.assertIn(menu.t('ut_no_changes'), ' '.join(text for _, _, text, _ in menu.stdscr.frames[-1]))
+                for row in rows:
+                    self.assertEqual(dashboard._row_status(row), (menu.t('ut_unchanged'), 'muted'))
+                    self.assertEqual(row.assessment.status, 'warning')
+                    self.assertIn((menu.t('ut_evidence_hint'), 'muted'),
+                                  dashboard._compact_component_lines(row, 55))
+            conflict = replace(warning, status='conflict', evidence=(
+                CompatibilityEvidence('PluginConfig', 'Known incompatibility', 'blocks'),))
+            blocked = replace(rows[1], assessment=conflict)
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(replace(rows[0], assessment=conflict), blocked),
+                                         status='conflict')
+            self.assertEqual(dashboard._row_status(blocked)[1], 'failure')
+            self.assertTrue(any(style == 'failure' and 'Known incompatibility' in line
+                                for line, style in dashboard._overview_lines()))
+            prereq = SimpleNamespace(status='unknown')
+            core = replace(rows[0], assessment=replace(warning, prerequisites=(('4.4.0', prereq),)))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(core, rows[1]), status='warning')
+            self.assertEqual(dashboard._row_status(core)[1], 'warning')
+            advisory = replace(rows[1], assessment=replace(warning, evidence=(
+                CompatibilityEvidence('publisher', 'Outside declared range', 'warns'),)))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(rows[0], advisory))
+            self.assertEqual(dashboard._row_status(advisory)[1], 'warning')
+            self.assertEqual(dashboard._row_status(rows[0])[1], 'warning')
+            dashboard.snapshot = replace(dashboard.snapshot, rows=rows, status='warning')
+            dashboard.model.selection = replace(dashboard.model.selection, netbox='4.4.2')
+            self.assertEqual(dashboard._row_status(rows[1])[1], 'warning')
+            dashboard.model.selection = replace(dashboard.model.installed,
+                                                plugins=(('example-plugin', '2.0.0'),))
+            self.assertEqual(dashboard._row_status(rows[0])[1], 'warning')
+            self.assertFalse(dashboard._enabled('execute'))
 
     def test_dashboard_stale_worker_result_does_not_replace_reset_intent(self):
         from concurrent.futures import Future
@@ -831,6 +886,11 @@ class UpgradeTuiTests(InterfaceFixture):
                                 lines.index(('Advisory range', 'warning')))
                 self.assertFalse(dashboard._enabled('execute'))
                 self.assertTrue(dashboard._draw())
+                if dimensions[1] >= 100:
+                    count_line = next(text for _, _, text, _ in menu.stdscr.frames[-1]
+                                      if menu.t('ut_counts', count=2, changed=1) in text)
+                    self.assertIn(menu.t('ut_details_key'), count_line)
+                    self.assertNotIn(menu.t('ut_preliminary_short'), count_line)
                 with patch.object(menu, '_show_lines', return_value=False) as show:
                     dashboard._details(dashboard._rows()[0])
                     overview = show.call_args.args[1]
@@ -841,6 +901,119 @@ class UpgradeTuiTests(InterfaceFixture):
                 dashboard.model.reset()
                 self.assertFalse(dashboard._enabled('execute'))
                 self.assertNotIn(('Incompatible plugin', 'failure'), dashboard._plan_lines())
+
+    def test_adaptive_dashboard_reserves_operations_readiness_and_primary_blocker(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard.plan = replace(self.build(), blockers=('Incompatible plugin: exact runtime gate',))
+            dashboard.plan_selection = dashboard.model.selection
+            rows = tuple(TargetRow(None if i == 0 else f'plugin-{i:02}-very-long-name',
+                                   '1.0.0', '2.0.0', TargetAssessment('warning', 'verified'))
+                         for i in range(25))
+            with patch.object(dashboard, '_rows', return_value=rows):
+                dashboard.cursor = 24
+                for dimensions in ((45, 160), (30, 120), (24, 80), (16, 50), (45, 160)):
+                    menu.stdscr.dimensions = dimensions
+                    self.assertTrue(dashboard._draw())
+                    frame = menu.stdscr.frames[-1]
+                    ops = next(y for y, _, text, _ in frame if text == menu.t('ut_operations'))
+                    readiness = next(y for y, _, text, _ in frame if menu.t('upgrade_status_blocked') in text)
+                    self.assertLess(ops, readiness)
+                    self.assertLess(readiness, dimensions[0] - 2)
+                    self.assertTrue(any('Incompatible plugin:' in text for _, _, text, _ in frame))
+                    self.assertTrue(any('plugin-24' in text for _, _, text, _ in frame))
+                    self.assertEqual(dashboard.cursor, 24)
+                    self.assertFalse(dashboard._enabled('execute'))
+
+    def test_real_curses_dashboard_capture(self):
+        import errno
+        import json
+        import os
+        import pty
+        import select
+        import subprocess
+        import sys
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for language, monochrome in (('en', False), ('pt', True)):
+                with self.subTest(language=language, monochrome=monochrome):
+                    output = Path(tmp) / f'{language}.json'
+                    master, slave = pty.openpty()
+                    env = dict(os.environ, TERM='xterm-256color', LINES='45', COLUMNS='160')
+                    env.pop('NO_COLOR', None)
+                    if monochrome:
+                        env['NO_COLOR'] = '1'
+                    proc = None
+                    terminal_output = bytearray()
+                    try:
+                        proc = subprocess.Popen(
+                            [sys.executable, '-m', 'tests.upgrade.terminal_dashboard_capture',
+                             str(output), language], stdin=slave, stdout=slave, stderr=slave, env=env)
+                        os.close(slave)
+                        slave = None
+                        deadline = time.monotonic() + 20
+                        while proc.poll() is None:
+                            self.assertLess(time.monotonic(), deadline, 'curses capture timed out')
+                            if select.select([master], [], [], 0.1)[0]:
+                                try:
+                                    terminal_output.extend(os.read(master, 65536))
+                                except OSError as exc:
+                                    if exc.errno != errno.EIO:
+                                        raise
+                        self.assertEqual(proc.returncode, 0, terminal_output.decode(errors='replace'))
+                    finally:
+                        if proc is not None and proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+                        if slave is not None:
+                            os.close(slave)
+                        os.close(master)
+                    frames = json.loads(output.read_text())
+                    t = Translator(language)
+                    self.assertEqual([(f['height'], f['width']) for f in frames],
+                                     [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
+                                      (30, 120), (16, 50)])
+                    for frame in frames:
+                        self.assertEqual(frame['color'], not monochrome)
+                        lines = frame['lines']
+                        operations = next(i for i, line in enumerate(lines) if t('ut_operations') in line)
+                        if frame['scenario'] == 'blocked':
+                            readiness = next(i for i, line in enumerate(lines)
+                                             if t('upgrade_status_blocked') in line)
+                            self.assertTrue(any('Incompatible plugin:' in line for line in lines))
+                            self.assertTrue(any('plugin-24' in line for line in lines))
+                        else:
+                            readiness = next(i for i, line in enumerate(lines) if t('ut_no_changes') in line)
+                            self.assertTrue(any(t('ut_unchanged') in line for line in lines))
+                            self.assertFalse(any('Warning' in line or 'Aviso' in line for line in lines))
+                        self.assertLess(operations, readiness)
+                        self.assertLess(readiness, frame['height'] - 2)
+                        if frame['width'] in (50, 80, 120, 160):
+                            print(f"Actual curses capture: {language} {frame['width']}x{frame['height']}"
+                                  f" color={frame['color']} scenario={frame['scenario']}\n" + '\n'.join(lines))
+
+    def test_dashboard_validation_stays_on_screen_and_rejects_stale_result(self):
+        from concurrent.futures import Future
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        pool = Mock()
+        future = Future()
+        pool.submit.return_value = future
+        dashboard._validate(pool)
+        self.assertIs(dashboard.future, future)
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertTrue(dashboard._draw())
+        self.assertTrue(any(menu.t('ut_validating') in text for _, _, text, _ in menu.stdscr.frames[-1]))
+        dashboard.model.reset()
+        future.set_result(self.build())
+        dashboard._poll(pool)
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertEqual(dashboard.error, menu.t('ut_plan_mismatch'))
 
     def test_failed_recalculation_does_not_reuse_previous_review(self):
         dashboard, menu = self._dashboard()

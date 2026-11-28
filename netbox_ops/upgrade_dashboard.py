@@ -52,6 +52,8 @@ class UpgradeDashboard:
         self.cursor = self.scroll = self.action = 0
         self.actions_focused = False
         self.positions = []
+        self._drawn_actions = _ACTIONS
+        self._validation_selection = None
         self._inventory_valid = True
         self._discovery_action = None
         self._discovery_states = {}
@@ -161,6 +163,14 @@ class UpgradeDashboard:
         while self.future is not None and self.future.done():
             future, self.future = self.future, None
             discovering = self._discovery_action is not None
+            if self._validation_selection is not None:
+                selection, self._validation_selection = self._validation_selection, None
+                try:
+                    self._accept_validation(future.result(), selection)
+                except Exception:
+                    self._invalidate_plan()
+                    self.error = self.t('ut_validation_error')
+                continue
             try:
                 result = future.result()
                 self._drain_discovery()
@@ -212,6 +222,41 @@ class UpgradeDashboard:
             return self.t('ut_checking')
         return self.t('ut_' + assessment.status)
 
+    def _no_changes(self):
+        return (self._inventory_valid and self.model is not None
+                and self.model.selection == self.model.installed)
+
+    def _row_status(self, row):
+        """Neutral presentation only for the installed combination, not a compatibility claim."""
+        assessment = row.assessment
+        neutral = (self._no_changes() and self.future is None and self.snapshot is not None
+                   and self.snapshot.selection == self.model.selection
+                   and row.current == row.target and row.current != '?'
+                   and assessment.status != 'conflict'
+                   and not any(item.status == 'blocks' for item in assessment.evidence))
+        if neutral:
+            # Existing runtime/inventory problems must remain visible. Plugin
+            # evidence is propagated onto the core row by the target model.
+            if row.component is None:
+                neutral = (not self.model.context.plugin_selection_incomplete
+                           and all(item.status == 'ok' for _, item in assessment.prerequisites)
+                           and all(self._row_status(plugin)[1] == 'muted'
+                                   for plugin in self.snapshot.rows if plugin.component is not None))
+            else:
+                neutral = not any(
+                    item.status == 'warns' and item.source != 'Release'
+                    and not (item.source == 'PyPI Requires-Dist'
+                             and item.detail == 'No explicit NetBox distribution dependency')
+                    for item in assessment.evidence
+                )
+        if neutral:
+            return self.t('ut_unchanged'), 'muted'
+        return self._status(assessment), _STYLES[assessment.status]
+
+    def _discovery_incomplete(self):
+        return bool(self._discovery_states and any(
+            state not in ('done', 'not_applicable') for state in self._discovery_states.values()))
+
     def _name(self, component):
         return component or 'NetBox'
 
@@ -219,8 +264,10 @@ class UpgradeDashboard:
         return ' '.join(_clip(value, width).ljust(width) for value, width in zip(values, widths))
 
     def _readiness(self):
+        if self._validation_selection is not None:
+            return self.t('ut_validating'), 'title'
         if self.model is not None and self._inventory_valid:
-            if self.model.selection == self.model.installed:
+            if self._no_changes():
                 return self.t('ut_no_changes'), 'muted'
             if self._plan_matches():
                 status = self.plan.status
@@ -265,6 +312,54 @@ class UpgradeDashboard:
                               'success' if review.ltree in ('installed', 'available') else 'warning'))
         return lines
 
+    def _overview_lines(self):
+        """Always expose overall readiness before allocating space to evidence."""
+        t = self.t
+        lines = [self._readiness()]
+        if self.error:
+            if self._discovery_incomplete() and self.error == t('upgrade_discovery_error'):
+                lines.append((t('ut_discovery_failed_retry'), 'failure'))
+            else:
+                lines.append((self.error, 'failure'))
+        elif self._plan_matches():
+            plan = self.plan
+            if plan.blockers:
+                lines.append((plan.blockers[0], 'failure'))
+            elif plan.warnings:
+                lines.append((plan.warnings[0], 'warning'))
+            elif plan.can_execute:
+                lines.append((t('ut_review_next'), 'muted'))
+            if self._correctable_pins():
+                lines.append((t('ut_pin_review_from_plan'), 'title'))
+        elif self.snapshot is not None and self.model is not None and self.snapshot.selection == self.model.selection:
+            status = self.snapshot.status
+            preliminary = (t('ut_preliminary_status', status=t('ut_' + status)), _STYLES[status])
+            no_changes = self._no_changes()
+            for row in self.snapshot.rows:
+                reasons = [e for e in row.assessment.evidence if e.status == 'blocks']
+                if reasons:
+                    lines.append((f'{self._name(row.component)}: {reasons[0].detail}', 'failure'))
+                    break
+            else:
+                material = next((row for row in self.snapshot.rows
+                                 if self._row_status(row)[1] in ('warning', 'failure')), None)
+                if no_changes and material is not None:
+                    lines.append((f'{self._name(material.component)}: {self._row_status(material)[0]}',
+                                  self._row_status(material)[1]))
+                elif self.snapshot.warnings and not no_changes:
+                    lines.append((self.snapshot.warnings[0], 'warning'))
+            if self._discovery_incomplete() or self.snapshot.partial:
+                lines.append((t('ut_discovery_incomplete_retry'), 'warning'))
+            if not no_changes:
+                lines.append(preliminary)
+            if self._enabled('validate'):
+                lines.append((t('ut_validate_next'), 'muted'))
+        elif self._discovery_incomplete() and self.future is None:
+            lines.append((t('ut_discovery_incomplete_retry'), 'warning'))
+        elif self._enabled('validate'):
+            lines.append((t('ut_validate_next'), 'muted'))
+        return lines
+
     def _component_lines(self, row):
         return [(self._name(row.component), 'title'),
                 (f'{self.t("ut_col_current")}: {row.current}', 'muted'),
@@ -277,7 +372,9 @@ class UpgradeDashboard:
     def _compact_component_lines(self, row, width):
         lines = self._component_lines(row)
         evidence = lines[4:]
-        result = lines[:4]
+        result = lines[:3] + [self._row_status(row)]
+        if result[-1][0] == self.t('ut_unchanged'):
+            return result + [(self.t('ut_evidence_hint'), 'muted')]
         # Put blocking/uncertain reasons before ordinary supporting evidence.
         attention = [line for line in evidence if line[1] in ('warning', 'failure')]
         if attention:
@@ -312,6 +409,8 @@ class UpgradeDashboard:
                 lines.append((f'{self._name(component.component)}: {component.current} → {component.target} '
                               f'[{self._status(component.assessment)}]', _STYLES[component.assessment.status]))
         lines.extend([(t('ut_plan'), 'section'), *self._plan_lines()])
+        if not self._plan_matches():
+            lines.extend(self._overview_lines()[1:])
         if self._plan_matches():
             for review in self.plan.dependency_reviews:
                 for item in review.local_diagnostics:
@@ -321,6 +420,9 @@ class UpgradeDashboard:
                                     action=t('upgrade_local_action_' + item.action.replace('-', '_'))), 'failure'))
         if self.snapshot:
             lines.extend((warning, 'warning') for warning in self.snapshot.warnings)
+        if self._discovery_incomplete():
+            lines.extend([(t('ut_discovery_heading'), 'section'),
+                          *self._discovery_lines(100, compact=False)])
         if self.error:
             lines.append((self.error, 'failure'))
         lines.append((t('ut_evidence_next'), 'muted'))
@@ -331,6 +433,9 @@ class UpgradeDashboard:
 
     def _evidence(self, row):
         lines = [(self.t('ut_preliminary'), 'section'), *self._component_lines(row)]
+        if self._discovery_incomplete():
+            lines.extend([(self.t('ut_discovery_heading'), 'section'),
+                          *self._discovery_lines(100, compact=False)])
         if self._plan_matches():
             lines.extend([(self.t('ut_plan'), 'section'),
                           *((line, '') for line in summary_lines(self.plan, self.t, details=True))])
@@ -422,7 +527,7 @@ class UpgradeDashboard:
         minimum = [max(8, len(t('ut_group_plugins'))), len(headers[0]), len(headers[1]), len(headers[2])]
         preferred = [max(map(len, names)), max(len(headers[0]), *(len(row.current) for row in rows)),
                      max(len(headers[1]), *(len(row.target) + 1 for row in rows)),
-                     max(len(headers[2]), *(len(self._status(row.assessment)) for row in rows))]
+                     max(len(headers[2]), *(len(self._row_status(row)[0]) for row in rows))]
         widths = [max(low, high) for low, high in zip(minimum, preferred)]
         gap = 3 if sum(widths) + 9 <= width else 1
         excess = max(0, sum(widths) + 3 * gap - width)
@@ -457,17 +562,21 @@ class UpgradeDashboard:
         self.cursor = min(self.cursor, len(rows) - 1)
         compact = w < 76
         actions = self._actions()
-        self.action = min(self.action, len(actions) - 1)
+        previous = self._drawn_actions[min(self.action, len(self._drawn_actions) - 1)]
+        self.action = actions.index(previous) if previous in actions else actions.index('validate')
+        self._drawn_actions = actions
         labels = [t('ut_action_' + a + ('_short' if compact else '')) for a in actions]
         self.positions = menu._backup_action_positions(labels, width)
         action_height = 2 + self.positions[-1][1]
         gap = 1 if h >= 22 else 0
-        side_by_side = w >= 82 and h >= 21
-        discovery = bool(self._discovery_states)
+        side_by_side = w >= 100 and h >= 24
+        discovery = (self.future is not None and bool(self._discovery_states)
+                     and self._validation_selection is None)
         discovery_lines = self._discovery_lines(width, compact=h < 21 or width < 74) if discovery else []
         detail_height = (len(discovery_lines) + 1 if discovery else
-                         min(12, max(5, (h - 12) // 2)) if side_by_side else 2)
-        budget = max(1, h - 2 - 3 - 3 - action_height - detail_height - 2 * gap)
+                         min(12, max(5, (h - 12) // 2)) if side_by_side else 3)
+        # Reserve operations, readiness/evidence and footer before table rows.
+        budget = max(1, h - 8 - action_height - detail_height - 2 * gap)
         self.scroll = max(0, min(self.scroll, self.cursor, len(rows) - 1))
         visible = self._visible_components(rows, self.scroll, budget)
         while self.cursor not in visible:
@@ -505,25 +614,30 @@ class UpgradeDashboard:
                 y += 1
             selected = index == self.cursor and not self.actions_focused
             target = ('*' if row.target != '?' and row.target != row.current else '') + row.target
-            values = ('  ' + self._name(row.component), row.current, target, self._status(row.assessment))
+            status, status_style = self._row_status(row)
+            values = ('  ' + self._name(row.component), row.current, target, status)
             if selected:
                 menu._put(y, 3, ' ' * table_width, 'selected')
             for i, value in enumerate(values):
                 style = 'selected' if selected else ''
                 if i == 3 and (not selected or menu.colors):
-                    style = _STYLES[row.assessment.status]
+                    style = status_style
                 menu._put(y, 3 + offsets[i], _clip(value, widths[i]), style)
             y += 1
         count = sum(row.target != '?' and row.current != row.target for row in rows)
         note = (t('ut_checking') if self.future is not None else t('ut_discovery_retry_short')
-                if discovery else t('ut_partial')
+                if self._discovery_incomplete() else t('ut_partial')
                 if self.snapshot and self.snapshot.partial else t('ut_details_key')
-                if self.error or self.snapshot and self.snapshot.warnings else t('ut_preliminary_short'))
-        if self._plan_matches():
-            note = self._readiness()[0]
+                if self._no_changes() or self.error or self.snapshot and self.snapshot.warnings
+                else t('ut_preliminary_short'))
+        if self._validation_selection is not None:
+            note = t('ut_validating')
+        elif self._plan_matches():
+            note = t('ut_details_key')
         counts = (t('ut_counts', count=len(rows), changed=count) if self._inventory_valid and self.model
                   else t('ut_inventory_pending'))
-        menu._put(counts_y, 3, _clip(f'{counts} | {note}', width), 'muted')
+        position = f'{self.cursor + 1}/{len(rows)} | ' if len(visible) < len(rows) else ''
+        menu._put(counts_y, 3, _clip(f'{position}{counts} | {note}', width), 'muted')
         menu._put(action_y, 3, t('ut_operations'), 'section')
         for i, (x, line) in enumerate(self.positions):
             enabled = self._enabled(actions[i])
@@ -542,7 +656,8 @@ class UpgradeDashboard:
             elif side_by_side:
                 split = w // 2
                 component = self._compact_component_lines(row, split - 5)
-                plan = self._plan_lines()
+                plan = self._overview_lines()
+                plan.extend(line for line in self._plan_lines()[1:] if line not in plan)
                 height = min(h - 2 - detail_y, max(len(component), len(plan)) + 1, detail_height)
                 menu._paint(detail_y, 2, split - 3, height)
                 menu._paint(detail_y, split + 1, w - split - 3, height)
@@ -553,11 +668,12 @@ class UpgradeDashboard:
                 for i, (line, style) in enumerate(plan[:height - 1]):
                     menu._put(detail_y + 1 + i, split + 2, _clip(line, w - split - 5), style)
             else:
-                menu._paint(detail_y, 2, w - 4, min(2, h - 2 - detail_y))
-                menu._put(detail_y, 3, _clip(t('ut_details_key') + ': ' + self._name(row.component), width), 'section')
-                if detail_y + 1 < h - 2:
-                    line, style = self._readiness()
-                    menu._put(detail_y + 1, 3, _clip(line, width), style)
+                height = min(detail_height, h - 2 - detail_y)
+                menu._paint(detail_y, 2, w - 4, height)
+                menu._put(detail_y, 3, _clip(t('ut_plan') + ' | ' + t('ut_details_key'), width), 'section')
+                lines = self._overview_lines()
+                for i, (line, style) in enumerate(lines[:height - 1]):
+                    menu._put(detail_y + 1 + i, 3, _clip(line, width), style)
         menu.stdscr.refresh()
         return True
 
@@ -786,21 +902,33 @@ class UpgradeDashboard:
                 pool.shutdown(wait=False, cancel_futures=True)
             menu.stdscr.timeout(-1)
 
-    def _validate(self):
+    def _accept_validation(self, plan, selection):
+        self.plan = plan
+        self.plan_selection = selection if plan is not None else None
+        if plan is None:
+            self.error = self.t('ut_validation_error')
+        elif not self._plan_matches():
+            self._invalidate_plan()
+            self.error = self.t('ut_plan_mismatch')
+
+    def _validate(self, pool=None):
         self._invalidate_plan()
+        self.error = ''
         try:
             operation, target, pins = self.model.selection.plan_arguments(self.model.installed)
         except UpgradePlanError as exc:
-            self.menu._show_lines(self.title, [(safe_text(exc), 'failure')])
+            self.error = safe_text(exc)
             return
         if operation is None:
             return
-        selection = self.model.selection
-        self.plan = self.menu._upgrade_job(self.title, lambda _: make_plan(self.model.context, operation, target, pins))
-        self.plan_selection = selection if self.plan is not None else None
-        if self.plan is not None and not self._plan_matches():
-            self._invalidate_plan()
-            self.menu._show_lines(self.title, [(self.t('ut_plan_mismatch'), 'failure')])
+        selection, context = self.model.selection, self.model.context
+        if pool is None:
+            # Synchronous invocation retained for offline tests and the VM harness.
+            self._accept_validation(self.menu._upgrade_job(
+                self.title, lambda _: make_plan(context, operation, target, pins)), selection)
+            return
+        self._validation_selection = selection
+        self.future = pool.submit(copy_context().run, make_plan, context, operation, target, pins)
 
     def run(self):
         menu = self.menu
@@ -813,7 +941,7 @@ class UpgradeDashboard:
                 if self.future is None and self._revalidate_after_pins:
                     self._revalidate_after_pins = False
                     if self._inventory_valid and self.model is not None and not self.error:
-                        self._validate()
+                        self._validate(pool)
                 menu.stdscr.timeout(150 if self.future is not None else -1)
                 frame = self._draw()
                 key = menu.stdscr.getch()
@@ -867,7 +995,7 @@ class UpgradeDashboard:
                             self.suggested = None
                             self._start(pool, 'assess')
                         elif action == 'validate':
-                            self._validate()
+                            self._validate(pool)
                         elif action == 'refresh':
                             self._discover(pool, 'assess' if self.model else 'suggest')
                         elif action == 'pins':
