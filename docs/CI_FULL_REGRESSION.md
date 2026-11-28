@@ -15,3 +15,11 @@ The five upgrade VM scenarios alone used about 65 minutes of aggregate VM time i
 ## Validation
 
 Verify the called workflows and the manual entry point on the chosen branch before relying on this as a full regression run. The schedule and manual entry point become available only once the workflow is present on the default branch. Existing uninstrumented E2E checks remain authoritative.
+
+## Cross-minor source baseline
+
+The source fixture is NetBox 4.4.9 with the pinned cross-minor plugin and LDAP dependencies, a migrated PostgreSQL schema and a disabled, password-free database role. Each disposable overlay receives independent credentials and the current netbox-ops checkout. The remaining official 4.4.9 source setup operations (trace paths, documentation, static files, stale content types, lazy reindex and expired sessions) run in the overlay using its credentials. The real 4.7.3 upgrade, approval, ltree and recovery checks are unchanged.
+
+Use **Validate NetBox 4.4.9 source baseline** to compare fresh and pre-migrated source fixtures. It builds a temporary artifact, verifies its checksum and runs both real upgrades. The existing 4.7.3 release baseline remains unchanged.
+
+After the validation PR is integrated into dev, manually select dev and 4.4.9 in **Publish reusable NetBox VM baseline**. Publication requires the explicit `publish_source` option and both verification jobs to pass. This publishes only the versioned CI image, not a netbox-ops release; it never overwrites an existing version. Only switch the regular cross-minor workflow to this tag after the release and checksum are verified. Keep the fresh fixture path for regression coverage.
