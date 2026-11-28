@@ -10,25 +10,13 @@ permissions:
 
 jobs:
   benchmark:
-    name: Cross-minor / ${{ matrix.profile }}
+    name: Cross-minor profiling / ${{ matrix.repeat }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - profile: A-control
-            vcpus: 2
-            memory: 4096
-          - profile: C-memory
-            vcpus: 2
-            memory: 8192
-          - profile: D-combined
-            vcpus: 3
-            memory: 8192
-          - profile: E-high-memory
-            vcpus: 3
-            memory: 12288
+        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -62,8 +50,8 @@ jobs:
       - name: Run identical cross-minor scenario
         env:
           NETBOX_VM_UPGRADE_SCENARIO: cross-minor
-          NETBOX_VM_VCPUS: ${{ matrix.vcpus }}
-          NETBOX_VM_MEMORY_MIB: ${{ matrix.memory }}
+          NETBOX_VM_VCPUS: '2'
+          NETBOX_VM_MEMORY_MIB: '4096'
         run: |
           set -euo pipefail
           bash scripts/ci/netbox-vm-host.sh verify | tee "$RUNNER_TEMP/benchmark.log"
@@ -71,5 +59,5 @@ jobs:
         if: always()
         run: |
           if test -f "$RUNNER_TEMP/benchmark.log"; then
-            grep -E '^(VM profile:|TIMING:|PASS: QMP|PASS: isolated NetBox boot)' "$RUNNER_TEMP/benchmark.log" >> "$GITHUB_STEP_SUMMARY" || true
+            grep -E '^(VM profile:|TIMING:|PROFILE:|PROFILE_DETAIL:|PASS: QMP|PASS: isolated NetBox boot)' "$RUNNER_TEMP/benchmark.log" >> "$GITHUB_STEP_SUMMARY" || true
           fi

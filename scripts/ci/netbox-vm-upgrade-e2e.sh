@@ -16,14 +16,22 @@ marker=/var/lib/netbox-ops/upgrade.pending
 [[ -d "$root" && ! -e "$root/.git" && ! -e "$marker" ]]
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 umask 022
+profile_start=$SECONDS
+profile_mark() {
+  printf 'PROFILE: %s: %s s\n' "$1" "$((SECONDS-profile_start))"
+  profile_start=$SECONDS
+}
 # Check isolation configured at boot, before creating the source fixture.
 for unit in apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service; do
   state=$(systemctl show -p UnitFileState --value "$unit")
   case "$state" in masked|masked-runtime) ;; *) echo "FAIL: background APT unit is not masked: $unit" >&2; exit 1 ;; esac
   case "$(systemctl show -p ActiveState --value "$unit")" in inactive|failed) ;; *) echo "FAIL: background APT unit active: $unit" >&2; exit 1 ;; esac
 done
+profile_mark 'isolation checks'
 apt-get update -qq
+profile_mark 'guest APT update'
 NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git
+profile_mark 'guest git install'
 old=4.7.2
 target=4.7.3
 python=/usr/bin/python3.12
@@ -37,6 +45,7 @@ if [[ "$scenario" == cross-minor ]]; then
   new_plugin=1.1.5
   NEEDRESTART_MODE=l apt-get install -y --no-install-recommends libldap-dev libsasl2-dev libssl-dev python3.12-dev
 fi
+profile_mark "guest scenario-specific OS packages"
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
 # is created for the older release rather than attempting a downgrade.
@@ -47,6 +56,7 @@ trap 'rm -rf -- "$scratch"' EXIT
 cp "$root/netbox/netbox/configuration.py" "$scratch/configuration.py"
 mv "$root" "$scratch/archive-install"
 git clone --quiet --depth 1 --branch "v$old" https://github.com/netbox-community/netbox.git "$root"
+profile_mark "stop services, archive and clone source"
 install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netbox/configuration.py"
 # Both tested releases accept DATABASES and reject a simultaneous DATABASE.
 # The baseline supplies DATABASES. Permit unauthenticated status checks only
@@ -83,6 +93,7 @@ for dir in media scripts reports; do
 done
 runuser -u postgres -- dropdb --if-exists netbox
 runuser -u postgres -- createdb --owner=netbox netbox
+profile_mark "source configuration and database recreation"
 # Both source tags leave pymdown-extensions unpinned; 13.x breaks
 # their documentation builders. Use the exact pin from upstream 4.7.3
 # only while creating the source fixture. The tested upgrade receives
@@ -96,13 +107,15 @@ if [[ "$old" == 4.7.2 || "$old" == 4.4.10 ]]; then
 else
   (cd "$root" && PYTHON="$python" bash upgrade.sh)
 fi
+profile_mark "source official upgrade.sh"
 systemctl start netbox netbox-rq
 echo "Fixture installed: NetBox $old"
 wait_health() {
-  local version=$1
+  local version=$1 health_started=$SECONDS
   for i in $(seq 1 60); do
     if curl -fsS "$status_url" 2>/dev/null | python3 -c \
       'import json,sys; s=json.load(sys.stdin); assert s["netbox-version"]==sys.argv[1] and s["rq-workers-running"]>0' "$version" 2>/dev/null; then
+      printf 'PROFILE_DETAIL: health %s: %s s (%s attempts)\n' "$version" "$((SECONDS-health_started))" "$i"
       return 0
     fi
     sleep 2
@@ -111,6 +124,7 @@ wait_health() {
   return 1
 }
 wait_health "$old"
+profile_mark "source service start and health"
 if [[ "$scenario" == cross-minor ]]; then
   # This disposable database has no ltree yet. Exercise both the denied
   # migration role and the verified administrative path before the real
@@ -160,6 +174,7 @@ PY
   [[ $(runuser -u postgres -- psql -X -At -d netbox -c "SELECT count(*) FROM pg_extension WHERE extname='ltree'") == 0 ]]
   wait_health "$old"
 fi
+profile_mark "ltree denied role, recovery and restoration"
 (cd "$root/netbox" && runuser -u netbox -- "$root/venv/bin/python" manage.py shell -c \
   "from extras.models import Tag; Tag.objects.create(name='Upgrade CI',slug='upgrade-ci',color='123456')")
 media="$root/netbox/media/upgrade-ci.txt"
@@ -188,6 +203,8 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   echo 'PASS: additional local package excluded from plugin selection'
 fi
 
+profile_mark "seed fixture and initial assertions"
+
 # Reproduce the reported incompatible plugin upgrade and preserve a bare local dependency
 # against real published releases, before any maintenance begins.
 if [[ "$scenario" == cross-minor ]]; then
@@ -205,13 +222,23 @@ sys.path.insert(0, '/opt/netbox-ops')
 from netbox_ops.config import load_config
 from netbox_ops.plugin_inventory import inventory_plugins
 from netbox_ops.upgrade_ui import discover_context, make_plan
+from time import monotonic
+
+started = monotonic()
+def mark(name):
+    global started
+    now = monotonic()
+    print(f'PROFILE_DETAIL: {name}: {now-started:.3f} s', flush=True)
+    started = now
 
 target, plugin, version = sys.argv[1:]
 cfg = load_config()
 context = discover_context(cfg)
+mark('initial discovery')
 requirements = context.installation.root / 'local_requirements.txt'
 original = requirements.read_bytes()
 bad = make_plan(context, 'plugins', None, {plugin: version})
+mark('incompatible plugin plan')
 assert not bad.can_execute
 check = next(c for stage in bad.stages for c in stage.plugin_checks if c.package == plugin)
 assert check.status == 'blocked', check
@@ -222,8 +249,10 @@ assert requirements.read_bytes() == original
 print('PASS: real reorder-rack release rejected on NetBox 4.4.x')
 
 inventory = inventory_plugins(context.installation, local_pin_names=('tomli-w', 'django-auth-ldap', 'python-ldap'))
+mark('plugin inventory')
 assert not any(p.package in ('tomli-w', 'django-auth-ldap', 'python-ldap') for p in inventory.proposals)
 plan = make_plan(context, 'stack', target, {plugin: version})
+mark('valid stack plan')
 assert plan.can_execute, plan.blockers
 assert all(r.resolution.status == 'passed' and r.resolution.checked_core for r in plan.dependency_reviews)
 assert all(dict(r.resolution.packages).get('tomli-w') == '1.2.0' for r in plan.dependency_reviews)
@@ -243,6 +272,7 @@ PY
   done
   wait_health "$old"
 fi
+profile_mark "cross-minor planning and read-only assertions"
 
 case "$scenario" in
   plugins) args=(upgrade plugins --plugin "$plugin==$new_plugin") ;;
@@ -250,6 +280,7 @@ case "$scenario" in
   *) args=(upgrade netbox --version "$target") ;;
 esac
 "${cli[@]}" "${args[@]}" --details | tee "$scratch/plan"
+profile_mark "CLI reviewed plan"
 if [[ -n "$overlap_pin" ]]; then
   grep -F 'Redundant identical pin; retained, not edited.' "$scratch/plan" | grep -Fq "$overlap_pin"
   grep -Fxq "$overlap_pin" "$root/local_requirements.txt"
@@ -267,9 +298,11 @@ fi
 # Do not mistake an unrelated discovery failure for approval enforcement.
 grep -Fq 'Approved fingerprint does not match an executable plan' "$scratch/rejected-plan"
 echo 'PASS: stale fingerprint rejected before downtime'
+profile_mark "CLI stale approval rejection"
 [[ $(git -C "$root" rev-parse HEAD) == "$commit" && ! -e "$marker" ]]
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 wait_health "$old"
+profile_mark "stale approval postconditions"
 
 # Exercise real TUI selection, review, cancellation and execution. Only the
 # screen is synthetic; inventory, planning, execution and recovery are real.
@@ -451,6 +484,7 @@ else
   if [[ "$scenario" == cross-minor ]]; then
     "${cli[@]}" "${args[@]}" --execute --approve-plan "$fingerprint" \
       --accept-unknowns --health-url "$status_url"
+    profile_mark "CLI approved execution including preflight and upgrade"
   fi
   [[ ! -e "$marker" ]]
   wait_health "$target"
@@ -458,6 +492,7 @@ else
     systemctl is-active --quiet "$unit"
   done
 fi
+profile_mark "post-upgrade service and health checks"
 if [[ "$scenario" == plugins ]]; then
   [[ $(git -C "$root" rev-parse HEAD) == "$commit" ]]
 else
@@ -469,6 +504,7 @@ fi
 (cd "$root/netbox" && runuser -u netbox -- "$root/venv/bin/python" manage.py shell -c \
   "from extras.models import Tag; assert Tag.objects.get(slug='upgrade-ci').name=='Upgrade CI'")
 (cd "$root" && "$root/venv/bin/python" netbox/manage.py migrate --check --noinput)
+profile_mark "revision, data, media and migration validation"
 if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   grep -qx "$plugin==$new_plugin" "$root/local_requirements.txt"
   grep -qx 'tomli-w==1.2.0' "$root/local_requirements.txt"
@@ -514,6 +550,7 @@ for unit in nginx redis-server postgresql@16-main; do
   systemctl is-active --quiet "$unit"
   [[ $(systemctl show -p ActiveEnterTimestampMonotonic --value "$unit") == "$(cat "$scratch/$unit")" ]]
 done
+profile_mark "installed plugin, dependency and service assertions"
 # Validate the archive through the existing verifier and compare protected
 # metadata with the actual old revision; never print captured configuration.
 python3 - "$old" "$target" "$commit" "$scenario" "$config_sha" <<'PY'
@@ -553,4 +590,5 @@ archive = directory / record['archive']
 assert BackupManager(replace(cfg, backup_directory=directory)).verify('combined', archive)['netbox_version'] == old
 print('PASS: verified protected recovery archive, revision, pins and configuration')
 PY
+profile_mark "protected recovery archive verification"
 echo "PASS: $scenario real upgrade scenario"
