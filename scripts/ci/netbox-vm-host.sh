@@ -15,17 +15,29 @@ cleanup() {
 trap cleanup EXIT
 test -c /dev/kvm || { echo '::error::KVM unavailable'; exit 1; }
 sudo chmod a+rw /dev/kvm
-qmp_powerdown() {
-  python3 - <<'PY'
+vcpus=${NETBOX_VM_VCPUS:-2}
+memory=${NETBOX_VM_MEMORY_MIB:-4096}
+case "$vcpus:$memory" in
+  2:4096|3:4096|2:8192|3:8192) ;;
+  *) echo '::error::Unsupported VM resource profile'; exit 2 ;;
+esac
+if (( $(nproc) < vcpus + 1 || $(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo) < memory + 2048 )); then
+  echo '::error::Insufficient runner CPU or memory for VM profile'; exit 1
+fi
+printf 'VM profile: %s vCPU, %s MiB; host: %s vCPU\n' "$vcpus" "$memory" "$(nproc)"
+free -m
+qmp_command() {
+  python3 - "$1" <<'PY'
 import json
 import socket
+import sys
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
     sock.settimeout(5)
     sock.connect("qmp.sock")
     with sock.makefile("rwb") as f:
         if "QMP" not in json.loads(f.readline()):
             raise RuntimeError("QMP unavailable")
-        for command in ("qmp_capabilities", "system_powerdown"):
+        for command in ("qmp_capabilities", sys.argv[1]):
             f.write((json.dumps({"execute": command}) + "\n").encode())
             f.flush()
             while True:
@@ -34,8 +46,13 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
                     break
             if "error" in response:
                 raise RuntimeError(response["error"])
+            if command == "query-kvm":
+                if response["return"].get("enabled") is not True:
+                    raise RuntimeError("KVM not enabled")
+                print("PASS: QMP confirms KVM enabled")
 PY
 }
+qmp_powerdown() { qmp_command system_powerdown; }
 wait_for_exit() {
   local pid=$1 limit=$2 state
   for (( i=0; i<limit; i++ )); do
@@ -89,7 +106,7 @@ EOF
   fi
   cloud-localds seed.img user-data meta-data
   qemu-system-x86_64 \
-    -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
+    -machine q35,accel=kvm -cpu host -smp "$vcpus" -m "$memory" \
     -drive file="$disk",format=qcow2,if=virtio,discard=unmap \
     -drive file=seed.img,format=raw,if=virtio \
     -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
@@ -97,6 +114,7 @@ EOF
     -display none -serial file:serial.log -monitor none \
     -qmp unix:qmp.sock,server=on,wait=off \
     -daemonize -pidfile vm.pid
+  qmp_command query-kvm
   ssh_opts=(-i "./key-$attempt" -p 2222 -o BatchMode=yes -o ConnectTimeout=3 \
     -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=./known-$attempt")
   ready=false
@@ -162,12 +180,17 @@ elif [[ "$mode" == verify ]]; then
   for attempt in "${attempts[@]}"; do
     started=$SECONDS
     qemu-img create -f qcow2 -F qcow2 -b "$PWD/netbox-ubuntu24.qcow2" "overlay-$attempt.qcow2"
+    phase_start=$SECONDS
     boot_vm "overlay-$attempt.qcow2" "$attempt"
+    echo "TIMING: boot + cloud-init: $((SECONDS-phase_start)) s"
+    phase_start=$SECONDS
     scp -i "./key-$attempt" -P 2222 -o BatchMode=yes \
       -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=./known-$attempt" \
       "$GITHUB_WORKSPACE/scripts/ci/netbox-vm-guest.sh" source.tar.gz \
       ubuntu@127.0.0.1:/home/ubuntu/
     ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh provision'
+    echo "TIMING: source transfer + provision: $((SECONDS-phase_start)) s"
+    phase_start=$SECONDS
     if [[ -n "$scenario" ]]; then
       ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
       ssh_guest "sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-upgrade-e2e.sh $scenario"
@@ -196,9 +219,12 @@ elif [[ "$mode" == verify ]]; then
         ssh_guest 'sudo /usr/bin/python3 -I -B /opt/netbox-ops/scripts/ci/netbox-vm-self-upgrade.py'
       fi
     fi
+    echo "TIMING: scenario: $((SECONDS-phase_start)) s"
+    phase_start=$SECONDS
     test "$(sha256sum netbox-ubuntu24.qcow2 | cut -d' ' -f1)" = "$base_hash"
     ssh_guest 'sudo systemctl poweroff --no-block' || true
     stop_vm
+    echo "TIMING: integrity + shutdown: $((SECONDS-phase_start)) s"
     echo "PASS: isolated NetBox boot $attempt in $((SECONDS-started)) s"
   done
   sha256sum -c SHA256SUMS.txt
