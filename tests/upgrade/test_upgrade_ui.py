@@ -1043,8 +1043,18 @@ class UpgradeTuiTests(InterfaceFixture):
                     t = Translator(language)
                     self.assertEqual([(f['height'], f['width']) for f in frames],
                                      [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
-                                      (30, 120), (16, 50), (30, 120), (16, 50), (30, 120)])
-                    for frame in frames:
+                                      (30, 120), (16, 50), (30, 120), (16, 50), (30, 120),
+                                      (30, 120), (30, 120)])
+                    low, peak = frames[-2:]
+                    self.assertEqual((low['scenario'], peak['scenario']), ('pulse', 'pulse'))
+                    self.assertEqual(low['lines'], peak['lines'])
+                    running_y = next(y for y, line in enumerate(low['lines'])
+                                     if t('nbo_task_state_running') in line)
+                    differences = [(y, x) for y, (before, after) in
+                                   enumerate(zip(low['attributes'], peak['attributes']))
+                                   for x, (a, b) in enumerate(zip(before, after)) if a != b]
+                    self.assertEqual(differences, [] if monochrome else [(running_y, 3)])
+                    for frame in frames[:-2]:
                         self.assertEqual(frame['color'], not monochrome)
                         lines = frame['lines']
                         if frame['scenario'] == 'discovery':
