@@ -296,6 +296,7 @@ class CursesMenu:
         headings = headings or {}
         if not entries:
             return None
+        numeric_shortcuts = numeric_shortcuts and len(entries) <= 9
         lines: list[tuple[int | None, str, str]] = []
         select_to_row = []
         if ((subtitles and len(subtitles) != len(entries))
@@ -305,7 +306,7 @@ class CursesMenu:
             if i in headings:
                 lines.append((None, self.t(headings[i]).strip(), 'section'))
             select_to_row.append(len(lines))
-            lines.append((i, label, kind))
+            lines.append((i, f'{i + 1}  {label}' if numeric_shortcuts else label, kind))
         index = max(0, min(index, len(entries) - 1))
         armed = False
         scroll = 0
@@ -315,8 +316,13 @@ class CursesMenu:
             actual_hint = self.t('tui_selector_hint') if hint == self.t('tui_back_hint') else hint
             if hint == self.t('nbo_restore_scope_hint'):
                 actual_hint = self.t('tui_selector_cancel_hint')
+            shortcut = (self.t('tui_selector_numeric_hint', keys='1' if len(entries) == 1
+                               else f'1–{len(entries)}') + ' | ' if numeric_shortcuts else '')
+            actual_hint = shortcut + actual_hint
             if len(self._quit_hint(actual_hint)) > self.stdscr.getmaxyx()[1] - 3:
-                actual_hint = self.t('tui_selector_short_hint')
+                actual_hint = shortcut + self.t('tui_selector_short_hint')
+            if numeric_shortcuts and len(self._quit_hint(actual_hint)) > self.stdscr.getmaxyx()[1] - 3:
+                actual_hint = shortcut + '↑↓ | Enter | Esc'
             frame = self._frame(title, self._quit_hint(actual_hint))
             if frame:
                 h, w = frame
@@ -335,7 +341,7 @@ class CursesMenu:
                 # option. Reserve the optional detail panel before list scrolling.
                 heading = section or self.t('tui_selector_options')
                 labels = [safe_text(label) for _, label, _ in lines]
-                names_width = max(len(safe_text(label)) for label, _ in entries)
+                names_width = max(len(label) for item, label, _ in lines if item is not None)
                 if subtitles:
                     names_width = min(names_width, max(8, (w - 10) // 2))
                     def option_text(item, label):
@@ -345,8 +351,13 @@ class CursesMenu:
                         return name.ljust(names_width) + '  ' + safe_text(subtitles[item])
                     labels = [option_text(item, label) if item is not None else safe_text(label)
                               for item, label, _ in lines]
-                panel_width = min(w - 6, max(len(heading), *(len(label) for label in labels)) + 4)
+                heading_width = len(heading) + (len(f' {len(entries)}/{len(entries)}') if details else 0)
+                panel_width = min(w - 6, max(heading_width, *(len(label) for label in labels)) + 4)
                 detail_width = w - 6
+                side_by_side = bool(details and w >= 76)
+                if side_by_side:
+                    panel_width = min(w - 31, max(panel_width, (w - 6) * 35 // 100))
+                    detail_width -= panel_width + 1
                 detail_lines = []
                 detail_height = 0
                 if details:
@@ -361,7 +372,7 @@ class CursesMenu:
                     detail_height = min(max(map(len, [prompt, *options])) + 1,
                                         max(0, h - start - 5))
                 rows_visible = max(1, h - start - 4)
-                if detail_height:
+                if detail_height and not side_by_side:
                     rows_visible = max(1, h - start - 4 - detail_height)
                 scroll = min(scroll, max(0, len(lines) - rows_visible))
                 target = select_to_row[index] if armed else 0
@@ -370,7 +381,10 @@ class CursesMenu:
                 elif target >= scroll + rows_visible:
                     scroll = target - rows_visible + 1
                 visible = lines[scroll:scroll + rows_visible]
-                self._paint(start, 3, panel_width, len(visible) + 1)
+                menu_height = len(visible) + 1
+                if side_by_side:
+                    menu_height = max(menu_height, detail_height)
+                self._paint(start, 3, panel_width, menu_height)
                 if detail_height and len(lines) > rows_visible and armed:
                     counter = f' {index + 1}/{len(entries)}'
                     heading = heading[:max(0, panel_width - 4 - len(counter))] + counter
@@ -383,12 +397,14 @@ class CursesMenu:
                         self._put(y, 5, label, 'section')
                     else:
                         self._put(y, 5, label, style)
-                detail_y = start + len(visible) + 2
+                detail_y = start if side_by_side else start + len(visible) + 2
+                detail_x = 4 + panel_width if side_by_side else 3
                 if detail_height:
-                    self._paint(detail_y, 3, detail_width, detail_height)
-                    self._put(detail_y, 5, detail_heading[:detail_width - 4], 'section')
+                    self._paint(detail_y, detail_x, detail_width,
+                                menu_height if side_by_side else detail_height)
+                    self._put(detail_y, detail_x + 2, detail_heading[:detail_width - 4], 'section')
                     for y, (text, style) in enumerate(detail_lines[:detail_height - 1], detail_y + 1):
-                        self._put(y, 5, text, style)
+                        self._put(y, detail_x + 2, text, style)
                 if not detail_height and len(lines) > rows_visible and armed:
                     self._put(h - 3, 3, f'{index + 1}/{len(entries)}', 'muted')
                 self.stdscr.refresh()
@@ -2108,23 +2124,24 @@ class CursesMenu:
     def _choose_backup_type(self) -> int | None | str:
         kinds = ('db', 'media', 'combined')
         entries = [(self.t('nbo_create_name_' + kind), '') for kind in kinds]
-        subtitles = [self.t('nbo_create_subtitle_' + kind) for kind in kinds]
         details = [((self.t('nbo_create_detail_' + kind), ''),
                     (self.t('nbo_create_downtime_' + ('combined' if kind == 'combined' else 'live')),
                      'warning' if kind == 'combined' else 'muted')) for kind in kinds]
+        details[1] += ((self.t('nbo_create_consistency_media'), 'warning'),)
+        details[2] += ((self.t('nbo_create_consistency_combined'), 'muted'),)
         return self._choose(self.t('nbo_create_title'), entries, self.t('tui_back_hint'),
-                            section=self.t('nbo_create_type_heading'), subtitles=subtitles,
+                            section=self.t('nbo_create_type_heading'), numeric_shortcuts=True,
                             details=details, detail_heading=self.t('nbo_create_details_heading'))
 
     def _choose_restore_scope(self, entry) -> str | None:
-        """Explicit, arrow-controlled restore scope; no accidental Enter default."""
+        """Explicit restore scope; no accidental Enter default."""
         kinds = ('db', 'media', 'all')
         entries = [(self.t('nbo_restore_' + kind), '') for kind in kinds]
         details = [((self.t('nbo_restore_' + kind + '_desc'), ''),
                     (self.t('nbo_restore_downtime_short'), 'warning'),
                     (self.t('nbo_restore_safety_short'), 'warning')) for kind in kinds]
         result = self._choose(self.t('nbo_restore_choose'), entries, self.t('nbo_restore_scope_hint'),
-                              escape_clears_selection=False,
+                              escape_clears_selection=False, numeric_shortcuts=True,
                               overview=[(self.t('nbo_restore_source'), 'section'),
                                         (safe_text(entry.path.name), 'title')],
                               section=self.t('nbo_restore_scope_heading'), details=details,
@@ -2731,7 +2748,7 @@ class CursesMenu:
     def _language(self) -> None:
         options = [('Português (Portugal)', ''), ('English', '')]
         result = self._choose(self.t('tui_language_title'), options, self.t('tui_back_hint'),
-                              index=0 if self.t.language == 'pt' else 1)
+                              index=0 if self.t.language == 'pt' else 1, numeric_shortcuts=True)
         if isinstance(result, int):
             self.t = Translator('pt' if result == 0 else 'en')
 
