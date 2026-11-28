@@ -47,6 +47,46 @@ class BackupProgressLayoutTests(unittest.TestCase):
             self.assertNotIn(menu.t('nbo_backup_result_pending'), ' '.join(text for _, _, text, _ in frame))
             self.assertNotIn(menu.t('nbo_job_success'), [text for _, _, text, _ in frame])
 
+    def test_running_marker_pulse_changes_only_marker_and_stops_on_completion(self):
+        for language in LANGUAGES:
+            menu, screen = self.menu(language, (40, 120))
+            menu.colors.update(title=11, title_panel=12, pulse_low=21, pulse_low_panel=22,
+                               pulse_high=31, pulse_high_panel=32, pulse_peak=41, pulse_peak_panel=42)
+            for phase, state in (('prepare', 'running'), ('verify', 'pending')):
+                menu._record_backup_step(BackupTaskEvent(BackupTask(phase), state, 0, 2))
+            frames = []
+            for instant in (0.2, 0.6, 1.0, 1.4, 1.8, 2.2, 2.6):
+                with patch('netbox_ops.tui.time.monotonic', return_value=instant):
+                    menu._draw_backup_progress('Restore', ('prepare', 0, 2, ''), 0)
+                frames.append(screen.frames[-1])
+            self.assertEqual([next(attr for _, _, text, attr in frame if text == '●') for frame in frames],
+                             [22, 12, 32, 42, 32, 12, 22])
+            def static(frame):
+                return [entry for entry in frame if entry[2] != '●']
+            self.assertTrue(all(static(frame) == static(frames[0]) for frame in frames))
+            screen.dimensions = (16, 50)
+            menu._draw_backup_progress('Restore', ('prepare', 0, 2, ''), 0)
+            self.assertTrue(any(text == '●' for _, _, text, _ in screen.frames[-1]))
+            menu._record_backup_step(BackupTaskEvent(BackupTask('prepare'), 'done', 1, 2))
+            menu._draw_backup_progress('Restore', ('prepare', 1, 2, ''), 0)
+            self.assertFalse(any(text == '●' for _, _, text, _ in screen.frames[-1]))
+            self.assertTrue(any(text.startswith('● ' + menu.t('nbo_task_state_done'))
+                                for _, _, text, _ in screen.frames[-1]))
+            menu._record_backup_step(BackupTaskEvent(BackupTask('verify'), 'failed', 1, 2))
+            menu._draw_backup_progress('Restore', ('verify', 1, 2, ''), 0, finished=True, error='failed')
+            self.assertFalse(any(text == '●' for _, _, text, _ in screen.frames[-1]))
+            self.assertTrue(any(text.startswith('● ' + menu.t('nbo_task_state_failed'))
+                                for _, _, text, _ in screen.frames[-1]))
+
+    def test_running_marker_is_static_without_full_palette(self):
+        for colors in ({}, {'title': 1}, {'pulse_low': 2, 'pulse_high': 3}):
+            menu, screen = self.menu('en', (30, 100))
+            menu.colors.update(colors)
+            menu._record_backup_step(BackupTaskEvent(BackupTask('prepare'), 'running', 0, 1))
+            menu._draw_backup_progress('Backup', ('prepare', 0, 1, ''), 0)
+            self.assertFalse(any(text == '●' for _, _, text, _ in screen.frames[-1]))
+            self.assertTrue(any(text.startswith('● Running') for _, _, text, _ in screen.frames[-1]))
+
     def test_task_states_preserve_failure_skipped_and_unrun(self):
         for language in LANGUAGES:
             for dimensions in ((16, 50), (40, 120)):
