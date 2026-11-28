@@ -188,6 +188,53 @@ class DashboardLayoutTests(unittest.TestCase):
             menu_rows = [y for y, x, text, _ in screen.writes if x == 4 and text.strip()]
             self.assertEqual(menu_rows, [4, 5, 6, 8, 9, 10])
 
+    def test_latest_backup_beside_chart_and_aligned_with_legend(self):
+        from netbox_ops.tui import make_main_items
+
+        for language in LANGUAGES:
+            for latest in (None, BackupSummary(Path('/backup/latest.dump'), 'db',
+                                               dt.datetime(2026, 11, 26, tzinfo=dt.timezone.utc),
+                                               'filename', 'manual')):
+                with self.subTest(language=language, latest=latest):
+                    menu, screen = self.menu(language, dimensions=(34, 140))
+                    menu._draw_main_dashboard(34, 140, make_main_items(menu.t), None,
+                                              service_states(), {}, '', (1024, 4096, 2),
+                                              (1024, 3072, 4096, 8192, 2), latest, '')
+                    count = next((y, x) for y, x, text, _ in screen.writes
+                                 if text == f'{menu.t("nbo_storage_count")}: 2')
+                    heading = next((y, x) for y, x, text, _ in screen.writes
+                                   if text == menu.t('nbo_latest_heading'))
+                    self.assertEqual(heading, (count[0] + 2, count[1]))
+                    left, _, storage = menu._panels
+                    self.assertEqual(left[3], storage[3])
+                    self.assertLessEqual(storage[3] - storage[1], 12)
+                    self.assertTrue(all(y < 32 and x + len(text) <= 138
+                                        for y, x, text, _ in screen.writes))
+                    if latest is not None:
+                        self.assertTrue(any('latest.dump' in text and x == heading[1]
+                                            for _, x, text, _ in screen.writes))
+
+    def test_latest_backup_falls_back_to_vertical_when_column_is_narrow(self):
+        from netbox_ops.tui import make_main_items
+
+        for language in LANGUAGES:
+            menu, screen = self.menu(language, dimensions=(45, 90))
+            latest = BackupSummary(Path('/backup/' + 'x' * 100 + '.dump'), 'db',
+                                   dt.datetime(2026, 11, 26, tzinfo=dt.timezone.utc),
+                                   'metadata', 'manual')
+            menu._draw_main_dashboard(45, 90, make_main_items(menu.t), None,
+                                      service_states(), {}, '', (1024, 4096, 2),
+                                      (1024, 3072, 4096, 8192, 2), latest, '')
+            heading = next((y, x) for y, x, text, _ in screen.writes
+                           if text == menu.t('nbo_latest_heading'))
+            storage = next((y, x) for y, x, text, _ in screen.writes
+                           if text == menu.t('nbo_storage_label'))
+            self.assertEqual(heading[1], storage[1])
+            self.assertGreater(heading[0], storage[0])
+            name = ''.join(text for y, _, text, _ in screen.writes if y > heading[0])
+            self.assertIn('x' * 30, name)
+            self.assertTrue(all(y < 43 and x + len(text) <= 88 for y, x, text, _ in screen.writes))
+
     def test_latest_lines_show_utc_source_fields_and_unknown_tag_in_both_languages(self):
         stamp = dt.datetime(2026, 11, 26, 2, 5, tzinfo=dt.timezone(dt.timedelta(hours=1)))
         for language in LANGUAGES:

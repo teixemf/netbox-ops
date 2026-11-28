@@ -151,7 +151,8 @@ class PluginInventoryTests(unittest.TestCase):
     def _apply(self, result, selected=('sample-plugin',), approved=True):
         with patch('netbox_ops.plugin_inventory.inspect_git_installation', return_value=self.installation), \
              patch('netbox_ops.plugin_inventory.ExclusiveLock'), \
-             patch('netbox_ops.plugin_inventory.write_audit'):
+             patch('netbox_ops.plugin_inventory.write_audit'), \
+             patch('netbox_ops.plugin_inventory._PIN_RECOVERY_DIRECTORY', self.root.parent / 'pin-recovery'):
             return apply_approved_pins(result, selected, approved=approved)
 
     def test_confirmation_required_without_writing(self):
@@ -176,6 +177,64 @@ class PluginInventoryTests(unittest.TestCase):
                          'sample-plugin==2.4.1  # keep this comment\nother-package>=2\n')
         self.assertEqual(self.requirements.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.requirements.stat().st_uid, 0)
+
+    def test_contextual_pin_is_plugin_only_and_preserves_other_declarations(self):
+        self.add_package('local-extra', '2.1.0', 'local_extra')
+        (self.root / 'requirements.txt').write_text('Django==5.2.1\n')
+        original = b'sample-plugin[foo]  # plugin\r\nlocal-extra[foo]  # preserve\r\n'
+        self.requirements.write_bytes(original)
+        inventory = inventory_plugins(self.installation, local_pin_names=('local-extra', 'sample-plugin'))
+        self.assertEqual(configured_plugin_packages(inventory), (('sample-plugin', '2.4.1'),))
+        self.assertEqual(len(inventory.proposals), 1)
+        self.assertEqual(inventory.proposals[0].after, 'sample-plugin[foo]==2.4.1  # plugin\r\n')
+        self.assertEqual(self.requirements.read_bytes(), original)
+        from dataclasses import replace
+        forged = replace(inventory, proposals=(replace(inventory.proposals[0], package='local-extra'),))
+        with self.assertRaisesRegex(PluginInventoryError, 'configured plugins'):
+            self._apply(forged, ('local-extra',))
+        self.assertEqual(self.requirements.read_bytes(), original)
+        self._apply(inventory, ('sample-plugin',))
+        self.assertEqual(self.requirements.read_bytes(),
+                         b'sample-plugin[foo]==2.4.1  # plugin\r\nlocal-extra[foo]  # preserve\r\n')
+        backup, = (self.root.parent / 'pin-recovery').glob('pins-*/local_requirements.txt')
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(backup.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.requirements.stat().st_mode & 0o777, 0o640)
+
+    def test_contextual_local_pin_refuses_overlap_and_complex_file(self):
+        self.add_package('local-extra', '2.1.0', 'local_extra')
+        self.requirements.write_text('sample-plugin==2.4.1\nlocal-extra\n')
+        core = self.root / 'requirements.txt'
+        core.write_text('local-extra==2.1.0\n')
+        inventory = inventory_plugins(self.installation, local_pin_names=('local-extra',))
+        self.assertFalse(inventory.proposals)
+        core.write_text('Django==5.2.1\n')
+        self.requirements.write_text('sample-plugin==2.4.1\nlocal-extra\n-r other.txt\n')
+        inventory = inventory_plugins(self.installation, local_pin_names=('local-extra',))
+        self.assertFalse(inventory.proposals)
+
+    def test_pin_backup_initializes_missing_state_directory(self):
+        from netbox_ops.plugin_inventory import _save_pin_backup
+
+        state = self.root.parent / 'new-state'
+        recovery = state / 'pin-recovery'
+        original = b'sample-plugin\n'
+        self.assertFalse(state.exists())
+        with patch('netbox_ops.plugin_inventory._PIN_RECOVERY_DIRECTORY', recovery):
+            directory = _save_pin_backup(self.root, original, 0o640, 0)
+        self.assertEqual((directory / 'local_requirements.txt').read_bytes(), original)
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(recovery.stat().st_mode & 0o777, 0o700)
+
+    def test_backup_failure_prevents_pin_replacement(self):
+        inventory = self.inventory()
+        original = self.requirements.read_bytes()
+        with patch('netbox_ops.plugin_inventory._save_pin_backup',
+                   side_effect=PluginInventoryError('Cannot save protected original requirements')):
+            with self.assertRaisesRegex(PluginInventoryError, 'Cannot save'):
+                self._apply(inventory)
+        self.assertEqual(self.requirements.read_bytes(), original)
 
     def test_unsafe_existing_permissions_are_not_rewritten(self):
         self.requirements.chmod(0o666)

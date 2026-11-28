@@ -18,7 +18,7 @@ from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_git import PinnedStage
 from netbox_ops.upgrade_plan import UpgradePlanError, build_upgrade_plan
 from netbox_ops.upgrade_preflight import review_plan_dependencies, target_requirements
-from netbox_ops.upgrade_runtime import probe_ltree
+from netbox_ops.upgrade_runtime import LtreeEvidence, probe_ltree
 from netbox_ops.upgrade_ui import summary_lines
 
 
@@ -43,7 +43,7 @@ class DependencyReviewTests(unittest.TestCase):
                                          ('transitive', '2.0')),
         ))
         self.download = Mock()
-        self.ltree = Mock(return_value='available')
+        self.ltree = Mock(return_value=LtreeEvidence('available'))
         self.cfg = Configuration(DEFAULT_UNITS)
 
     def reviewer(self, package, stages, runtimes, *, version, preflights):
@@ -107,7 +107,7 @@ class DependencyReviewTests(unittest.TestCase):
 
     def test_conflict_blocks_resolver_but_reports_independent_ltree(self):
         self.read.return_value += b'\nDisabled_Plugin==2.0'
-        self.ltree.return_value = 'permission'
+        self.ltree.return_value = LtreeEvidence('permission')
         plan = self.review(self.build())
         self.assertFalse(plan.can_execute)
         review = plan.dependency_reviews[0]
@@ -122,12 +122,88 @@ class DependencyReviewTests(unittest.TestCase):
         self.assertIn('not run', summary)
         self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), self.local)
 
-    def test_unpinned_disabled_requirement_blocks_before_resolver(self):
-        (self.root / 'local_requirements.txt').write_bytes(b'disabled-plugin\n')
+    def test_unpinned_non_plugin_preference_and_reviewed_binding(self):
+        local = b'disabled-plugin  # preserve\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        plan = self.review(self.build())
+        self.assertTrue(plan.can_execute)
+        self.assertIn('disabled-plugin==1.0', self.resolver.call_args.args[0])
+        review = plan.dependency_reviews[0]
+        self.assertFalse(review.local_diagnostics)
+        self.assertNotIn('disabled-plugin', dict(review.exact_pins))
+        self.assertEqual(dict(review.resolution.packages)['disabled-plugin'], '1.0')
+        pins = prepare_plugin_upgrade(plan, local, self.read.return_value, stage_index=0)
+        bound = bind_reviewed_dependencies(plan, 0, 'b' * 40, self.read.return_value, pins)
+        self.assertIn('disabled-plugin==1.0', bound.local_pins)
+        self.assertEqual(bound.requirements, local)
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
+
+    def test_unpinned_non_plugin_can_change_only_after_reviewed_resolution(self):
+        local = b'disabled-plugin[foo]  # preserve\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        preferred = self.resolver.return_value
+        changed = replace(preferred, packages=(('django', '6.1.0'), ('disabled-plugin', '2.0'),
+                                               ('transitive', '2.0')))
+        self.resolver.side_effect = [DependencyPreflight('blocked', 'conflict', True), changed]
+        plan = self.review(self.build())
+        self.assertTrue(plan.can_execute)
+        self.assertIn('disabled-plugin[foo]==1.0', self.resolver.call_args_list[0].args[0])
+        self.assertIn('disabled-plugin[foo]', self.resolver.call_args_list[1].args[0])
+        self.assertTrue(self.resolver.call_args_list[1].kwargs['allow_unpinned'])
+        self.assertIn(('disabled-plugin', '1.0', '2.0'), plan.dependency_reviews[0].changes)
+        pins = prepare_plugin_upgrade(plan, local, self.read.return_value, stage_index=0)
+        bound = bind_reviewed_dependencies(plan, 0, 'b' * 40, self.read.return_value, pins)
+        self.assertIn('disabled-plugin[foo]==2.0', bound.local_pins)
+        self.assertEqual(bound.requirements, local)
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
+
+    def test_bare_configured_plugin_remains_a_pin_blocker(self):
+        local = b'disabled-plugin\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        packages = (self.installed[0], replace(self.installed[1], modules=('disabled_plugin',)))
+        plan = self.review(self.build(inventory_packages=packages, enabled=('disabled_plugin',)))
+        self.assertFalse(plan.can_execute)
+        self.assertIn('Pin unselected configured plugins', ' '.join(plan.blockers))
+        self.resolver.assert_not_called()
+        item, = plan.dependency_reviews[0].local_diagnostics
+        self.assertEqual((item.name, item.declaration, item.installed, item.stage, item.reason, item.action),
+                         ('disabled-plugin', 'disabled-plugin', '1.0', '4.7.3', 'unpinned', 'review-pin'))
+        for language in ('en', 'pt'):
+            summary = '\n'.join(summary_lines(plan, Translator(language)))
+            self.assertIn('disabled-plugin', summary)
+            self.assertIn('1.0', summary)
+            self.assertIn('4.7.3', summary)
+
+    def test_local_diagnostics_name_every_blocker_without_leaking_url(self):
+        local = b'disabled-plugin==2.0\nmissing-package\nprivate @ https://user:secret@example.invalid/p.whl\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
         plan = self.review(self.build())
         self.assertFalse(plan.can_execute)
-        self.assertIn('Pin unselected local packages', ' '.join(plan.blockers))
+        diagnostics = {item.name: item for item in plan.dependency_reviews[0].local_diagnostics}
+        self.assertNotIn('disabled-plugin', diagnostics)
+        self.assertNotIn('missing-package', diagnostics)
+        self.assertEqual(diagnostics['private'].reason, 'ambiguous')
+        self.assertTrue(all(item.action == 'manual-review' for item in diagnostics.values()))
+        self.assertNotIn('secret', '\n'.join(summary_lines(plan, Translator('en'), details=True)))
         self.resolver.assert_not_called()
+        self.download.assert_not_called()
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
+
+    def test_compatibility_block_keeps_independent_local_diagnostics_without_resolver(self):
+        local = b'disabled-plugin\n'
+        (self.root / 'local_requirements.txt').write_bytes(local)
+        packages = (self.installed[0], replace(self.installed[1], modules=('disabled_plugin',)))
+        base = self.build(inventory_packages=packages, enabled=('disabled_plugin',))
+        blocked = replace(base, blockers=('Plugin compatibility conflict',))
+        plan = self.review(blocked)
+        self.assertFalse(plan.can_execute)
+        review = plan.dependency_reviews[0]
+        self.assertEqual(review.resolution.status, 'not-run')
+        self.assertEqual(review.local_diagnostics[0].name, 'disabled-plugin')
+        self.ltree.assert_called_once()
+        self.resolver.assert_not_called()
+        self.download.assert_not_called()
+        self.assertEqual((self.root / 'local_requirements.txt').read_bytes(), local)
 
     def test_combined_and_plugin_only_review_exact_selection(self):
         local = self.local + b'configured-plugin==1.0\n'
@@ -196,9 +272,9 @@ class DependencyReviewTests(unittest.TestCase):
             bind_reviewed_dependencies(original, 0, 'c' * 40, self.read.return_value, pins)
 
     def test_ltree_missing_or_unverified_blocks_before_approval(self):
-        for status in ('missing', 'permission', 'unknown'):
+        for status in ('missing', 'permission', 'unknown', 'unusable', 'mismatch'):
             with self.subTest(status=status):
-                self.ltree.return_value = status
+                self.ltree.return_value = LtreeEvidence(status)
                 plan = self.review(self.build())
                 self.assertFalse(plan.can_execute)
                 self.assertEqual(plan.dependency_reviews[0].ltree, status)
@@ -223,16 +299,75 @@ class LtreeProbeTests(unittest.TestCase):
         runner = Mock()
         for values, status in (
             ([True, True, True, False], 'installed'),
-            ([True, False, True, True], 'permission'),
+            ([True, False, True, True], 'unusable'),
             ([False, False, True, True], 'available'),
             ([False, False, True, False], 'permission'),
             ([False, False, False, True], 'missing'),
             ([False, False, 'invalid', True], 'unknown'),
         ):
             with self.subTest(status=status):
-                runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(values))
+                identity = 'netbox|5432|1234'
+                row = [identity, '160015', 'netbox', 'netbox', 'public',
+                       'public', 'public' if values[0] else '', *values, True, '127.0.0.1']
+                runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(row))
                 self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
-                                             discover=discover), status)
+                                             discover=discover, sql=Mock(return_value=identity),
+                                             admin_probe=Mock(return_value=False)).status, status)
                 self.assertNotEqual(runner.call_args.kwargs['user'], 0)
                 self.assertEqual(runner.call_args.kwargs['cwd'], root / 'netbox')
                 self.assertNotIn('CREATE EXTENSION', runner.call_args.args[0][-1])
+                self.assertIn('SET TRANSACTION READ ONLY', runner.call_args.args[0][-1])
+        runner.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(
+            ['other|5432|1234', '160015', 'netbox', 'netbox', 'public', 'public', '',
+             False, False, True, True, True, '127.0.0.1']))
+        self.assertEqual(probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
+                                     discover=discover, sql=Mock(return_value=identity)).status, 'mismatch')
+
+    def test_admin_offer_requires_local_matching_public_schema_and_verified_admin(self):
+        root = Path('/opt/netbox')
+        live = SimpleNamespace(root=root, python=root / 'venv/bin/python')
+        runtime = SimpleNamespace(python=live.python, working_directory=root / 'netbox',
+                                  username='nobody', environment={})
+        identity = 'netbox|5432|1234'
+        local = [identity, '160015', 'netbox', 'netbox', 'public', 'public', '',
+                 False, False, True, False, True, '127.0.0.1']
+        for address, schema, approved, expected in (
+            ('127.0.0.1', 'public', True, 5432),
+            ('10.0.0.8', 'public', True, None),
+            ('127.0.0.1', 'custom', True, None),
+            ('127.0.0.1', 'public', False, None),
+        ):
+            with self.subTest(address=address, schema=schema, approved=approved):
+                row = list(local)
+                row[4], row[12] = schema, address
+                admin = Mock(return_value=approved)
+                result = probe_ltree(
+                    Configuration(DEFAULT_UNITS), live,
+                    runner=Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps(row))),
+                    discover=Mock(return_value=runtime), sql=Mock(return_value=identity),
+                    admin_probe=admin,
+                )
+                self.assertEqual(result.status, 'permission')
+                self.assertEqual(result.admin_port, expected)
+                if address != '127.0.0.1' or schema != 'public':
+                    admin.assert_not_called()
+
+    def test_native_installability_uses_migration_not_service_create_privilege(self):
+        root = Path('/opt/netbox')
+        live = SimpleNamespace(root=root, python=root / 'venv/bin/python')
+        runtime = SimpleNamespace(python=live.python, working_directory=root / 'netbox',
+                                  username='nobody', environment={})
+        identity = 'netbox|5432|1234'
+        service = [identity, '160015', 'netbox', 'netbox', 'public', 'public', '',
+                   False, False, True, False, True, '127.0.0.1']
+        migration = list(service)
+        migration[10] = True
+        runner = Mock(side_effect=[SimpleNamespace(returncode=0, stdout=json.dumps(row))
+                                   for row in (service, migration, service, migration)])
+        admin = Mock()
+        result = probe_ltree(Configuration(DEFAULT_UNITS), live, runner=runner,
+                             discover=Mock(return_value=runtime), sql=Mock(return_value=identity),
+                             admin_probe=admin)
+        self.assertEqual(result.status, 'available')
+        self.assertIsNone(result.admin_port)
+        admin.assert_not_called()

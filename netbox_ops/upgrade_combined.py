@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import pwd
 import re
+import secrets
 import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -125,6 +128,80 @@ def _resolve(pins: PluginUpgrade, live: GitNetBoxInstallation,
     return result
 
 
+# Compile the one explicitly supported non-core source package with a
+# transient, unprivileged systemd user. Return the wheel through stdout, not
+# a shared writable directory or a privileged archive extraction.
+_LDAP_WHEEL_BUILD = """
+import subprocess, sys, tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory(prefix='nbo-ldap-') as temp:
+    subprocess.run([sys.executable, '-I', '-m', 'pip', '--isolated', 'wheel',
+                    '--only-binary=:all:', '--no-binary=python-ldap', '--no-deps',
+                    '--no-input', '--disable-pip-version-check', '--no-cache-dir',
+                    '--index-url', sys.argv[2], '--timeout', '20', '--retries', '2',
+                    '--wheel-dir', temp, sys.argv[1]],
+                   cwd=temp, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=240, check=True)
+    wheel, = Path(temp).glob('*.whl')
+    sys.stdout.buffer.write(wheel.name.encode('ascii') + b'\\n' + wheel.read_bytes())
+"""
+
+
+def _stop_ldap_builder(unit: str, *, cleanup: Callable = subprocess.run) -> None:
+    """The transient systemd unit is outside the caller's process group."""
+    try:
+        stopped = cleanup(['systemctl', 'stop', unit], timeout=25, check=False,
+                          capture_output=True, text=True)
+        if stopped.returncode:
+            state = cleanup(['systemctl', 'show', '--property=LoadState,ActiveState', unit],
+                            timeout=15, check=False, capture_output=True, text=True)
+            if 'LoadState=not-found' not in state.stdout.splitlines() and not (
+                    not state.returncode and 'ActiveState=inactive' in state.stdout.splitlines()):
+                raise ValueError
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        raise UpgradeExecutionError('Cannot verify cleanup of temporary LDAP wheel builder') from None
+
+
+def _build_ldap_wheel(pin: str, live: GitNetBoxInstallation, directory: Path, *,
+                      runner: Callable = run_managed) -> Path:
+    match = re.fullmatch(r'python-ldap==([0-9]+(?:\.[0-9]+){0,4}(?:\.post[0-9]+)?)', pin)
+    if match is None:
+        raise UpgradeExecutionError('LDAP wheel build requires an exact verified python-ldap version')
+    unit = 'netbox-ops-ldap-' + secrets.token_hex(8) + '.service'
+    command = [
+        'systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + unit,
+        '--property=DynamicUser=yes', '--property=NoNewPrivileges=yes',
+        '--property=ProtectSystem=strict', '--property=ProtectHome=yes',
+        '--property=PrivateTmp=yes', '--property=PrivateDevices=yes',
+        '--property=ProtectProc=invisible', '--property=RestrictSUIDSGID=yes',
+        '--property=RuntimeMaxSec=300', '--property=TimeoutStopSec=10',
+        '--property=KillMode=control-group', '--property=LimitFSIZE=16777216',
+        '--property=InaccessiblePaths=-/opt/netbox/netbox -/var/lib/netbox-ops -/etc/netbox-ops',
+        '/usr/bin/env', '-i', 'PATH=/usr/local/bin:/usr/bin:/bin', 'HOME=/tmp',
+        'LANG=C.UTF-8', 'PIP_CONFIG_FILE=/dev/null', 'PIP_NO_CACHE_DIR=1',
+        str(live.python), '-I', '-c', _LDAP_WHEEL_BUILD, pin, PYPI_INDEX,
+    ]
+    try:
+        result = run_checked('wheel.ldap', command, runner=runner, timeout=330,
+                             stdin=subprocess.DEVNULL, capture_output=True)
+    except BaseException:
+        _stop_ldap_builder(unit)
+        raise
+    name, separator, raw = result.stdout.partition(b'\n')
+    try:
+        filename = name.decode('ascii')
+    except UnicodeDecodeError:
+        raise CommandFailure('wheel.ldap', 'artifacts') from None
+    if (not separator or not re.fullmatch(r'python_ldap-' + re.escape(match[1])
+            + r'-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\.whl', filename)
+            or not zipfile.is_zipfile(io.BytesIO(raw))):
+        raise CommandFailure('wheel.ldap', 'artifacts')
+    wheel = directory / filename
+    with wheel.open('xb') as stream:
+        stream.write(raw)
+    return wheel
+
+
 def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
                           directory: Path, *, runner: Callable = run_managed) -> None:
     """Prepare one wheel set for core, plugins and the upstream pip bootstrap.
@@ -132,7 +209,8 @@ def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
     Resolve together before downtime; the official script installs core and
     plugins separately, so restrict both calls to this same resolved set.
     NetBox's psycopg[c] extra requires a locally compiled psycopg-c wheel.
-    No other source distributions are allowed.
+    A known python-ldap version is built separately in an unprivileged unit;
+    no arbitrary additional source distributions are allowed.
     """
     directory.mkdir(mode=0o700)
     env = upgrade_environment(live.python)
@@ -145,12 +223,17 @@ def download_stage_wheels(pins: PluginUpgrade, live: GitNetBoxInstallation,
         if (match := re.fullmatch(r'psycopg\[([a-z0-9_,]+)\]==[0-9.]+', pin, re.I))
     )
     source_options = ['--no-binary=psycopg-c'] if build_psycopg else []
+    ldap_options = []
+    if pins.ldap_source_pin:
+        _build_ldap_wheel(pins.ldap_source_pin, live, directory, runner=runner)
+        ldap_options = ['--find-links', str(directory), pins.ldap_source_pin]
     command = [
         str(live.python), '-I', '-m', 'pip', '--isolated', 'wheel',
         '--only-binary=:all:', *source_options, '--no-input', '--disable-pip-version-check',
         '--no-cache-dir', '--index-url', PYPI_INDEX, '--wheel-dir', str(directory),
         '--timeout', '20', '--retries', '2',
         'pip', 'wheel', *pins.core_pins, *pins.local_pins, *additional_dependency_pins(pins),
+        *ldap_options,
     ]
     command_id = 'wheel.psycopg' if build_psycopg else 'wheel.prepare'
     run_checked(command_id, command, runner=runner, timeout=900, cwd=directory, env=env,
@@ -181,7 +264,10 @@ def prepare_combined_stages(
         wheelhouse = wheel_root / f'stage-{index + 1}'
         if plan.dependency_reviews:
             if tuple(map(int, planned.netbox_version.split('.')[:2])) >= (4, 7):
-                if probe_ltree(cfg, live) != plan.dependency_reviews[index].ltree:
+                evidence = probe_ltree(cfg, live)
+                review = plan.dependency_reviews[index]
+                if (evidence.status, evidence.details, evidence.identity, evidence.admin_port) != (
+                        review.ltree, review.ltree_details, review.ltree_identity, review.ltree_admin_port):
                     raise UpgradeExecutionError('PostgreSQL ltree prerequisites changed after approval')
             download(pins, live, wheelhouse)
             resolved = _resolve(pins, live, approval, resolver, wheelhouse=wheelhouse)

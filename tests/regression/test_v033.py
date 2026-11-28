@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch, MagicMock
+from netbox_ops.backup_progress import BackupProgress, BackupTask
 from netbox_ops.tui import CursesMenu
 from netbox_ops.i18n import Translator
 from netbox_ops.services import ServiceError
@@ -55,19 +56,25 @@ class V033Tests(unittest.TestCase):
         show.assert_not_called()
         words=' '.join(w[2] for w in screen.frames[-1])
         self.assertIn('denied',words)
-        self.assertIn('!!',words)
+        self.assertIn('Failed: redis', words)
+        self.assertTrue(any(text.strip() == '● ' + m.t('nbo_task_state_failed')
+                            for _, _, text, _ in screen.frames[-1]))
         self.assertNotIn('100%',words)
 
     def test_successful_backup_final_panel_not_extra_result_screen(self):
         screen=AutoAcknowledgeScreen(dimensions=(32,110))
         m=CursesMenu(screen,Translator('pt'))
+        tasks = (BackupTask('prepare'), BackupTask('dump_db'))
         def worker(progress):
-            progress('prepare',0,2,'')
-            progress('dump_db',1,2,'')
-            progress('complete',2,2,'')
+            tracker = BackupProgress(tasks, events=progress)
+            with tracker.operation():
+                with tracker.step('prepare'):
+                    pass
+                with tracker.step('dump_db'):
+                    pass
             return 'backup.dump'
         with patch.object(m,'_show_lines') as show:
-            self.assertTrue(m._run_backup_job('Backup',worker))
+            self.assertTrue(m._run_backup_job('Backup',worker,tasks=tasks))
         show.assert_not_called()
         words=' '.join(w[2] for w in screen.frames[-1])
         self.assertIn('100%',words) if '100%' in words else self.assertIn('2/2',words)
@@ -78,16 +85,22 @@ class V033Tests(unittest.TestCase):
     def test_failed_backup_final_panel_keeps_error_and_steps(self):
         screen=AutoAcknowledgeScreen(dimensions=(32,110))
         m=CursesMenu(screen,Translator('pt'))
+        tasks = (BackupTask('prepare'), BackupTask('dump_db'), BackupTask('finalize'))
         def worker(progress):
-            progress('prepare',0,3,'')
-            progress('dump_db',1,3,'')
-            raise ServiceError('simulated pg_dump error')
+            tracker = BackupProgress(tasks, events=progress)
+            with tracker.operation():
+                with tracker.step('prepare'):
+                    pass
+                with tracker.step('dump_db'):
+                    raise ServiceError('simulated pg_dump error')
         with patch.object(m,'_show_lines') as show:
-            self.assertFalse(m._run_backup_job('Backup',worker))
+            self.assertFalse(m._run_backup_job('Backup',worker,tasks=tasks))
         show.assert_not_called()
         words=' '.join(w[2] for w in screen.frames[-1])
         self.assertIn('simulated pg_dump error',words)
-        self.assertIn('!!',words)
+        self.assertIn(m.t('nbo_task_state_failed'),words)
+        self.assertIn(m.t('nbo_task_state_not_run'),words)
+        self.assertIn('1/3',words)
 
     def test_selected_palette_has_dark_background_and_deep_teal_selection(self):
         screen=FakeScreen()

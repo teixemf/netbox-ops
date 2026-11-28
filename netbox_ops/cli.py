@@ -100,6 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     pin_selection.add_argument('--all', action='store_true', help='Select all unambiguous proposals.')
     pins.add_argument('--apply', action='store_true', help='Write only explicitly approved pin corrections.')
     pins.add_argument('--approve-pins', help='Exact pin review fingerprint.')
+    ltree = upgrade_commands.add_parser('ltree', help='Review a verified local PostgreSQL ltree prerequisite.')
+    ltree.add_argument('--install', action='store_true', help='Install ltree only after explicit review and database backup.')
+    ltree.add_argument('--approve-ltree', help='Exact ltree review fingerprint.')
     versions = upgrade_commands.add_parser('versions', help='List published alternative plugin versions.')
     versions.add_argument('package', help='Installed configured or declared package.')
     for operation in ('netbox', 'plugins', 'stack'):

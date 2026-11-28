@@ -17,7 +17,7 @@ from .plugin_compatibility import (
     CompatibilityError, CompatibilityEvidence, ReleaseCatalog, _release_key,
     discover_stable_releases, fetch_pypi_json, fetch_release_declaration, review_plugin_upgrade,
 )
-from .upgrade_discovery import check_prerequisites
+from .upgrade_discovery import Prerequisite, check_prerequisites
 from .upgrade_execution import UpgradeExecutionError
 from .upgrade_plan import UpgradePlanError, _number, required_netbox_path
 from .upgrade_ui import UpgradeContext, discover_context, official_tags
@@ -79,6 +79,7 @@ class TargetAssessment:
     availability: str  # installed | verified | unavailable | unknown
     evidence: tuple[CompatibilityEvidence, ...] = ()
     pending: bool = False
+    prerequisites: tuple[tuple[str, Prerequisite], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ class TargetRequest:
     session: object
     revision: int
     selection: TargetSelection
-    action: str  # assess | suggest | catalogue
+    action: str  # assess | suggest | listing | relist | catalogue
     component: str | None = None
     offset: int = 0
     limit: int = MAX_PICKER_ROWS
@@ -128,14 +129,31 @@ class _SuggestionProgress:
     choice: str | None = None
 
 
-def discover_target_context(cfg: Configuration) -> UpgradeContext:
-    """Keep installed inventory available if official release discovery fails."""
+def discover_target_context(cfg: Configuration, *, progress=None,
+                            cancelled: Callable[[], bool] | None = None) -> UpgradeContext:
+    """Report installed inventory separately from bounded remote release discovery."""
+    def notify(task, state, context=None):
+        if progress is not None:
+            progress(task, state, context)
+
+    def check_cancelled():
+        if cancelled is not None and cancelled():
+            raise CancelledError
+
+    check_cancelled()
+    notify('inventory', 'running')
     context = discover_context(cfg, releases=False)
+    notify('inventory', 'done', context)
+    check_cancelled()
+    notify('releases', 'running')
     try:
         tags = official_tags()
     except UpgradeExecutionError:
         tags = ()
-    return replace(context, tags=tags)
+    context = replace(context, tags=tags)
+    notify('releases', 'done' if tags else 'failed', context)
+    check_cancelled()
+    return context
 
 
 def _evidence(source: str, detail: str, status: str) -> CompatibilityEvidence:
@@ -245,7 +263,7 @@ class TargetModel:
 
     def request(self, action='assess', component: str | None = None,
                 *, offset=0, limit=MAX_PICKER_ROWS) -> TargetRequest:
-        if action not in ('assess', 'suggest', 'catalogue'):
+        if action not in ('assess', 'suggest', 'listing', 'relist', 'catalogue'):
             raise ValueError('Unknown target request')
         if component is not None and component not in dict(self.installed.plugins):
             raise UpgradePlanError('Select an eligible configured plugin')
@@ -359,6 +377,7 @@ class TargetModel:
                         'unavailable' if self.context.tags else 'unknown')
         evidence = []
         statuses = []
+        prerequisites = []
         if not self.context.tags:
             statuses.append('warning')
             evidence.append(_evidence('Release discovery', 'Official NetBox releases unavailable', 'unknown'))
@@ -378,6 +397,7 @@ class TargetModel:
                 stage, self.context.installation.python_version,
                 postgres_version=self.context.postgres, redis_version=self.context.redis,
             ):
+                prerequisites.append((stage, item))
                 statuses.append({'ok': 'supported', 'blocked': 'conflict', 'unknown': 'warning'}[item.status])
                 evidence.append(_evidence(f'{stage}: {item.name}',
                                           f'{item.detail} ({item.installed or "?"}; {item.required})',
@@ -388,14 +408,21 @@ class TargetModel:
         for row in (*plugin_rows, *earlier):
             statuses.append(row.assessment.status)
             if row.assessment.status != 'supported':
-                evidence.append(_evidence(row.component or 'NetBox',
-                                          f'{row.target}: {row.assessment.status}',
-                                          'blocks' if row.assessment.status == 'conflict' else 'warns'))
+                reasons = [item for item in row.assessment.evidence
+                           if item.status in ('blocks', 'warns', 'unknown')]
+                for item in reasons:
+                    evidence.append(_evidence(row.component or 'NetBox',
+                                              f'{row.target}: {item.source}: {item.detail}', item.status))
+                if not reasons:
+                    evidence.append(_evidence(row.component or 'NetBox',
+                                              f'{row.target}: {row.assessment.status}',
+                                              'blocks' if row.assessment.status == 'conflict' else 'warns'))
         if self.context.plugin_selection_incomplete:
             statuses.append('warning')
             evidence.append(_evidence('Inventory', 'Some configured plugins could not be reliably mapped', 'unknown'))
         return TargetAssessment(_status(statuses), availability, tuple(evidence),
-                                any(row.assessment.pending for row in (*plugin_rows, *earlier)))
+                                any(row.assessment.pending for row in (*plugin_rows, *earlier)),
+                                tuple(prerequisites))
 
     def _rows(self, selection, budget):
         current = dict(self.installed.plugins)
@@ -467,8 +494,8 @@ class TargetModel:
                     notes.append(f'{name}: no supported target found; suggested release remains uncertain')
         return replace(selection, plugins=tuple(sorted(proposed.items()))), notes, partial
 
-    def evaluate(self, request: TargetRequest, *, cancelled: Callable[[], bool] | None = None
-                 ) -> TargetSnapshot | TargetCatalogue:
+    def evaluate(self, request: TargetRequest, *, cancelled: Callable[[], bool] | None = None,
+                 progress=None) -> TargetSnapshot | TargetCatalogue:
         """Call in one worker; accept only on the UI thread for the active request."""
         if request.session is not self._session:
             raise ValueError('Request belongs to another inventory')
@@ -480,14 +507,37 @@ class TargetModel:
             notes.append('Official NetBox release discovery unavailable')
         if self.context.plugin_selection_incomplete:
             notes.append('Some configured plugins could not be reliably mapped')
-        if request.action == 'catalogue':
+        if request.action == 'relist':
+            # F5 explicitly retries remote metadata inside this inventory
+            # session; official NetBox tags are refreshed by dashboard F5.
+            self._assessments.clear()
+            self._documents.clear()
+            self._releases.clear()
+            self._projects.clear()
+            self._catalogues.clear()
+            self._suggestions.clear()
+        if request.action in ('listing', 'relist', 'catalogue'):
             return self._picker(request, budget, notes)
         partial = False
         if request.action == 'suggest':
+            if progress is not None:
+                progress('suggestions', 'running', None)
             selection, warnings, partial = self._suggest(selection, budget)
             notes.extend(warnings)
+            if progress is not None:
+                progress('suggestions', 'partial' if partial or warnings else 'done', None)
+        budget.take(0)
+        if progress is not None:
+            progress('assessment', 'running', None)
         rows = self._rows(selection, budget)
-        partial = partial or any(row.assessment.pending for row in rows)
+        pending = any(row.assessment.pending for row in rows)
+        partial = partial or pending
+        if progress is not None:
+            incomplete = pending or any(
+                row.assessment.status == 'unchecked' or row.assessment.availability == 'unknown'
+                or any(item.status == 'unknown' for item in row.assessment.evidence)
+                for row in rows)
+            progress('assessment', 'partial' if incomplete else 'done', None)
         if request.action == 'suggest' and not partial:
             # A subsequent explicit suggestion can retry uncertain evidence;
             # only continuations reuse the completed search decisions.
@@ -503,20 +553,24 @@ class TargetModel:
         current = self.installed.netbox if name is None else dict(self.installed.plugins)[name]
         latest = None
         if name is None:
-            versions = (*self.netbox_versions, current)
+            versions = (current, *self.netbox_versions)
             latest = self.netbox_versions[0] if self.netbox_versions else None
         else:
             try:
                 listing = self._catalogue(name, budget)
-                versions = self._plugin_versions(name, listing)
+                versions = (current, *self._plugin_versions(name, listing)[:-1])
                 latest = listing.latest
                 notes.extend(listing.warnings)
             except _BudgetExhausted:
-                return TargetCatalogue(request, (), 0, None,
-                                       tuple(notes + ['Release listing not yet checked']), True)
+                versions = (current,)
+                notes.append('Release listing not yet checked')
             except (CompatibilityError, OSError, URLError, TimeoutError, ValueError):
                 versions = (current,)
                 notes.append('Plugin release discovery unavailable')
+        if request.action in ('listing', 'relist'):
+            rows = tuple(TargetRow(name, current, version, TargetAssessment(
+                'unchecked', 'installed' if version == current else 'verified')) for version in versions)
+            return TargetCatalogue(request, rows, len(rows), latest, tuple(dict.fromkeys(notes)), False)
         rows = []
         for version in versions[request.offset:request.offset + request.limit]:
             if name is None:

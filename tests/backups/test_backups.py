@@ -43,8 +43,15 @@ class FileBackupTests(unittest.TestCase):
                 patch('netbox_ops.backups._version', return_value='4.4.1'))
 
     def test_files_archive_and_restore(self):
+        events = []
         with patch('netbox_ops.backups.write_audit'), patch('netbox_ops.backups._version', return_value='4.4.1'):
-            result = self.ops.backup('media')
+            result = self.ops.backup('media', task_progress=events.append)
+        states = {e.task.phase: e.state for e in events}
+        self.assertEqual(states['dump_db'], 'not_applicable')
+        self.assertEqual(states['archive_media'], 'done')
+        self.assertEqual(states['verify'], 'done')
+        self.assertEqual(events[-1].done, events[-1].total)
+        events.clear()
         self.assertTrue(result.path.name.endswith('.media.tar.gz'))
         self.assertEqual(stat.S_IMODE(result.path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.store.stat().st_mode), 0o700)
@@ -55,7 +62,13 @@ class FileBackupTests(unittest.TestCase):
         self.configfile.write_text('modified')
         self.photo.write_text('changed')
         with self._mock_ops()[0], self._mock_ops()[1], self._mock_ops()[2], self._mock_ops()[3]:
-            report = self.ops.restore('media', result.path)
+            report = self.ops.restore('media', result.path, task_progress=events.append)
+        states = {e.task.phase: e.state for e in events}
+        self.assertEqual(states['extract_media'], 'done')
+        self.assertEqual(states['stage_db'], 'not_applicable')
+        self.assertEqual(states['verify_application'], 'not_applicable')
+        self.assertEqual(states['restart_services'], 'skipped')
+        self.assertEqual(events[-1].done, events[-1].total)
         self.assertEqual(report.kind, 'media')
         self.assertEqual(self.configfile.read_text(), 'modified')
         self.assertEqual(self.photo.read_text(), 'original')
@@ -147,6 +160,7 @@ class FileBackupTests(unittest.TestCase):
         self.assertEqual(self.photo.read_text(), 'original')
 
     def test_combined_backup_restarts_services_after_archive_failure(self):
+        events, legacy = [], []
         active = MagicMock()
         active.name, active.active = 'netbox', 'active'
         inactive = MagicMock()
@@ -158,12 +172,20 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
             with self.assertRaisesRegex(BackupError, 'disk full'):
-                self.ops.backup('combined')
+                self.ops.backup('combined', progress=lambda *args: legacy.append(args),
+                                task_progress=events.append)
+        states = {e.task.phase: e.state for e in events}
+        self.assertEqual(states['dump_db'], 'failed')
+        self.assertEqual(states['archive_media'], 'not_run')
+        self.assertEqual(states['cleanup_backup'], 'done')
+        self.assertEqual(states['restart_services'], 'done')
+        self.assertFalse(any(event[0] == 'complete' for event in legacy))
         systemd.stop.assert_called_once_with(['netbox'])
         systemd.start.assert_called_once_with(['netbox'])
         self.assertFalse(self.ops.list_backups('combined'))
 
     def test_combined_backup_quiesces_writers_and_restores_original_service_state(self):
+        events, legacy = [], []
         active = MagicMock(name='netbox')
         active.name, active.active = 'netbox', 'active'
         inactive = MagicMock(name='netbox-rq')
@@ -176,11 +198,39 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._db_dump', side_effect=fake_dump), \
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
-            result = self.ops.backup('combined')
+            result = self.ops.backup('combined', progress=lambda *args: legacy.append(args),
+                                     task_progress=events.append)
+        self.assertEqual(events[-1].task.phase, 'restart_services')
+        self.assertEqual(events[-1].state, 'done')
+        self.assertEqual(events[-1].done, events[-1].total)
+        self.assertEqual(legacy[-1][0], 'complete')
         self.assertEqual(result.kind, 'combined')
         systemd.stop.assert_called_once_with(['netbox'])
         systemd.start.assert_called_once_with(['netbox'])
         self.assertIn('database/netbox.dump', self.ops.verify('combined', result.path)['files'])
+
+    def test_combined_backup_restart_failure_does_not_emit_complete(self):
+        active = MagicMock()
+        active.name, active.active = 'netbox', 'active'
+        systemd = MagicMock()
+        systemd.status.return_value = [active]
+        systemd.start.side_effect = BackupError('restart failed')
+        events, legacy = [], []
+
+        def fake_dump(cfg, target):
+            target.write_bytes(b'PGDMP_FAKE_ARCHIVE')
+
+        with (patch('netbox_ops.backups.SystemdServices', return_value=systemd),
+              patch('netbox_ops.backups._db_dump', side_effect=fake_dump),
+              patch('netbox_ops.backups._version', return_value='4.4.1'),
+              patch('netbox_ops.backups.write_audit')):
+            with self.assertRaisesRegex(BackupError, 'restart failed'):
+                self.ops.backup('combined', progress=lambda *args: legacy.append(args),
+                                task_progress=events.append)
+        states = {e.task.phase: e.state for e in events}
+        self.assertEqual(states['finalize'], 'done')
+        self.assertEqual(states['restart_services'], 'failed')
+        self.assertFalse(any(event[0] == 'complete' for event in legacy))
 
     def test_combined_archive_metadata_and_listing(self):
         def fake_dump(cfg, target):
@@ -231,6 +281,7 @@ class FileBackupTests(unittest.TestCase):
                 self.ops.restore('full', self.base / 'missing.full.tar.gz', only='db')
 
     def test_db_restore_preserves_previous_database(self):
+        events = []
         source = self.base / 'external.dump'
         source.write_bytes(b'PGDMP_FAKE_ARCHIVE')
         systemd = MagicMock()
@@ -247,7 +298,13 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._django_check'), \
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
-            report = self.ops.restore('db', source, accept_unknown=True)
+            report = self.ops.restore('db', source, accept_unknown=True, task_progress=events.append)
+        states = {e.task.phase: e.state for e in events}
+        self.assertEqual(states['extract_media'], 'not_applicable')
+        self.assertFalse(any(e.task.phase == 'extract_media' and e.state == 'done' for e in events))
+        self.assertEqual(states['stage_db'], 'done')
+        self.assertEqual(states['verify_application'], 'done')
+        self.assertEqual(events[-1].done, events[-1].total)
         self.assertIn('Previous database preserved', report.detail)
         self.assertEqual(rename.call_count, 2)
         self.assertEqual(rename.call_args_list[0].args[0], 'netbox')
@@ -255,6 +312,7 @@ class FileBackupTests(unittest.TestCase):
         self.assertEqual(len(self.ops.list_backups('db')), 1)
 
     def test_failed_migrations_leave_active_database_unchanged(self):
+        events = []
         source = self.base / 'external.dump'
         source.write_bytes(b'PGDMP_FAKE_ARCHIVE')
         systemd = MagicMock()
@@ -273,7 +331,12 @@ class FileBackupTests(unittest.TestCase):
              patch('netbox_ops.backups._version', return_value='4.4.1'), \
              patch('netbox_ops.backups.write_audit'):
             with self.assertRaisesRegex(BackupError, 'migration mismatch'):
-                self.ops.restore('db', source, accept_unknown=True)
+                self.ops.restore('db', source, accept_unknown=True, task_progress=events.append)
+        states = {e.task.phase: e.state for e in events}
+        self.assertEqual(states['verify_application'], 'failed')
+        self.assertEqual(states['stop_services'], 'not_run')
+        self.assertEqual(states['replace'], 'not_run')
+        self.assertEqual(states['cleanup_db'], 'done')
         django.assert_called_once_with(self.cfg, 'nbo_stage_fake')
         rename.assert_not_called()
         terminate.assert_not_called()

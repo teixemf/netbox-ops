@@ -89,3 +89,60 @@ class InlineConfirmationTests(unittest.TestCase):
         self.assertTrue(any('2. backup-1.dump' in text for _, _, text, _ in frame))
         error_rows = [y for y, _, _, attr in frame if attr == 1234]
         self.assertTrue(all(y < 14 for y in error_rows))
+
+    def test_token_is_teal_bold_and_input_is_adjacent_on_tall_terminal(self):
+        for language in LANGUAGES:
+            for colored in (True, False):
+                screen = FakeScreen([27], dimensions=(45, 140))
+                menu = CursesMenu(screen, Translator(language))
+                if colored:
+                    menu.colors.update(title=1, title_panel=2, text=3, text_panel=4)
+                self.assertFalse(menu._confirm_token('Create', 'Create database backup?', 'CREATE'))
+                frame = screen.frames[-1]
+                token = next((y, attr) for y, _, text, attr in frame if text == 'CREATE')
+                field = next(y for y, _, text, _ in frame if text == menu.t('tui_confirm_prompt'))
+                self.assertEqual(token[1], (2 if colored else 0) | curses.A_BOLD)
+                self.assertEqual(field, token[0] + 1)
+                self.assertLess(field, 12)
+                self.assertEqual(len(menu._panels), 1)
+
+    def test_long_targets_and_warning_remain_accessible_after_resize(self):
+        for language in LANGUAGES:
+            screen = FakeScreen(dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator(language))
+            menu.colors['warning'] = 456
+            targets = ['backup-' + 'x' * 100 + '.dump', 'final-backup.dump']
+            summary = [('Irreversible deletion', 'warning'), ('Review targets', '')]
+            offset = 0
+            seen = []
+            for _ in range(15):
+                frame = menu._frame('Delete', menu.t('tui_confirm_hint'))
+                offset, visible = menu._confirmation_panel(
+                    *frame, summary, '', token='DELETE 2 BACKUPS', invalid=True,
+                    target_names=targets, offset=offset)
+                screen.refresh()
+                self.assertTrue(any(text == 'Irreversible deletion' and attr == 456
+                                    for _, _, text, attr in screen.frames[-1]))
+                self.assertTrue(all(y < 14 for y, _, text, _ in screen.frames[-1]
+                                    if text == menu.t('tui_confirm_prompt')))
+                seen.extend(text for _, _, text, _ in screen.frames[-1])
+                offset = menu._confirmation_scroll(curses.KEY_DOWN, offset, visible)
+            self.assertTrue(any('final-backup.dump' in text for text in seen))
+            self.assertTrue(any('x' * 30 in text for text in seen))
+            screen.dimensions = (45, 140)
+            frame = menu._frame('Delete', menu.t('tui_confirm_hint'))
+            offset, _ = menu._confirmation_panel(
+                *frame, summary, '', token='DELETE 2 BACKUPS', target_names=targets, offset=offset)
+            self.assertEqual(offset, 0)
+
+    def test_secret_input_is_masked_and_compact(self):
+        for language in LANGUAGES:
+            screen = FakeScreen([*map(ord, 'secret-value'), 10], dimensions=(45, 100))
+            menu = CursesMenu(screen, Translator(language))
+            self.assertEqual(menu._upgrade_input('Authorization', 'Enter optional header', secret=True),
+                             'secret-value')
+            self.assertFalse(any('secret-value' in text for frame in screen.frames
+                                 for _, _, text, _ in frame))
+            self.assertTrue(any(y < 12 and text == '> ' + '*' * 12
+                                for y, _, text, _ in screen.frames[-1]))
+            self.assertEqual(len(menu._panels), 1)

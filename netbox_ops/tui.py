@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from . import __version__
+from .backup_progress import (BackupProgress, BackupTask, BackupTaskEvent, batch_tasks,
+                              create_tasks, restore_tasks)
 from .config import CONFIG_PATH, SERVICE_NAMES, ConfigError, load_config
 from .i18n import Translator
 from .journal import JournalPanel, JournalViewport
@@ -28,6 +30,11 @@ SECTIONS = {0: 'menu_services', 1: 'menu_backups', 2: 'menu_updates',
             3: 'menu_maintenance'}
 LOG_COUNTS = (10, 20, 50, 100, 200, 500)
 ACTIONS = ('start', 'stop', 'restart', 'enable', 'disable')
+
+
+def task_marker(state: str) -> str:
+    """Use the same single-cell marker for planned and observed task states."""
+    return '○' if state == 'pending' else '●'
 
 
 def make_main_items(t: Translator) -> list[tuple[str, str, tuple[str, ...]]]:
@@ -120,6 +127,11 @@ class CursesMenu:
         self.cpu_display: dict[str, str] = {}
         self._service_steps: list[tuple[str, str, str]] = []
         self._backup_steps: list[tuple[str, str, str]] = []
+        self._backup_step_indexes: dict[tuple[str, str], int] = {}
+        self._backup_task_offset: int | None = None
+        self._backup_result_offset = 0
+        self._backup_result_focus = False
+        self._backup_scroll_limits = (0, 0)
 
     def _init_screen(self) -> None:
         self.stdscr.keypad(True)
@@ -194,13 +206,16 @@ class CursesMenu:
             return
         text = safe_text(msg)
         limit = w - x - 1
-        role = style or 'text'
+        bold = style == 'title_bold'
+        role = 'title' if bold else style or 'text'
         if role != 'selected' and any(x0 <= x < x1 and y0 <= y < y1
                                            for x0, y0, x1, y1 in self._panels):
             role = role + '_panel' if role + '_panel' in self.colors else role
         attr = self.colors.get(role, self.colors.get('text', 0))
         if style == 'selected':
             attr = attr or curses.A_REVERSE
+        if bold:
+            attr |= curses.A_BOLD
         try:
             self.stdscr.addnstr(y, x, text, limit, attr)
         except curses.error:
@@ -273,25 +288,42 @@ class CursesMenu:
                 hint: str, index: int = 0, headings: dict[int, str] | None = None,
                 allow_language_key: bool = False, main_menu: bool = False,
                 numeric_shortcuts: bool = False, escape_clears_selection: bool = True,
-                overview: Sequence[tuple[str, str]] = ()) -> int | None | str:
+                overview: Sequence[tuple[str, str]] = (),
+                section: str = '', subtitles: Sequence[str] = (),
+                details: Sequence[Sequence[tuple[str, str]]] = (),
+                detail_heading: str = '') -> int | None | str:
         """No initial highlight; Esc disarms selection before leaving submenu."""
         headings = headings or {}
         if not entries:
             return None
+        numeric_shortcuts = numeric_shortcuts and len(entries) <= 9
         lines: list[tuple[int | None, str, str]] = []
         select_to_row = []
+        if ((subtitles and len(subtitles) != len(entries))
+                or (details and len(details) != len(entries))):
+            raise ValueError('Selector descriptions must match entries')
         for i, (label, kind) in enumerate(entries):
             if i in headings:
                 lines.append((None, self.t(headings[i]).strip(), 'section'))
             select_to_row.append(len(lines))
-            lines.append((i, label, kind))
+            lines.append((i, f'{i + 1}  {label}' if numeric_shortcuts else label, kind))
         index = max(0, min(index, len(entries) - 1))
         armed = False
         scroll = 0
         movement = (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END,
                     curses.KEY_NPAGE, curses.KEY_PPAGE, ord('j'), ord('k'))
         while True:
-            frame = self._frame(title, self._quit_hint(hint))
+            actual_hint = self.t('tui_selector_hint') if hint == self.t('tui_back_hint') else hint
+            if hint == self.t('nbo_restore_scope_hint'):
+                actual_hint = self.t('tui_selector_cancel_hint')
+            shortcut = (self.t('tui_selector_numeric_hint', keys='1' if len(entries) == 1
+                               else f'1–{len(entries)}') + ' | ' if numeric_shortcuts else '')
+            actual_hint = shortcut + actual_hint
+            if len(self._quit_hint(actual_hint)) > self.stdscr.getmaxyx()[1] - 3:
+                actual_hint = shortcut + self.t('tui_selector_short_hint')
+            if numeric_shortcuts and len(self._quit_hint(actual_hint)) > self.stdscr.getmaxyx()[1] - 3:
+                actual_hint = shortcut + '↑↓ | Enter | Esc'
+            frame = self._frame(title, self._quit_hint(actual_hint))
             if frame:
                 h, w = frame
                 start = 3
@@ -305,21 +337,75 @@ class CursesMenu:
                     start += len(shown)
                     self._put(start, 3, '─' * (w - 7), 'muted')
                     start += 1
-                rows_visible = max(1, h - start - 3)
+                # Content-sized selector, with one aligned highlight for every
+                # option. Reserve the optional detail panel before list scrolling.
+                heading = section or self.t('tui_selector_options')
+                labels = [safe_text(label) for _, label, _ in lines]
+                names_width = max(len(label) for item, label, _ in lines if item is not None)
+                if subtitles:
+                    names_width = min(names_width, max(8, (w - 10) // 2))
+                    def option_text(item, label):
+                        name = safe_text(label)
+                        if len(name) > names_width:
+                            name = name[:names_width - 1] + '…'
+                        return name.ljust(names_width) + '  ' + safe_text(subtitles[item])
+                    labels = [option_text(item, label) if item is not None else safe_text(label)
+                              for item, label, _ in lines]
+                heading_width = len(heading) + (len(f' {len(entries)}/{len(entries)}') if details else 0)
+                panel_width = min(w - 6, max(heading_width, *(len(label) for label in labels)) + 4)
+                detail_width = w - 6
+                side_by_side = bool(details and w >= 76)
+                if side_by_side:
+                    panel_width = min(w - 31, max(panel_width, (w - 6) * 35 // 100))
+                    detail_width -= panel_width + 1
+                detail_lines = []
+                detail_height = 0
+                if details:
+                    def wrapped(items):
+                        return [(part, style) for text, style in items for part in
+                                textwrap.wrap(safe_text(text), width=detail_width - 4)]
+                    prompt = wrapped(((self.t('tui_selector_focus'), 'muted'),))
+                    options = [wrapped(items) for items in details]
+                    detail_lines = options[index] if armed else prompt
+                    # Reserve the same detail space while focus changes. Keep
+                    # at least one option, one heading, and the panel gap.
+                    detail_height = min(max(map(len, [prompt, *options])) + 1,
+                                        max(0, h - start - 5))
+                rows_visible = max(1, h - start - 4)
+                if detail_height and not side_by_side:
+                    rows_visible = max(1, h - start - 4 - detail_height)
                 scroll = min(scroll, max(0, len(lines) - rows_visible))
                 target = select_to_row[index] if armed else 0
                 if target < scroll:
                     scroll = target
                 elif target >= scroll + rows_visible:
                     scroll = target - rows_visible + 1
-                for y, (item_idx, label, style) in enumerate(lines[scroll:scroll + rows_visible], start):
+                visible = lines[scroll:scroll + rows_visible]
+                menu_height = len(visible) + 1
+                if side_by_side:
+                    menu_height = max(menu_height, detail_height)
+                self._paint(start, 3, panel_width, menu_height)
+                if detail_height and len(lines) > rows_visible and armed:
+                    counter = f' {index + 1}/{len(entries)}'
+                    heading = heading[:max(0, panel_width - 4 - len(counter))] + counter
+                self._put(start, 5, heading[:panel_width - 4], 'section')
+                for y, (item_idx, label, style) in enumerate(visible, start + 1):
+                    label = labels[scroll + y - start - 1][:panel_width - 4]
                     if armed and item_idx == index:
-                        self._put(y, 3, '  ' + label + '  ', 'selected')
+                        self._put(y, 4, (' ' + label).ljust(panel_width - 2), 'selected')
                     elif item_idx is None:
-                        self._put(y, 3, label, 'section')
+                        self._put(y, 5, label, 'section')
                     else:
-                        self._put(y, 3, '  ' + label, style)
-                if len(lines) > rows_visible and armed:
+                        self._put(y, 5, label, style)
+                detail_y = start if side_by_side else start + len(visible) + 2
+                detail_x = 4 + panel_width if side_by_side else 3
+                if detail_height:
+                    self._paint(detail_y, detail_x, detail_width,
+                                menu_height if side_by_side else detail_height)
+                    self._put(detail_y, detail_x + 2, detail_heading[:detail_width - 4], 'section')
+                    for y, (text, style) in enumerate(detail_lines[:detail_height - 1], detail_y + 1):
+                        self._put(y, detail_x + 2, text, style)
+                if not detail_height and len(lines) > rows_visible and armed:
                     self._put(h - 3, 3, f'{index + 1}/{len(entries)}', 'muted')
                 self.stdscr.refresh()
             key = self.stdscr.getch()
@@ -598,67 +684,110 @@ class CursesMenu:
         finally:
             self.stdscr.timeout(-1)
 
-    def _confirmation_footer(self, h: int, w: int, token: str, typed: str,
-                             invalid: bool) -> int:
-        """Draw the exact challenge and inline error above the normal footer."""
+    @staticmethod
+    def _confirmation_wrap(text: str, width: int) -> list[str]:
+        return textwrap.wrap(safe_text(text), width=width, drop_whitespace=False,
+                             break_on_hyphens=False) or ['']
+
+    def _confirmation_panel(self, h: int, w: int, summary: Sequence[tuple[str, str]],
+                            typed: str, *, token: str | None = None, invalid: bool = False,
+                            target_names: Sequence[str] = (), offset: int = 0) -> tuple[int, int]:
+        """Keep the exact instruction and field adjacent; scroll the review, not the input."""
         width = w - 7
+        heading = self.t('tui_confirm_panel' if token is not None else 'tui_input_panel')
+        instruction = self.t('tui_confirm_token', token=token) if token is not None else ''
+        instructions = self._confirmation_wrap(instruction, width) if instruction else []
         errors = []
         if invalid:
             for key in ('nbo_confirm_failed_title', 'nbo_confirm_failed_message'):
                 errors.extend(textwrap.wrap(self.t(key), width=width))
-        instruction = textwrap.wrap(self.t('tui_confirm_token', token=token), width=width)
-        input_y = h - 3 - len(errors)
-        token_y = input_y - len(instruction)
-        for y, line in enumerate(instruction, token_y):
-            self._put(y, 3, line, 'section')
-        prefix = self.t('tui_confirm_prompt')
-        self._put(input_y, 3, prefix + typed[-max(1, width - len(prefix)):], 'title')
-        for y, line in enumerate(errors, input_y + 1):
-            self._put(y, 3, line, 'failure')
-        return token_y
+        # Reserve the literal instruction, input and complete inline error first.
+        available = h - 2 - 4 - len(instructions) - 1 - len(errors)
+        lines = [(part, style) for text, style in summary
+                 for part in self._confirmation_wrap(text, width)]
+        # Keep a concise warning visible while scrolling lengthy targets. If
+        # it cannot fit completely, leave the complete wording in the review.
+        pinned = []
+        if summary and summary[0][1] == 'warning':
+            warning = self._confirmation_wrap(summary[0][0], width)
+            if len(warning) < available:
+                pinned = [(part, 'warning') for part in warning]
+                lines = lines[len(warning):]
+                available -= len(pinned)
+            elif available >= 2:
+                pinned = [(self.t('tui_confirm_review_warning'), 'warning')]
+                available -= 1
+        targets = []
+        for index, name in enumerate(target_names, 1):
+            targets.extend((part, 'muted') for part in
+                           self._confirmation_wrap(f'{index}. {name}', width))
+        if target_names:
+            lines.append((f'{self.t("nbo_operation_targets")} ({len(target_names)}):', 'section'))
+            lines.extend(targets)
+        visible = min(len(lines), max(1, available))
+        scroll = len(lines) > visible
+        if scroll and visible > 1:
+            visible -= 1
+        limit = max(0, len(lines) - visible)
+        offset = min(max(0, offset), limit)
+        gap = 1 if available > len(lines) and lines else 0
+        height = (1 + len(pinned) + visible + int(scroll and available > 1)
+                  + gap + len(instructions) + 1 + len(errors))
+        self._paint(3, 2, w - 4, height)
+        self._put(3, 3, heading, 'section')
+        y = 4
+        for line, style in pinned + lines[offset:offset + visible]:
+            self._put(y, 3, line, style)
+            y += 1
+        if scroll and available > 1:
+            self._put(y, 3, f'↑↓ {offset + 1}-{min(offset + visible, len(lines))}/{len(lines)}', 'section')
+            y += 1
+        y += gap
+
+        # Split the translated instruction into styled spans without changing
+        # token spelling, even when a long token wraps onto multiple lines.
+        token_start = instruction.find(token) if token else -1
+        position = 0
+        for line in instructions:
+            if token_start < 0:
+                self._put(y, 3, line)
+            else:
+                left = max(0, min(len(line), token_start - position))
+                right = max(left, min(len(line), token_start + len(token) - position))
+                if left:
+                    self._put(y, 3, line[:left])
+                if right > left:
+                    self._put(y, 3 + left, line[left:right], 'title_bold')
+                if right < len(line):
+                    self._put(y, 3 + right, line[right:])
+            position += len(line)
+            y += 1
+        prefix = self.t('tui_confirm_prompt') if token is not None else '> '
+        value = prefix + typed[-max(1, width - len(prefix) - 1):]
+        self._put(y, 3, value)
+        self._put(y, 3 + len(value), '▏', 'title')
+        for row, line in enumerate(errors, y + 1):
+            self._put(row, 3, line, 'failure')
+        return offset, visible
+
+    @staticmethod
+    def _confirmation_scroll(key: int, offset: int, visible: int) -> int:
+        if key in (curses.KEY_UP, curses.KEY_PPAGE):
+            return max(0, offset - (visible if key == curses.KEY_PPAGE else 1))
+        return offset + (visible if key == curses.KEY_NPAGE else 1)
 
     def _confirm_action(self, action: str, names: Sequence[str],
                         skipped: Sequence[str] = ()) -> bool:
-        """Use exact, strong challenge for PostgreSQL and Redis changes."""
+        """Use the shared exact challenge, with service-specific review information."""
         token = challenge(action, names)
-        typed = ''
-        invalid = False
-        while True:
-            frame = self._frame(self.t('tui_confirm_title'), self.t('tui_confirm_hint'))
-            if frame:
-                h, w = frame
-                width = max(12, w - 8)
-                lines = [self.t('action_target', action=self.t('action_' + action),
-                                names=', '.join(names))]
-                if skipped:
-                    lines.append(self.t('nbo_skipped', names=', '.join(skipped)))
-                lines.append(self.t('tui_startup_only') if action in ('enable', 'disable')
-                             else self.t('tui_action_warning'))
-                token_y = self._confirmation_footer(h, w, token, typed, invalid)
-                y = 3
-                for line in lines:
-                    for part in textwrap.wrap(safe_text(line), width=width):
-                        if y >= token_y:
-                            break
-                        self._put(y, 3, part)
-                        y += 1
-                self.stdscr.refresh()
-            key = self.stdscr.getch()
-            if key in (27, 3):
-                return False
-            if not frame:
-                continue
-            if key in (10, 13, curses.KEY_ENTER):
-                if typed == token:
-                    return True
-                typed = ''
-                invalid = True
-            elif key in (curses.KEY_BACKSPACE, 8, 127):
-                typed = typed[:-1]
-                invalid = False
-            elif 32 <= key <= 126 and len(typed) < 48:
-                typed += chr(key)
-                invalid = False
+        warning = (self.t('tui_startup_only') if action in ('enable', 'disable')
+                   else self.t('tui_action_warning'))
+        summary = [(warning, 'muted' if action in ('enable', 'disable') else 'warning'),
+                   (self.t('action_target', action=self.t('action_' + action),
+                           names=', '.join(names)), '')]
+        if skipped:
+            summary.append((self.t('nbo_skipped', names=', '.join(skipped)), 'muted'))
+        return self._confirm_token(self.t('tui_confirm_title'), '', token, summary=summary)
 
     def _confirm(self, names: Sequence[str]) -> bool:
         return self._confirm_action('restart', names)
@@ -673,22 +802,19 @@ class CursesMenu:
         if not frame:
             return
         h, w = frame
-        self._put(4, 3, self.t('action_target', action=self.t('action_' + action), names=name))
-        self._put(6, 3, self.t('tui_progress_count', done=completed, total=total),
+        self._put(3, 3, self.t('action_target', action=self.t('action_' + action), names=name))
+        self._put(4, 3, self.t('tui_progress_count', done=completed, total=total),
                   'failure' if stage == 'error' or failed else 'title')
         length = max(10, min(60, w - 12))
         filled = int(length * completed / total) if total else 0
-        self._put(8, 3, '[' + '█' * filled + '░' * (length-filled) + '] %3d%%' %
+        self._put(5, 3, '[' + '█' * filled + '░' * (length-filled) + '] %3d%%' %
                   (100 * completed // total if total else 0),
                   'failure' if stage == 'error' or failed else 'success')
-        status = 'tui_progress_running' if stage == 'running' else (
-            'tui_progress_failed' if stage == 'error' else 'tui_progress_done')
-        self._put(10, 3, self.t(status, name=name),
-                  'failure' if stage == 'error' else 'section')
-        if detail:
-            self._put(11, 3, detail[:max(10, w-8)], 'failure' if stage == 'error' else 'muted')
-        # Keep a live task list below the progress bar, including completed
-        # services, current command and failures. No prediction of elapsed time.
+        if stage != 'pending':
+            status = {'running': 'tui_progress_running', 'error': 'tui_progress_failed',
+                      'done': 'tui_progress_done'}[stage]
+            self._put(6, 3, self.t(status, name=name),
+                      'failure' if stage == 'error' else 'section')
         if not hasattr(self, '_service_steps'):
             self._service_steps = []
         item = (name, stage, detail)
@@ -697,23 +823,30 @@ class CursesMenu:
             self._service_steps.append(item)
         else:
             self._service_steps[old] = item
-        self._put(13, 3, self.t('nbo_task_header'), 'section')
-        visible = self._service_steps[-max(0, h - 19):] if h >= 19 else []
-        for i, (service, state, info) in enumerate(visible):
-            mark = 'OK' if state == 'done' else ('!!' if state == 'error' else '..')
-            self._put(14+i, 4, f'{mark} {self.t("action_"+action)} {service}: {info}'[:max(8,w-9)],
-                      'success' if state == 'done' else ('failure' if state == 'error' else 'muted'))
+        labels = {state: self.t('nbo_task_state_' + key) for state, key in
+                  (('done', 'done'), ('error', 'failed'), ('running', 'running'),
+                   ('not_run', 'not_run'))}
+        labels['pending'] = ''
+        status_width = max(map(len, labels.values()))
+        self._put(7, 3, self.t('nbo_task_header'), 'section')
+        capacity = max(1, h - 11)
+        offset = max(0, min(len(self._service_steps) - capacity, (old or 0) - capacity + 1))
+        for i, (service, state, info) in enumerate(self._service_steps[offset:offset + capacity]):
+            displayed = 'not_run' if finished and state == 'pending' else state
+            style = {'done': 'success', 'error': 'failure', 'running': 'title'}.get(state, 'muted')
+            self._put(8 + i, 3, task_marker(displayed) + ' ' + labels[displayed].ljust(status_width), style)
+            task = f'{self.t("action_" + action)} {service}' + (f': {info}' if info else '')
+            self._put(8 + i, 6 + status_width, task[:max(1, w - status_width - 8)])
         if finished:
-            y = min(h - 4, 15 + len(visible))
-            self._put(y, 3, summary[:max(10, w - 8)],
+            self._put(h - 3, 3, summary[:max(10, w - 8)],
                       'failure' if failed else 'success')
         self.stdscr.refresh()
 
     def _execute_batch(self, systemd: SystemdServices,
                        action: str, names: Sequence[str]) -> None:
         ordered = order_services(action, names)
-        self._service_steps = []
-        self._draw_progress(action, 0, len(ordered), ordered[0], 'running', '')
+        self._service_steps = [(name, 'pending', '') for name in ordered]
+        self._draw_progress(action, 0, len(ordered), ordered[0], 'pending', '')
         completed: list[tuple[str, str]] = []
         failure: str | None = None
         try:
@@ -723,19 +856,20 @@ class CursesMenu:
                 self._draw_progress(action, done, total, name, stage, info))
         except (ServiceError, OSError) as exc:
             failure = safe_text(exc)
-            name = self._service_steps[-1][0] if self._service_steps else ordered[0]
-            self._draw_progress(action, len(completed), len(ordered), name,
-                                'error', failure)
+            active = next((name for name, state, _ in self._service_steps if state == 'running'), None)
+            if active is not None:
+                self._draw_progress(action, len(completed), len(ordered), active, 'error', failure)
         # Do not replace this screen with a second, redundant results page.
         done = len(completed)
-        status = self._service_steps[-1][1] if self._service_steps else 'running'
-        last = self._service_steps[-1][0] if self._service_steps else ordered[0]
+        last, status, _ = next((row for row in reversed(self._service_steps) if row[1] != 'pending'),
+                               (ordered[0], 'pending', ''))
         if failure:
             summary = self.t('tui_batch_failed', error=failure)
         else:
             summary = self.t('tui_batch_complete', count=done)
+        detail = next((info for name, _, info in self._service_steps if name == last), '')
         self._draw_progress(action, done, len(ordered), last, status,
-                            failure or '', finished=True, summary=summary,
+                            detail, finished=True, summary=summary,
                             failed=bool(failure))
         self._wait_result_ack()
 
@@ -882,13 +1016,16 @@ class CursesMenu:
             (f'{self.t("nbo_storage_count")}: {count}', 'muted'),
         ]
 
+    _DASHBOARD_LEGEND_OFFSET = 20
+
     def _dashboard_storage_height(self, width, available, storage, disk, error) -> int:
         if available <= 0:
             return 0
         if error:
             return min(2, available)
         legend = self._dashboard_storage_legend(storage, disk)
-        if disk[3] and available >= 10 and width >= 20 + max(len(label) + 2 for label, _ in legend):
+        if (disk[3] and available >= 10 and
+                width >= self._DASHBOARD_LEGEND_OFFSET + max(len(label) + 2 for label, _ in legend)):
             return 10
         return min(4, available)
 
@@ -910,7 +1047,8 @@ class CursesMenu:
         if height == 10:
             self._draw_storage_ring(x, y + 1, disk)
             for row, (label, style) in enumerate(legend, y + 1):
-                self._put(row, x + 20, f'● {label}' if style != 'muted' else label, style)
+                self._put(row, x + self._DASHBOARD_LEGEND_OFFSET,
+                          f'● {label}' if style != 'muted' else label, style)
         elif height == 4:
             for row, index in enumerate((0, 2, 3), y + 1):
                 self._put(row, x, legend[index][0][:width], 'muted')
@@ -972,6 +1110,22 @@ class CursesMenu:
         usage_height = self._dashboard_storage_height(
             width, usage_space - latest_gap, storage, disk, storage_error)
         storage_height = usage_height + latest_gap + len(latest_rows)
+        latest_x, latest_width = x, width
+        latest_y = storage_y + usage_height + latest_gap
+        # The donut is ten rows including its heading; the four legend rows
+        # finish at y+4. Reserve one empty row before the adjacent details.
+        legend_width = width - self._DASHBOARD_LEGEND_OFFSET
+        if (not storage_error and legend_width >= 40 and
+                self._dashboard_storage_height(width, storage_space, storage, disk, '') == 10):
+            adjacent = self._latest_backup_lines(latest, legend_width)
+            adjacent_height = max(10, 6 + len(adjacent))
+            if adjacent_height <= storage_space:
+                latest_rows = adjacent
+                latest_x = x + self._DASHBOARD_LEGEND_OFFSET
+                latest_width = legend_width
+                latest_y = storage_y + 6
+                usage_height = 10
+                storage_height = adjacent_height
         # Paint all three panels before rendering their content.
         menu_height = max(1 + len(items) + (1 if available >= 10 else 0),
                           platform_height + gap + storage_height)
@@ -988,11 +1142,11 @@ class CursesMenu:
         table_end = self._draw_platform_status(x, 4, width, states, metrics, service_error)
         for row, line in enumerate(note, table_end + 1):
             self._put(row, x, line, 'muted')
-        next_row = self._draw_dashboard_storage(
+        self._draw_dashboard_storage(
             x, storage_y, width, storage_y + usage_height - 1, storage, disk, storage_error)
-        for row, (line, style) in enumerate(latest_rows, next_row + latest_gap):
+        for row, (line, style) in enumerate(latest_rows, latest_y):
             if row < h - 2:
-                self._put(row, x, line[:width], style)
+                self._put(row, latest_x, line[:latest_width], style)
 
     def _main(self) -> int:
         """Main screen: compact menu and live service/storage dashboard."""
@@ -1126,23 +1280,25 @@ class CursesMenu:
     def _upgrade_input(self, title: str, prompt: str, *, initial: str = '',
                        secret: bool = False) -> str | None:
         typed = initial
+        offset = 0
+        visible = 1
         while True:
             frame = self._frame(title, self.t('tui_confirm_hint'))
             if frame:
-                _, width = frame
-                for y, line in enumerate(textwrap.wrap(prompt, width=max(10, width - 8))[:3], 3):
-                    self._put(y, 3, line)
-                visible = '*' * len(typed) if secret else typed
-                self._put(7, 3, '> ' + visible[-max(1, width - 9):], 'title')
+                value = '*' * len(typed) if secret else typed
+                offset, visible = self._confirmation_panel(
+                    *frame, [(prompt, '')], value, offset=offset)
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return None
             if not frame:
                 continue
-            if key in (10, 13, curses.KEY_ENTER):
+            if key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                offset = self._confirmation_scroll(key, offset, visible)
+            elif key in (10, 13, curses.KEY_ENTER):
                 return typed
-            if key in (8, 127, curses.KEY_BACKSPACE):
+            elif key in (8, 127, curses.KEY_BACKSPACE):
                 typed = typed[:-1]
             elif 32 <= key <= 126 and len(typed) < 2048:
                 typed += chr(key)
@@ -1163,10 +1319,12 @@ class CursesMenu:
         auth = self._upgrade_input(title, self.t('upgrade_auth_prompt'), secret=True)
         if auth is None:
             return False
-        if not self._confirm_token(title, self.t('upgrade_confirm'), 'UPGRADE'):
+        prompt = self.t('upgrade_confirm')
+        if not self._confirm_token(title, prompt, 'UPGRADE', summary=[(prompt, 'warning')]):
             return False
         unknowns = plan.requires_strong_confirmation
-        if unknowns and not self._confirm_token(title, self.t('upgrade_confirm_unknowns'), 'UNCERTAIN'):
+        prompt = self.t('upgrade_confirm_unknowns')
+        if unknowns and not self._confirm_token(title, prompt, 'UNCERTAIN', summary=[(prompt, 'warning')]):
             return False
         result = self._upgrade_job(title, lambda report: execute_plan(
             cfg, operation, plan, fingerprint=plan.fingerprint,
@@ -1177,12 +1335,14 @@ class CursesMenu:
             self._show_lines(title, [(self.t('upgrade_success', recovery=result.directory), 'success')])
         return True
 
-    def _review_plugin_pins(self, title, inventory) -> bool:
+    def _review_plugin_pins(self, title, inventory, *, eligible=None) -> bool:
         """Select, display and explicitly approve exact pin corrections."""
         from .plugin_pin_ui import build_pin_review, pin_review_lines, apply_pin_review
         from .plugin_inventory import PluginInventoryError, normalize_name
 
-        available = tuple(normalize_name(p.package) for p in inventory.proposals)
+        proposals = tuple(p for p in inventory.proposals
+                          if eligible is None or normalize_name(p.package) in eligible)
+        available = tuple(normalize_name(p.package) for p in proposals)
         if not available:
             review = build_pin_review(inventory, ())
             self._show_lines(title, [(line, '') for line in pin_review_lines(review, self.t)],
@@ -1193,7 +1353,7 @@ class CursesMenu:
             entries = [(self.t('upgrade_select_all'), ''), (self.t('upgrade_clear_all'), ''),
                        (self.t('upgrade_pin_review', count=len(selected)), '')]
             entries.extend((f'[{"x" if name in selected else " "}] {name}=={proposal.version}', '')
-                           for name, proposal in zip(available, inventory.proposals))
+                           for name, proposal in zip(available, proposals))
             choice = self._choose(title, entries, self.t('tui_back_hint'))
             if not isinstance(choice, int):
                 return False
@@ -1379,8 +1539,10 @@ class CursesMenu:
                 if self._show_lines(title, [(line, '') for line in review_lines(review, self.t)],
                                     self.t('upgrade_review_hint'), allow_quit=True) is False:
                     continue
-                if not self._confirm_token(title, self.t('self_upgrade_install_warning'), review.token,
-                                           target_names=[f'v{step}' for step in review.decision.steps]):
+                prompt = self.t('self_upgrade_install_warning')
+                if not self._confirm_token(title, prompt, review.token,
+                                           target_names=[f'v{step}' for step in review.decision.steps],
+                                           summary=[(prompt, 'warning')]):
                     continue
                 clear, status = tui_recovery_state(self.t)
                 if not clear:
@@ -1661,48 +1823,28 @@ class CursesMenu:
             self.stdscr.timeout(-1)
 
     def _confirm_token(self, title: str, prompt: str, token: str,
-                       *, target_names: Sequence[str] = ()) -> bool:
+                       *, target_names: Sequence[str] = (),
+                       summary: Sequence[tuple[str, str]] = ()) -> bool:
         typed = ''
         invalid = False
-        target_scroll = 0
-        visible = 0
+        offset = 0
+        visible = 1
+        lines = list(summary) or [(prompt, '')]
         while True:
             frame = self._frame(title, self.t('tui_confirm_hint'))
             if frame:
-                h, w = frame
-                token_y = self._confirmation_footer(h, w, token, typed, invalid)
-                target_y = min(6, token_y - 3)
-                prompt_lines = max(0, target_y - 4) if target_names else max(0, min(5, token_y - 4))
-                for i, line in enumerate(textwrap.wrap(safe_text(prompt), width=max(15, w - 10))[:prompt_lines]):
-                    self._put(4 + i, 3, line, 'section')
-                if target_names:
-                    visible = max(1, min(7, h - 13, token_y - target_y - 2))
-                    target_scroll = min(target_scroll, max(0, len(target_names) - visible))
-                    self._put(target_y, 3, f'{self.t("nbo_operation_targets")} ({len(target_names)}):',
-                              'section')
-                    for i in range(target_scroll, min(len(target_names), target_scroll + visible)):
-                        self._put(target_y + 1 + i - target_scroll, 4,
-                                  f'{i + 1}. {safe_text(target_names[i])}'[:max(10, w - 10)],
-                                  'muted')
-                    if len(target_names) > visible:
-                        self._put(target_y + 1 + visible, 3,
-                                  f'↑↓ {target_scroll + 1}-{min(len(target_names), target_scroll + visible)}'
-                                  f'/{len(target_names)}', 'section')
+                offset, visible = self._confirmation_panel(
+                    *frame, lines, typed, token=token, invalid=invalid,
+                    target_names=target_names, offset=offset)
                 self.stdscr.refresh()
             key = self.stdscr.getch()
             if key in (27, 3):
                 return False
             if not frame:
                 continue
-            if target_names and key in (curses.KEY_UP, curses.KEY_DOWN,
-                                        curses.KEY_PPAGE, curses.KEY_NPAGE):
-                step = -1 if key in (curses.KEY_UP, curses.KEY_PPAGE) else 1
-                if key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
-                    step *= max(1, visible)
-                target_scroll = max(0, min(max(0, len(target_names) - visible),
-                                           target_scroll + step))
-                continue
-            if key in (10, 13, curses.KEY_ENTER):
+            if key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                offset = self._confirmation_scroll(key, offset, visible)
+            elif key in (10, 13, curses.KEY_ENTER):
                 if typed == token:
                     return True
                 typed = ''
@@ -1714,106 +1856,215 @@ class CursesMenu:
                 typed += chr(key)
                 invalid = False
 
-    def _run_backup_job(self, title: str, worker) -> bool:
-        """Draw progress and keep the final tasks/results in that same panel.
-
-        The bar counts completed stages or files; it does not estimate bytes.
-        All curses access remains in the UI thread.
-        """
-        events: queue.SimpleQueue[tuple[str,int,int,str]] = queue.SimpleQueue()
-        progress: tuple[str, int, int, str] = ('prepare', 0, 1, '')
+    def _run_backup_job(self, title: str, worker, *, tasks: Sequence[BackupTask] = ()) -> bool:
+        """Report explicit task events; only the worker's result establishes success."""
+        events: queue.SimpleQueue[BackupTaskEvent] = queue.SimpleQueue()
+        progress = ('prepare', 0, sum(task.applicable for task in tasks), '')
         tick = 0
         self._backup_steps = []
-        self._backup_started_counts = {}
+        self._backup_step_indexes = {}
+        self._backup_task_offset = None
+        self._backup_result_offset = 0
+        self._backup_result_focus = False
+        for task in tasks:
+            self._record_backup_step(BackupTaskEvent(
+                task, 'pending' if task.applicable else 'not_applicable', 0, progress[2]))
         self.stdscr.timeout(150)
         result = None
         error = ''
+
+        def drain():
+            nonlocal progress
+            while not events.empty():
+                event = events.get_nowait()
+                self._record_backup_step(event)
+                phase, _, _, detail = progress
+                if event.state == 'running':
+                    phase, detail = event.task.phase, event.task.detail
+                progress = phase, event.done, event.total, detail
+
         try:
+            # Display the plan before starting the worker.
+            self._draw_backup_progress(title, progress, tick)
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(worker, lambda name, done, total, detail='':
-                                     events.put((name, done, total, detail)))
+                future = pool.submit(worker, events.put)
                 while not future.done():
-                    while not events.empty():
-                        progress = events.get_nowait()
-                        self._record_backup_step(progress)
+                    drain()
                     self._draw_backup_progress(title, progress, tick)
                     tick += 1
-                    self.stdscr.getch()  # No cancellation while a transaction runs.
-                while not events.empty():
-                    progress = events.get_nowait()
-                    self._record_backup_step(progress)
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    error = safe_text(exc)
-                    if self._backup_steps:
-                        name, _, info = self._backup_steps[-1]
-                        self._backup_steps[-1] = (name, 'error', info)
+                    self._scroll_backup_progress(self.stdscr.getch())  # Read-only navigation.
+                drain()
+                result = future.result()
+                progress = ('complete', progress[1], progress[2], '')
         except Exception as exc:
-            error = safe_text(exc)
-            if self._backup_steps:
-                name, _, info = self._backup_steps[-1]
-                self._backup_steps[-1] = (name, 'error', info)
+            error = str(exc) or type(exc).__name__
+            drain()
         finally:
             self.stdscr.timeout(-1)
-        self._draw_backup_progress(title, progress, tick,
-                                   finished=True, error=error, result=result)
-        self._wait_result_ack()
+        self._backup_result_focus = False
+        self._flush_input()
+        while True:
+            self._draw_backup_progress(title, progress, tick,
+                                       finished=True, error=error, result=result)
+            key = self.stdscr.getch()
+            if key in (10, 13, curses.KEY_ENTER, 27, 32):
+                self._flush_input()
+                break
+            self._scroll_backup_progress(key, finished=True)
         return not bool(error)
 
-    def _record_backup_step(self, progress: tuple) -> None:
-        """Keep an inspectable task timeline, including individual batch files."""
-        phase, done, total, detail = progress
-        file_step = phase in ('verify', 'delete') and bool(detail)
-        key = f'{phase}:{detail}' if file_step else phase
-        if not hasattr(self, '_backup_started_counts'):
-            self._backup_started_counts = {}
-        if not self._backup_steps or self._backup_steps[-1][0] != key:
-            if self._backup_steps and self._backup_steps[-1][1] == 'running':
-                old = self._backup_steps[-1]
-                self._backup_steps[-1] = (old[0], 'done', old[2])
-            self._backup_steps.append((key, 'running', detail))
-            self._backup_started_counts[key] = done
-        completed = (phase == 'complete' or
-                     (file_step and done > self._backup_started_counts[key]))
-        if completed:
-            self._backup_steps[-1] = (key, 'done', detail)
+    def _record_backup_step(self, event: BackupTaskEvent) -> None:
+        """Update the exact task; never infer success from another task's arrival."""
+        key = event.task.key
+        row = (event.task.phase, event.state, safe_text(event.task.detail))
+        if key in self._backup_step_indexes:
+            self._backup_steps[self._backup_step_indexes[key]] = row
+        else:
+            self._backup_step_indexes[key] = len(self._backup_steps)
+            self._backup_steps.append(row)
+
+    def _scroll_backup_progress(self, key: int, *, finished: bool = False) -> None:
+        """Scroll read-only task/result content; never cancel a running transaction."""
+        if key in (9, curses.KEY_BTAB) and finished:
+            self._backup_result_focus = not self._backup_result_focus
+            return
+        if key not in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE,
+                       curses.KEY_HOME, curses.KEY_END, ord('j'), ord('k')):
+            return
+        result_focus = finished and self._backup_result_focus
+        limit = self._backup_scroll_limits[1 if result_focus else 0]
+        offset = self._backup_result_offset if result_focus else self._backup_task_offset
+        offset = offset if offset is not None else getattr(self, '_backup_auto_offset', 0)
+        if key == curses.KEY_HOME:
+            offset = 0
+        elif key == curses.KEY_END:
+            offset = limit
+        else:
+            delta = {curses.KEY_UP: -1, ord('k'): -1, curses.KEY_DOWN: 1, ord('j'): 1,
+                     curses.KEY_PPAGE: -5, curses.KEY_NPAGE: 5}[key]
+            offset += delta
+        offset = max(0, min(offset, limit))
+        if result_focus:
+            self._backup_result_offset = offset
+        else:
+            self._backup_task_offset = offset
+
+    @staticmethod
+    def _backup_wrap(text, width):
+        """Preserve every character, including long paths; sanitize per line."""
+        lines = []
+        for line in str(text).splitlines() or ['']:
+            lines.extend(textwrap.wrap(safe_text(line), width=max(1, width),
+                                       replace_whitespace=False, drop_whitespace=False,
+                                       break_long_words=True, break_on_hyphens=False) or [''])
+        return lines
 
     def _draw_backup_progress(self, title: str, progress: tuple, tick: int,
                               *, finished: bool = False, error: str = '',
                               result=None) -> None:
-        frame = self._frame(title, self.t('nbo_progress_result_hint') if finished
-                            else self.t('tui_quit_blocked'))
+        hint = self.t('nbo_backup_result_scroll_hint' if finished else 'nbo_backup_running_scroll_hint')
+        frame = self._frame(title, hint)
         if not frame:
             return
         h, w = frame
+        width = w - 6
         phase, done, total, detail = progress
-        self._put(4, 3, self.t('nbo_stage_'+phase), 'section')
-        length = max(10, min(50, w-20))
-        if finished and not error:
-            done = total
-        filled = round(length * done / total) if total else 0
-        self._put(7, 3, '['+'█'*filled+'░'*(length-filled)+'] '+f'{done}/{total}',
+        gap = 1 if h >= 22 else 0
+
+        # The progress panel always occupies three rows. All other space is
+        # allocated to the actual task list and result, not a fixed-height history.
+        self._paint(3, 2, w - 4, 3)
+        self._put(3, 3, self.t('nbo_progress_heading'), 'section')
+        current = self.t('nbo_stage_' + phase)
+        if detail and not finished:
+            current += ' — ' + safe_text(detail)
+        self._put(4, 3, current[:width], 'title')
+        count = f'{done}/{total}' if total else '—'
+        length = max(1, min(50, width - len(count) - 3))
+        filled = round(length * min(done, total) / total) if total else 0
+        self._put(5, 3, '[' + '█' * filled + '░' * (length - filled) + '] ' + count,
                   'failure' if error else 'title')
-        status = (self.t('nbo_job_failed') if error else self.t('nbo_job_success')) if finished \
-                 else self.t('nbo_working') + '.'*(1+(tick % 4))
-        self._put(9, 3, status, 'failure' if error else ('success' if finished else 'muted'))
-        if error:
-            self._put(10, 3, error[:max(8,w-9)], 'failure')
-        elif finished and result is not None:
-            self._put(10, 3, safe_text(getattr(result,'path',result))[:max(8,w-9)], 'title')
-            if getattr(result, 'detail', ''):
-                self._put(11, 3, result.detail[:max(8,w-9)], 'muted')
-        elif detail:
-            self._put(10, 3, detail[:max(8,w-9)], 'muted')
-        self._put(12, 3, self.t('nbo_task_header'), 'section')
-        for i, (name, step_status, info) in enumerate(self._backup_steps[-max(1,h-17):]):
-            marker = 'OK' if step_status=='done' else ('!!' if step_status=='error' else '..')
-            step_phase = name.split(':',1)[0]
-            self._put(13+i, 4, f'{marker} {self.t("nbo_stage_"+step_phase)}'+
-                      (f' — {info}' if info else '')[:max(0,w-35)],
-                      'success' if step_status=='done' else
-                      ('failure' if step_status=='error' else 'muted'))
+
+        states = ('running', 'done', 'failed', 'skipped', 'not_run')
+        labels = {state: self.t('nbo_task_state_' + state) for state in states}
+        labels['pending'] = ''
+        status_width = max(map(len, labels.values()))
+        task_lines = []
+        active_line = 0
+        active_found = False
+        for name, state, info in self._backup_steps:
+            if state == 'not_applicable':
+                continue
+            # A failure before backend events still leaves planned work unrun.
+            displayed = 'not_run' if finished and state == 'pending' else state
+            label = labels[displayed]
+            style = {'done': 'success', 'failed': 'failure', 'running': 'title'}.get(state, 'muted')
+            name_text = self.t('nbo_stage_' + name) + (' — ' + info if info else '')
+            if not active_found and state == ('failed' if error else 'running'):
+                active_line = len(task_lines)
+                active_found = True
+            for index, line in enumerate(self._backup_wrap(name_text, width - status_width - 4)):
+                marker = task_marker(displayed) if index == 0 else ' '
+                task_lines.append((marker, label if index == 0 else '', style, line, state == 'running'))
+
+        result_lines = []
+        def add_result(text, style):
+            result_lines.extend((line, style) for line in self._backup_wrap(text, width))
+        if finished:
+            add_result(self.t('nbo_job_failed' if error else 'nbo_job_success'),
+                       'failure' if error else 'success')
+            if error:
+                add_result(error, 'failure')
+            elif result is not None:
+                add_result(getattr(result, 'path', result), 'title')
+                for line in str(getattr(result, 'detail', '')).splitlines():
+                    if line:
+                        # These are the existing backend post-restore notices.
+                        style = 'warning' if line.startswith(('Redis cache', 'NetBox upgrade recovery')) else 'muted'
+                        add_result(line, style)
+        else:
+            add_result('—', 'muted')
+
+        task_y = 6 + gap
+        space = h - 2 - task_y - gap
+        # One heading + at least two task rows; keep result and its first
+        # messages visible even at 50x16. Both lists can scroll independently.
+        result_height = min(len(result_lines) + 1, max(2, space - 3), max(4, space // 2))
+        task_height = min(max(2, len(task_lines) + 1), space - result_height)
+        result_y = task_y + task_height + gap
+        result_height = min(len(result_lines) + 1, h - 2 - result_y)
+        task_visible = max(1, task_height - 1)
+        result_visible = max(1, result_height - 1)
+        task_limit = max(0, len(task_lines) - task_visible)
+        result_limit = max(0, len(result_lines) - result_visible)
+        self._backup_scroll_limits = (task_limit, result_limit)
+        auto = max(0, min(task_limit, active_line - task_visible + 1))
+        self._backup_auto_offset = auto
+        task_offset = auto if self._backup_task_offset is None else min(self._backup_task_offset, task_limit)
+        if self._backup_task_offset is not None:
+            self._backup_task_offset = task_offset
+        self._backup_result_offset = min(self._backup_result_offset, result_limit)
+
+        def heading(y, key, offset, visible, count, focused):
+            text = ('> ' if focused and finished else '') + self.t(key)
+            if count > visible:
+                text += f'  {offset + 1}-{min(offset + visible, count)}/{count}'
+            self._put(y, 3, text[:width], 'title' if focused else 'section')
+
+        self._paint(task_y, 2, w - 4, task_height)
+        heading(task_y, 'nbo_task_header', task_offset, task_visible, len(task_lines),
+                not self._backup_result_focus)
+        for y, (marker, label, style, line, active) in enumerate(
+                task_lines[task_offset:task_offset + task_visible], task_y + 1):
+            self._put(y, 3, marker + ' ' + label.ljust(status_width), style)
+            self._put(y, 3 + status_width + 4, line, 'title' if active else '')
+        self._paint(result_y, 2, w - 4, result_height)
+        heading(result_y, 'nbo_result_heading', self._backup_result_offset,
+                result_visible, len(result_lines), self._backup_result_focus)
+        for y, (line, style) in enumerate(
+                result_lines[self._backup_result_offset:self._backup_result_offset + result_visible],
+                result_y + 1):
+            self._put(y, 3, line, style)
         self.stdscr.refresh()
 
     def _targets_summary(self, names: Sequence[str], width: int) -> str:
@@ -1870,48 +2121,32 @@ class CursesMenu:
             return marked > 0
         return False
 
+    def _choose_backup_type(self) -> int | None | str:
+        kinds = ('db', 'media', 'combined')
+        entries = [(self.t('nbo_create_name_' + kind), '') for kind in kinds]
+        details = [((self.t('nbo_create_detail_' + kind), ''),
+                    (self.t('nbo_create_downtime_' + ('combined' if kind == 'combined' else 'live')),
+                     'warning' if kind == 'combined' else 'muted')) for kind in kinds]
+        details[1] += ((self.t('nbo_create_consistency_media'), 'warning'),)
+        details[2] += ((self.t('nbo_create_consistency_combined'), 'muted'),)
+        return self._choose(self.t('nbo_create_title'), entries, self.t('tui_back_hint'),
+                            section=self.t('nbo_create_type_heading'), numeric_shortcuts=True,
+                            details=details, detail_heading=self.t('nbo_create_details_heading'))
+
     def _choose_restore_scope(self, entry) -> str | None:
-        """Explicit, arrow-controlled restore scope; no accidental Enter default."""
+        """Explicit restore scope; no accidental Enter default."""
         kinds = ('db', 'media', 'all')
-        names = (self.t('nbo_restore_db'), self.t('nbo_restore_media'),
-                 self.t('nbo_restore_all'))
-        descriptions = (self.t('nbo_restore_db_desc'), self.t('nbo_restore_media_desc'),
-                        self.t('nbo_restore_all_desc'))
-        selected: int | None = None
-        while True:
-            frame = self._frame(self.t('nbo_restore_choose'), self._quit_hint(self.t('nbo_restore_scope_hint')))
-            if frame:
-                h, w = frame
-                width = min(w-8, max(55, min(92, w-8)))
-                self._paint(3, 3, width, min(18, h-7))
-                self._put(4, 5, self.t('nbo_restore_source'), 'section')
-                self._put(5, 5, safe_text(entry.path.name)[:max(10,width-7)], 'title')
-                compact = h < 25
-                for i, (name, description) in enumerate(zip(names, descriptions)):
-                    y = (7 + i*2) if compact else (8 + i*3)
-                    if y >= h-3:
-                        break
-                    highlighted = i == selected
-                    if highlighted:
-                        self._put(y, 5, ' ' * (width-4), 'selected')
-                    marker = '●' if highlighted else '○'
-                    self._put(y, 6, f'{marker} {name}', 'selected' if highlighted else 'title')
-                    if y+1 < h-3:
-                        self._put(y+1, 9, description[:max(10,width-12)], 'muted')
-                if h > 25:
-                    self._put(19, 5, self.t('nbo_restore_scope_warning')[:max(10,width-7)], 'warning')
-                self.stdscr.refresh()
-            key = self.stdscr.getch()
-            self._check_quit(key)
-            if key in (27,3):
-                return None
-            if key in (curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k')):
-                if selected is None:
-                    selected = 2 if key in (curses.KEY_UP, ord('k')) else 0
-                else:
-                    selected = (selected + (-1 if key in (curses.KEY_UP,ord('k')) else 1)) % len(kinds)
-            elif key in (10,13,curses.KEY_ENTER) and selected is not None:
-                return kinds[selected]
+        entries = [(self.t('nbo_restore_' + kind), '') for kind in kinds]
+        details = [((self.t('nbo_restore_' + kind + '_desc'), ''),
+                    (self.t('nbo_restore_downtime_short'), 'warning'),
+                    (self.t('nbo_restore_safety_short'), 'warning')) for kind in kinds]
+        result = self._choose(self.t('nbo_restore_choose'), entries, self.t('nbo_restore_scope_hint'),
+                              escape_clears_selection=False, numeric_shortcuts=True,
+                              overview=[(self.t('nbo_restore_source'), 'section'),
+                                        (safe_text(entry.path.name), 'title')],
+                              section=self.t('nbo_restore_scope_heading'), details=details,
+                              detail_heading=self.t('nbo_create_details_heading'))
+        return kinds[result] if isinstance(result, int) else None
 
     def _backup_inventory_counts(self, entries):
         """Count each displayed inventory entry once, without filesystem I/O."""
@@ -2394,16 +2629,14 @@ class CursesMenu:
                     # Continue through the same safe confirmation handlers as shortcuts.
                 if key in (ord('c'),ord('C')):
                     self.stdscr.timeout(-1)
-                    types = [(self.t('nbo_create_kind_db'), ''),
-                             (self.t('nbo_create_kind_media'), ''),
-                             (self.t('nbo_create_kind_combined'), '')]
-                    i = self._choose(self.t('nbo_create_title'), types, self.t('tui_back_hint'))
+                    i = self._choose_backup_type()
                     if isinstance(i,int):
                         kind = ('db','media','combined')[i]
                         if self._confirm_token(self.t('nbo_create_title'),
                                                self.t('nbo_confirm_create',kind=kind), 'CREATE'):
                             self._run_backup_job(self.t('nbo_create_title'),
-                                                 lambda cb: manager.backup(kind,progress=cb))
+                                                 lambda cb: manager.backup(kind, task_progress=cb),
+                                                 tasks=create_tasks(kind))
                             reload_inventory()
                     self.stdscr.timeout(120)
                 elif key in (ord('r'), ord('R')) and len(marked) == 1:
@@ -2435,19 +2668,24 @@ class CursesMenu:
                     if accept_unknown:
                         if not self._confirm_token(
                                 self.t('nbo_restore_choose'),
-                                self.t('nbo_unknown_version_warning'), 'ACCEPT UNKNOWN VERSION'):
+                                self.t('nbo_unknown_version_warning'), 'ACCEPT UNKNOWN VERSION',
+                                summary=[(self.t('nbo_unknown_version_warning'), 'warning')]):
                             self.stdscr.timeout(120)
                             continue
                     token = f'RESTORE {entry.kind.upper()}' + (f' {only.upper()}' if entry.kind in ('combined', 'full') else '')
-                    notice = (f'{entry.path.name} | {self._pretty_date(entry.created)} | '
-                              f'{self._human_size(entry.size)}. '+self.t('nbo_restore_warning'))
-                    if self._confirm_token(self.t('nbo_restore_choose'),notice,token):
+                    description = (f'{entry.path.name} | {self._pretty_date(entry.created)} | '
+                                   f'{self._human_size(entry.size)}.')
+                    warning = self.t('nbo_restore_warning')
+                    notice = description + ' ' + warning
+                    if self._confirm_token(self.t('nbo_restore_choose'), notice, token,
+                                           summary=[(warning, 'warning'), (description, '')]):
                         def restore_worker(cb, item=entry, scope=only, unknown=accept_unknown):
-                            opts = {'only': scope, 'progress': cb}
+                            opts = {'only': scope, 'task_progress': cb}
                             if unknown:
                                 opts['accept_unknown'] = True
                             return manager.restore(item.kind, item.path, **opts)
-                        self._run_backup_job(self.t('nbo_restore_choose'), restore_worker)
+                        self._run_backup_job(self.t('nbo_restore_choose'), restore_worker,
+                                             tasks=restore_tasks(entry.kind, only))
                         reload_inventory()
                     self.stdscr.timeout(120)
                 elif key in (ord('d'), ord('D')) and marked:
@@ -2457,17 +2695,20 @@ class CursesMenu:
                     notice = self.t('nbo_delete_selected_warning', count=len(targets),
                                     size=self._human_size(sum(e.size for e in targets)))
                     if self._confirm_token(self.t('nbo_delete_title'), notice, token,
-                                           target_names=[e.path.name for e in targets]):
+                                           target_names=[e.path.name for e in targets],
+                                           summary=[(notice, 'warning')]):
                         self._run_backup_job(self.t('nbo_delete_title'),
                              lambda cb, paths=[e.path for e in targets]:
-                             self._delete_selected_job(manager, paths, cb))
+                             self._delete_selected_job(manager, paths, cb),
+                             tasks=batch_tasks('delete', (e.path.name for e in targets), prepare=True))
                         reload_inventory()
                     self.stdscr.timeout(120)
                 elif key in (ord('v'), ord('V')) and marked:
                     targets = marked
                     self.stdscr.timeout(-1)
                     if self._run_backup_job(self.t('nbo_verify_title'),
-                                            lambda cb, selected=targets: self._verify_job_many(manager, selected, cb)):
+                                            lambda cb, selected=targets: self._verify_job_many(manager, selected, cb),
+                                            tasks=batch_tasks('verify', (e.path.name for e in targets))):
                         verified.update(fingerprint(e) for e in targets)
                     self.stdscr.timeout(120)
                 # Enter on the file list remains a no-op; I opens the full
@@ -2478,24 +2719,21 @@ class CursesMenu:
 
     @staticmethod
     def _verify_job_many(manager, entries, cb):
-        cb('verify', 0, len(entries), '')
-        for i, entry in enumerate(entries):
-            cb('verify', i, len(entries), entry.path.name)
-            manager.verify(entry.kind, entry.path)
-            cb('verify', i+1, len(entries), entry.path.name)
-        cb('complete', len(entries), len(entries), '')
+        tracker = BackupProgress(batch_tasks('verify', (e.path.name for e in entries)), events=cb)
+        with tracker.operation():
+            for entry in entries:
+                with tracker.step('verify', entry.path.name):
+                    manager.verify(entry.kind, entry.path)
         return f'{len(entries)} backups verified'
 
     @staticmethod
     def _delete_selected_job(manager, paths, cb):
-        count, freed = manager.delete_backups(paths, progress=cb)
+        count, freed = manager.delete_backups(paths, task_progress=cb)
         return f'{count} backups deleted; {freed} bytes released'
 
     @staticmethod
     def _verify_job(manager, entry, cb):
-        cb('verify',0,1,'')
-        manager.verify(entry.kind,entry.path)
-        cb('complete',1,1,'')
+        CursesMenu._verify_job_many(manager, [entry], cb)
         return entry.path
 
     @staticmethod
@@ -2510,7 +2748,7 @@ class CursesMenu:
     def _language(self) -> None:
         options = [('Português (Portugal)', ''), ('English', '')]
         result = self._choose(self.t('tui_language_title'), options, self.t('tui_back_hint'),
-                              index=0 if self.t.language == 'pt' else 1)
+                              index=0 if self.t.language == 'pt' else 1, numeric_shortcuts=True)
         if isinstance(result, int):
             self.t = Translator('pt' if result == 0 else 'en')
 

@@ -18,7 +18,7 @@ from .upgrade_discovery import GitNetBoxInstallation, inspect_git_installation
 from .upgrade_execution import ExecutionApproval, UpgradeExecutionError
 from .upgrade_diagnostics import run_checked
 from .upgrade_process import run_managed
-from .upgrade_plan import RequirementOverlap, UpgradePlan
+from .upgrade_plan import LocalRequirementDiagnostic, RequirementOverlap, UpgradePlan
 from .upgrade_recovery import _read_config
 from .upgrade_runtime import upgrade_environment
 from .upgrade_services import require_quiesced_writers
@@ -44,6 +44,9 @@ class PluginUpgrade:
     selected: tuple[tuple[str, str], ...]
     wheelhouse: Path | None = None
     overlaps: tuple[RequirementOverlap, ...] = ()
+    # Temporary preference only; never written to local_requirements.txt.
+    preferred_local: tuple[str, ...] = ()
+    ldap_source_pin: str | None = None
 
 
 class RequirementOverlapError(UpgradeExecutionError):
@@ -52,7 +55,7 @@ class RequirementOverlapError(UpgradeExecutionError):
     def __init__(self, overlaps: tuple[RequirementOverlap, ...]):
         self.overlaps = overlaps
         details = '; '.join(f'{o.name}: local {o.local_pin}, core {o.core_pin} ({o.status})'
-                            for o in overlaps if o.status != 'redundant')
+                            for o in overlaps if o.status in ('conflict', 'ambiguous'))
         super().__init__('Local/core requirement overlap: ' + details +
                          '. Review local purpose and pins or choose another target; no files changed.')
 
@@ -75,6 +78,87 @@ def _parse(raw: bytes) -> tuple[list[str], dict[str, tuple[int, re.Match]]]:
             raise UpgradeExecutionError('Duplicate package requirement needs manual review')
         result[name] = (index, match)
     return lines, result
+
+
+def diagnose_local_requirements(plan: UpgradePlan, local: bytes | None, core: bytes,
+                                stage_index: int) -> tuple[LocalRequirementDiagnostic, ...]:
+    """Read-only evidence; never display arbitrary requirement text or URLs."""
+    inventory = plan.source.inventory
+    stage = plan.stages[stage_index]
+    digest = None if local is None else hashlib.sha256(local).hexdigest()
+    if digest != inventory.requirements_hash:
+        return ()
+    try:
+        _, core_entries = _parse(core)
+        lines = (local or b'').decode('utf-8').splitlines()
+    except (UnicodeError, UpgradeExecutionError):
+        return ()
+    installed = {}
+    for package in inventory.packages:
+        installed.setdefault(normalize_name(package.name), []).append(package.version)
+    selected = set(dict(plan.selected_plugins)) if stage_index == len(plan.stages) - 1 else set()
+    configured = dict(configured_plugin_packages(inventory))
+    entries = {}
+    diagnostics = []
+
+    def record(name, declaration, reason, action='manual-review'):
+        versions = installed.get(name, ())
+        actual = versions[0] if len(versions) == 1 else None
+        diagnostics.append(LocalRequirementDiagnostic(name, declaration, actual, stage.netbox_version, reason, action))
+
+    for index, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        match = _LINE.fullmatch(line)
+        if match is None:
+            # Do not expose pip options, comments or credentials in URL/VCS requirements.
+            head = re.match(r'^[ \t]*([A-Za-z0-9][A-Za-z0-9_.-]{0,127})(?=[ \t\[<>=!~;@]|$)', line)
+            name = normalize_name(head[1]) if head else f'line {index}'
+            record(name, f'line {index}: complex requirement', 'ambiguous')
+            if head:
+                entries.setdefault(name, []).append(None)
+            continue
+        entries.setdefault(normalize_name(match[2]), []).append(match)
+    for name, matches in sorted(entries.items()):
+        if len(matches) != 1:
+            record(name, 'multiple declarations', 'ambiguous')
+            continue
+        match = matches[0]
+        if match is None:
+            continue
+        version = match[4]
+        declaration = match[2] + (match[3] or '') + (f'=={version}' if version else '')
+        versions = installed.get(name, ())
+        actual = versions[0] if len(versions) == 1 else None
+        if name in core_entries:
+            core_match = core_entries[name][1]
+            if name in configured or (version and version != core_match[4]):
+                record(name, declaration, 'overlap')
+            continue
+        if name in selected or name not in configured:
+            continue
+        if len(versions) != 1:
+            record(name, declaration, 'missing' if not versions else 'ambiguous')
+        elif not version:
+            action = 'review-pin' if actual and _STABLE.fullmatch(actual) and inventory.enabled is not None else 'manual-review'
+            record(name, declaration, 'unpinned', action)
+        elif version != actual:
+            record(name, declaration, 'mismatched')
+    for name, version in sorted(configured.items()):
+        if name not in selected and name not in entries:
+            record(name, 'no local requirement', 'missing',
+                   'review-pin' if _STABLE.fullmatch(version) else 'manual-review')
+    if inventory.enabled is None:
+        record('PLUGINS', 'dynamic configuration', 'ambiguous')
+    else:
+        for module in inventory.enabled:
+            if resolve_plugin_package(inventory.packages, module) is None:
+                record('PLUGINS', 'unmapped configured module', 'ambiguous')
+    # Unknown includes/complex declarations may change the meaning of simple
+    # pins. Keep all such cases manual until the operator resolves ambiguity.
+    if any(item.reason == 'ambiguous' for item in diagnostics):
+        diagnostics = [replace(item, action='manual-review') for item in diagnostics]
+    return tuple(diagnostics)
 
 
 def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
@@ -153,14 +237,16 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         local_pin = f'{local_match[2]}{local_match[3] or ""}' + (
             f'=={local_match[4]}' if local_match[4] else '')
         core_pin = f'{core_match[2]}{core_match[3] or ""}=={core_match[4]}'
-        if not local_match[4] or local_match[3] or name in configured:
+        if name in configured:
             status = 'ambiguous'
-        elif local_match[4] != core_match[4]:
+        elif local_match[4] and local_match[4] != core_match[4]:
             status = 'conflict'
+        elif not local_match[4] or local_match[3]:
+            status = 'review'
         else:
             status = 'redundant'
         overlaps.append(RequirementOverlap(name, local_pin, core_pin, status))
-    if any(overlap.status != 'redundant' for overlap in overlaps):
+    if any(overlap.status in ('conflict', 'ambiguous') for overlap in overlaps):
         raise RequirementOverlapError(tuple(overlaps))
     for module in inventory.enabled:
         package = resolve_plugin_package(inventory.packages, module)
@@ -170,15 +256,23 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         if name not in selected and name not in entries:
             raise UpgradeExecutionError('Pin unselected configured plugins before upgrading')
     local_pins = []
+    preferred = []
     for name, (index, match) in entries.items():
         version = selected.get(name, match[4])
-        if not version or (name not in selected and installed.get(name) != version):
-            raise UpgradeExecutionError('Pin unselected local packages to their installed versions')
+        declaration = match[2] + (match[3] or '')
+        if name in configured and (not version or (name not in selected and installed.get(name) != version)):
+            raise UpgradeExecutionError('Pin unselected configured plugins to their installed versions')
         if name in selected:
             ending = lines[index][len(lines[index].rstrip('\r\n')):]
-            lines[index] = f'{match[1]}{match[2]}{match[3] or ""}=={version}{match[5]}{ending}'
-        local_pins.append(f'{match[2]}{match[3] or ""}=={version}')
-        expected[name] = version
+            lines[index] = f'{match[1]}{declaration}=={version}{match[5]}{ending}'
+        if version:
+            local_pins.append(f'{declaration}=={version}')
+            expected[name] = version
+        else:
+            local_pins.append(declaration)
+            actual = installed.get(name)
+            if name not in core_entries and actual and re.fullmatch(r'[0-9][A-Za-z0-9.+_-]*', actual):
+                preferred.append(f'{declaration}=={actual}')
     newline = '\r\n' if local and b'\r\n' in local else '\n'
     for name, version in selected.items():
         if name in entries:
@@ -191,15 +285,26 @@ def prepare_plugin_upgrade(plan: UpgradePlan, local: bytes | None,
         expected[name] = version
     if any(expected.get(name) != version for name, version in expected_stage.items()):
         raise UpgradeExecutionError('Prepared pins differ from the approved plugin versions')
+    # python-ldap publishes source distributions. Restrict the exception to an
+    # explicitly declared LDAP dependency and a known exact version. This is
+    # temporary build input, never a permanent local pin.
+    ldap_version = expected.get('python-ldap') or installed.get('python-ldap')
+    ldap_source_pin = (f'python-ldap=={ldap_version}'
+                       if ('django-auth-ldap' in entries or 'python-ldap' in entries)
+                       and 'python-ldap' not in core_entries and 'python-ldap' not in configured
+                       and ldap_version and _STABLE.fullmatch(ldap_version) else None)
     return PluginUpgrade(digest, ''.join(lines).encode('utf-8'), tuple(core_pins),
                          tuple(local_pins), tuple(sorted(expected.items())),
-                         tuple(sorted(selected.items())), overlaps=tuple(overlaps))
+                         tuple(sorted(selected.items())), overlaps=tuple(overlaps),
+                         preferred_local=tuple(preferred), ldap_source_pin=ldap_source_pin)
 
 
 def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
                                core: bytes, pins: PluginUpgrade) -> PluginUpgrade:
     """Bind downloaded artifacts to the exact approved stage dependency report."""
     if not plan.dependency_reviews:
+        if any('==' not in pin for pin in pins.local_pins):
+            raise UpgradeExecutionError('Unpinned local requirements require an approved full dependency report')
         return pins  # Internal callers still perform a full execution preflight.
     review = plan.dependency_reviews[index]
     if (review.version != plan.stages[index].netbox_version or review.commit != commit
@@ -211,7 +316,23 @@ def bind_reviewed_dependencies(plan: UpgradePlan, index: int, commit: str,
     expected = dict(review.resolution.packages)
     if any(expected.get(name) != version for name, version in pins.expected):
         raise UpgradeExecutionError('Approved resolver report does not match exact requirements')
-    return replace(pins, expected=tuple(sorted(expected.items())))
+    bound = []
+    for declaration in pins.local_pins:
+        if '==' in declaration:
+            bound.append(declaration)
+            continue
+        name = normalize_name(declaration.split('[', 1)[0])
+        version = expected.get(name)
+        if not isinstance(version, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+_-]*', version):
+            raise UpgradeExecutionError('Approved resolver report does not bind a local requirement')
+        bound.append(f'{declaration}=={version}')
+    # A different LDAP version may only be used when the reviewed resolver
+    # found a compatible wheel for it; do not broaden the source exception.
+    ldap_source_pin = pins.ldap_source_pin
+    if ldap_source_pin != f"python-ldap=={expected.get('python-ldap')}":
+        ldap_source_pin = None
+    return replace(pins, local_pins=tuple(bound), expected=tuple(sorted(expected.items())),
+                   ldap_source_pin=ldap_source_pin)
 
 
 def verify_reviewed_resolution(plan: UpgradePlan, index: int, resolution) -> None:

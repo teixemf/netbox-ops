@@ -117,6 +117,115 @@ class MenuNavigationTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertTrue(any('c' in entry[2] for entry in screen.writes))
 
+    def test_backup_selector_aligned_options_and_contextual_details(self):
+        for language in ('en', 'pt'):
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    screen = FakeScreen([10, curses.KEY_DOWN, curses.KEY_END, 27, 27],
+                                        dimensions=dimensions)
+                    menu = CursesMenu(screen, Translator(language))
+                    self.assertIsNone(menu._choose_backup_type())
+                    initial, _, db, combined, cleared = screen.frames
+                    self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in initial))
+                    self.assertTrue(any(text == menu.t('nbo_create_type_heading') for _, _, text, _ in initial))
+                    self.assertTrue(any(text == menu.t('nbo_create_details_heading') for _, _, text, _ in combined))
+                    db_highlight = next(text for _, _, text, attr in db if attr == curses.A_REVERSE)
+                    combined_highlight = next(text for _, _, text, attr in combined if attr == curses.A_REVERSE)
+                    self.assertEqual(len(db_highlight), len(combined_highlight))
+                    self.assertIn(menu.t('nbo_create_name_combined'), combined_highlight)
+                    self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in cleared))
+                    combined_text = ' '.join(text for _, _, text, _ in combined)
+                    self.assertIn(menu.t('nbo_create_downtime_combined'), combined_text)
+                    self.assertNotIn(menu.t('nbo_create_downtime_combined'),
+                                     ' '.join(text for _, _, text, _ in db))
+                    self.assertTrue(all(y < dimensions[0] for y, _, _, _ in combined))
+                    type_y = next(y for y, _, text, _ in combined
+                                  if text.startswith(menu.t('nbo_create_type_heading')))
+                    detail_y = next(y for y, _, text, _ in combined
+                                    if text == menu.t('nbo_create_details_heading'))
+                    self.assertEqual(type_y == detail_y, dimensions[1] >= 76)
+                    self.assertIn('3  ' + menu.t('nbo_create_name_combined'), combined_highlight)
+                    self.assertIn('1–3', combined_text)
+
+    def test_numbered_fixed_selectors_ignore_invalid_keys(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        for language in ('en', 'pt'):
+            for number, scope in enumerate(('db', 'media', 'all'), 1):
+                keys = [ord('0'), ord('9'), 10, ord(str(number))]
+                screen = FakeScreen(keys, dimensions=(16, 50))
+                menu = CursesMenu(screen, Translator(language))
+                self.assertEqual(menu._choose_backup_type(), number - 1)
+                screen = FakeScreen(keys, dimensions=(34, 140))
+                menu = CursesMenu(screen, Translator(language))
+                self.assertEqual(menu._choose_restore_scope(SimpleNamespace(path=Path('backup.tar.gz'))), scope)
+
+    def test_restore_scope_preserves_explicit_focus_and_escape(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        entry = SimpleNamespace(path=Path('backup.tar.gz'))
+        for keys, result in (([10, 27], None), ([curses.KEY_UP, 10], 'all'),
+                             ([curses.KEY_DOWN, 27], None)):
+            screen = FakeScreen(keys, dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator('en'))
+            self.assertEqual(menu._choose_restore_scope(entry), result)
+            self.assertTrue(any(text == 'backup.tar.gz' for _, _, text, _ in screen.frames[0]))
+            self.assertFalse(any(attr == curses.A_REVERSE for _, _, _, attr in screen.frames[0]))
+
+    def test_restore_warning_fits_small_terminal(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        for language in ('en', 'pt'):
+            screen = FakeScreen([curses.KEY_DOWN, 27], dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator(language))
+            self.assertIsNone(menu._choose_restore_scope(SimpleNamespace(path=Path('backup.tar.gz'))))
+            visible = ' '.join(text for _, _, text, _ in screen.frames[-1])
+            self.assertIn(menu.t('nbo_restore_downtime_short'), visible)
+            self.assertIn(menu.t('nbo_restore_safety_short'), visible)
+
+    def test_real_curses_backup_and_restore_selector_capture(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tests.helpers.terminal_capture import run_capture
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for language, monochrome in (('en', False), ('pt', True)):
+                with self.subTest(language=language, monochrome=monochrome):
+                    output = Path(tmp) / f'{language}.json'
+                    run_capture('tests.tui.terminal_selector_capture', output, language, monochrome)
+                    captures = json.loads(output.read_text())
+                    t = Translator(language)
+                    self.assertEqual(len(captures), 4)
+                    for capture in captures:
+                        self.assertEqual(capture['color'], not monochrome)
+                        frames = capture['frames']
+                        heading = t('nbo_create_type_heading' if capture['selector'] == 'backup'
+                                    else 'nbo_restore_scope_heading')
+                        self.assertTrue(any(heading in line for line in frames[0]))
+                        if capture['selector'] == 'backup':
+                            warning = t('nbo_create_downtime_combined')
+                            self.assertNotIn(warning, ' '.join(line.strip() for line in frames[0]))
+                        else:
+                            warning = t('nbo_restore_downtime_short')
+                        shown = next(frame for frame in frames
+                                     if warning in ' '.join(line.strip() for line in frame))
+                        self.assertTrue(any(t('nbo_create_details_heading') in line for line in shown))
+                        print(f"Actual curses selector: {language} {capture['selector']} "
+                              f"{capture['width']}x{capture['height']} color={capture['color']}\n"
+                              + '\n'.join(shown))
+
+    def test_selector_long_list_remains_navigable(self):
+        screen = FakeScreen([curses.KEY_DOWN, curses.KEY_END, 10], dimensions=(16, 50))
+        menu = CursesMenu(screen, Translator('en'))
+        entries = [(f'Option {index:02} ' + 'x' * 80, '') for index in range(30)]
+        self.assertEqual(menu._choose('Menu', entries, menu.t('tui_back_hint')), 29)
+        self.assertTrue(any('Option 29' in text and attr == curses.A_REVERSE
+                            for _, _, text, attr in screen.frames[-1]))
+
     def test_language_can_change_without_exiting(self):
         menu = CursesMenu(FakeScreen(), Translator('pt'))
         with patch.object(menu, '_choose', return_value=1):
@@ -363,6 +472,29 @@ class NewServiceTuiTests(unittest.TestCase):
              patch.object(menu, '_execute_batch') as executed:
             menu._manage()
         executed.assert_not_called()
+
+    def test_service_progress_shows_planned_rows_without_pending_labels(self):
+        for language in ('en', 'pt'):
+            screen = FakeScreen(dimensions=(16, 50))
+            menu = CursesMenu(screen, Translator(language))
+            menu._service_steps = [(name, 'pending', '') for name in
+                                   ('redis', 'postgresql', 'netbox', 'netbox-rq', 'nginx')]
+            menu._draw_progress('restart', 0, 5, 'redis', 'pending', '')
+            frame = screen.frames[-1]
+            for name in ('redis', 'postgresql', 'netbox', 'netbox-rq', 'nginx'):
+                self.assertTrue(any(text.endswith(name) for _, _, text, _ in frame))
+            self.assertNotIn(menu.t('nbo_task_state_pending'), ' '.join(text for _, _, text, _ in frame))
+            self.assertEqual(sum(text.strip() == '○' for _, _, text, _ in frame), 5)
+            menu._draw_progress('restart', 1, 5, 'redis', 'done', '')
+            self.assertTrue(any(text.startswith('● ' + menu.t('nbo_task_state_done'))
+                                for _, _, text, _ in screen.frames[-1]))
+            menu._draw_progress('restart', 0, 5, 'redis', 'error', 'failure',
+                                finished=True, failed=True, summary='Failure')
+            text = ' '.join(value for _, _, value, _ in screen.frames[-1])
+            self.assertIn(menu.t('nbo_task_state_failed'), text)
+            self.assertIn(menu.t('nbo_task_state_not_run'), text)
+            self.assertNotIn('○', text)
+            self.assertEqual(menu._service_steps[-1][1], 'pending')
 
     def test_progress_bar_counts_actual_completions(self):
         screen = FakeScreen([])

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from netbox_ops.backup_progress import BackupTask, BackupTaskEvent
 from netbox_ops.netbox_version import read_netbox_version
 from netbox_ops.services import ServiceVersionCache, ServiceState
 from netbox_ops.tui import CursesMenu
@@ -69,17 +70,18 @@ class V032Tests(unittest.TestCase):
         self.assertEqual([(x[0],x[1]) for x in m._service_steps],
                          [('netbox','done'),('redis','running')])
         m._backup_steps=[]
-        m._record_backup_step(('prepare',0,3,''))
-        m._record_backup_step(('dump_db',1,3,''))
+        m._record_backup_step(BackupTaskEvent(BackupTask('prepare'), 'running', 0, 3))
+        m._record_backup_step(BackupTaskEvent(BackupTask('prepare'), 'done', 1, 3))
+        m._record_backup_step(BackupTaskEvent(BackupTask('dump_db'), 'running', 1, 3))
         self.assertEqual(m._backup_steps[0][1],'done')
         self.assertEqual(m._backup_steps[1][1],'running')
         m._draw_backup_progress('Backup',('dump_db',1,3,''),1)
         self.assertIn('TASKS', ' '.join(x[2] for x in screen.writes))
         m._backup_steps=[]
-        m._backup_started_counts={}
-        m._record_backup_step(('verify',0,2,'first.dump'))
-        m._record_backup_step(('verify',1,2,'first.dump'))
-        m._record_backup_step(('verify',1,2,'second.dump'))
+        m._backup_step_indexes={}
+        m._record_backup_step(BackupTaskEvent(BackupTask('verify', 'first.dump'), 'running', 0, 2))
+        m._record_backup_step(BackupTaskEvent(BackupTask('verify', 'first.dump'), 'done', 1, 2))
+        m._record_backup_step(BackupTaskEvent(BackupTask('verify', 'second.dump'), 'running', 1, 2))
         self.assertEqual([(x[1],x[2]) for x in m._backup_steps],
                          [('done','first.dump'),('running','second.dump')])
 
@@ -116,7 +118,7 @@ class V032Tests(unittest.TestCase):
             menu=CursesMenu(FakeScreen([curses.KEY_DOWN,32,curses.KEY_DOWN,32,ord('d'),
                                        27,27,27],dimensions=(33,130)),Translator('pt'))
             calls=[]
-            def run_job(title,worker):
+            def run_job(title,worker,*,tasks):
                 calls.append((title,worker))
                 worker(lambda *args: None)
                 return True
@@ -142,7 +144,7 @@ class V032Tests(unittest.TestCase):
                 (folder/f'netbox-db-20261120T12000{i}Z.dump').write_bytes(b'PGDMP')
             manager=BackupManager(Configuration(DEFAULT_UNITS.copy(),folder))
             menu=CursesMenu(FakeScreen([ord('*'),ord('v'),27,27],dimensions=(33,130)),Translator('en'))
-            def run_job(title,worker):
+            def run_job(title,worker,*,tasks):
                 worker(lambda *args: None)
                 return True
             with patch('netbox_ops.tui.load_config'), \
@@ -195,10 +197,11 @@ class V032Tests(unittest.TestCase):
         entries=[BackupEntry(Path('/tmp/a.dump'),'db','',1,''),BackupEntry(Path('/tmp/b.dump'),'db','',1,'')]
         manager=MagicMock()
         events=[]
-        result=CursesMenu._verify_job_many(manager,entries,lambda *args:events.append(args))
+        result=CursesMenu._verify_job_many(manager,entries,events.append)
         self.assertEqual(manager.verify.call_count,2)
-        self.assertEqual(events[-1][0],'complete')
-        self.assertEqual(events[-1][1:],(2,2,''))
+        self.assertEqual([(event.task.detail, event.state) for event in events if event.state == 'done'],
+                         [('a.dump', 'done'), ('b.dump', 'done')])
+        self.assertEqual((events[-1].done, events[-1].total),(2,2))
         self.assertIn('2 backups',result)
 
 if __name__=='__main__':

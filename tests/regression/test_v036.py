@@ -152,7 +152,7 @@ class BackupFix036Tests(unittest.TestCase):
                             dimensions=(35, 145))
         menu = CursesMenu(screen, Translator('pt'))
         called = []
-        def runner(title, worker):
+        def runner(title, worker, *, tasks):
             called.append(title)
             worker(lambda *args: None)
             return True

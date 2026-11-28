@@ -174,19 +174,46 @@ class TargetModelTests(unittest.TestCase):
         model.select(None, '4.5.0')
         self.assertEqual(model.selection.plan_arguments(model.installed), ('netbox', '4.5.0', {}))
 
+    def test_listing_is_complete_and_does_not_assess_versions(self):
+        self.context = replace(self.context, tags=tuple(f'v4.4.{n}' for n in range(32)))
+        model = self.model()
+        listing = self.run_request(model, 'listing')
+        self.assertEqual(listing.total, 32)
+        self.assertEqual([r.target for r in listing.rows], ['4.4.0'] + [
+            f'4.4.{n}' for n in range(31, 0, -1)])
+        self.assertTrue(all(r.assessment.status == 'unchecked' for r in listing.rows))
+        self.fetcher.assert_not_called()
+        plugin = self.run_request(model, 'listing', 'demo-plugin')
+        self.assertEqual([r.target for r in plugin.rows], ['1.0.0', '3.0.0', '2.0.0'])
+        self.assertTrue(all(r.assessment.status == 'unchecked' for r in plugin.rows))
+        self.fetcher.assert_called_once_with('demo-plugin')
+
+    def test_failed_listing_keeps_installed_and_refresh_retries(self):
+        model = self.model()
+        self.fetcher.side_effect = OSError('offline')
+        result = self.run_request(model, 'listing', 'demo-plugin')
+        self.assertEqual([r.target for r in result.rows], ['1.0.0'])
+        self.assertTrue(result.warnings)
+        self.assertEqual(result.rows[0].assessment.status, 'unchecked')
+        self.fetcher.side_effect = self.fetch
+        result = self.run_request(model, 'relist', 'demo-plugin')
+        self.assertEqual([r.target for r in result.rows], ['1.0.0', '3.0.0', '2.0.0'])
+
     def test_pickers_assess_target_context_and_installed_prerequisites(self):
         model = self.model()
         plugin = self.run_request(model, 'catalogue', 'demo-plugin')
-        self.assertEqual([r.target for r in plugin.rows], ['3.0.0', '2.0.0', '1.0.0'])
+        self.assertEqual([r.target for r in plugin.rows], ['1.0.0', '3.0.0', '2.0.0'])
         self.assertEqual([r.assessment.status for r in plugin.rows],
-                         ['conflict', 'supported', 'conflict'])
+                         ['conflict', 'conflict', 'supported'])
         model.select('demo-plugin', '2.0.0')
         picker = self.run_request(model, 'catalogue', None, limit=2)
         self.assertEqual(picker.total, 3)
-        self.assertEqual([r.target for r in picker.rows], ['4.6.2', '4.5.0'])
-        self.assertEqual([r.assessment.status for r in picker.rows], ['supported', 'conflict'])
+        self.assertEqual([r.target for r in picker.rows], ['4.4.0', '4.6.2'])
+        self.assertEqual(picker.rows[1].assessment.status, 'supported')
+        self.assertEqual(picker.rows[0].assessment.status, 'conflict')
         page = self.run_request(model, 'catalogue', None, offset=2)
-        self.assertEqual([r.target for r in page.rows], ['4.4.0'])
+        self.assertEqual([r.target for r in page.rows], ['4.5.0'])
+        self.assertEqual(page.rows[0].assessment.status, 'conflict')
         with self.assertRaises(ValueError):
             model.request('catalogue', limit=MAX_PICKER_ROWS + 1)
         model = TargetModel(replace(self.context, postgres='12.0'),
@@ -286,6 +313,36 @@ class TargetModelTests(unittest.TestCase):
         result = self.run_request(model)
         self.assertEqual(model.selection.netbox, model.installed.netbox)
         self.assertTrue(any('Official NetBox' in note for note in result.warnings))
+
+    def test_discovery_events_publish_inventory_before_release_lookup(self):
+        events = []
+        def notify(task, state, context):
+            events.append((task, state, context))
+        def releases():
+            self.assertEqual(events[-2][:2], ('inventory', 'done'))
+            self.assertEqual(events[-2][2].plugins, self.context.plugins)
+            self.assertEqual(events[-1][:2], ('releases', 'running'))
+            raise UpgradeExecutionError('remote unavailable')
+        with (patch('netbox_ops.upgrade_targets.discover_context', return_value=self.context),
+              patch('netbox_ops.upgrade_targets.official_tags', side_effect=releases)):
+            context = discover_target_context(Mock(), progress=notify)
+        self.assertEqual(context.tags, ())
+        self.assertEqual([event[:2] for event in events],
+                         [('inventory', 'running'), ('inventory', 'done'),
+                          ('releases', 'running'), ('releases', 'failed')])
+
+    def test_discovery_cancellation_before_remote_lookup(self):
+        from concurrent.futures import CancelledError
+
+        cancelled = False
+        def notify(task, state, context):
+            nonlocal cancelled
+            cancelled = task == 'inventory' and state == 'done'
+        with (patch('netbox_ops.upgrade_targets.discover_context', return_value=self.context),
+              patch('netbox_ops.upgrade_targets.official_tags') as releases):
+            with self.assertRaises(CancelledError):
+                discover_target_context(Mock(), progress=notify, cancelled=lambda: cancelled)
+        releases.assert_not_called()
 
     def test_preliminary_support_never_changes_full_compatibility_contract(self):
         meta = self.fetch('demo-plugin', '2.0.0')

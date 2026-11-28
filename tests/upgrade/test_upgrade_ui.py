@@ -306,15 +306,217 @@ class UpgradeTuiTests(InterfaceFixture):
                     screen = menu.stdscr
                     frame = screen.frames[-1]
                     header = ' '.join(text for y, _, text, _ in frame if y == 4)
-                    for key in ('component', 'current', 'target', 'status'):
+                    self.assertIn(menu.t('ut_group_core'), header)
+                    self.assertNotIn(menu.t('ut_col_component'), header)
+                    for key in ('current', 'target', 'status'):
                         self.assertIn(menu.t('ut_col_' + key), header)
                     self.assertIn('*4.4.2', ' '.join(text for _, _, text, _ in frame))
                     self.assertNotIn('django', ' '.join(text for _, _, text, _ in frame))
                     self.assertTrue(any(attr == curses.A_REVERSE for _, _, _, attr in frame))
                     self.assertEqual(screen.wait_ms, -1)
 
+    def test_grouped_dashboard_uses_content_width_and_keeps_group_navigation(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(dimensions=(45, 140), language=language)
+            rows = (TargetRow(None, '4.4.0', '4.4.2', TargetAssessment('supported', 'verified')),
+                    TargetRow('example-plugin', '1.0.0', '2.0.0',
+                              TargetAssessment('warning', 'verified')))
+            with patch.object(dashboard, '_rows', return_value=rows):
+                dashboard._draw()
+                frame = menu.stdscr.frames[-1]
+                heading = next(y for y, _, text, _ in frame if text == menu.t('ut_group_plugins'))
+                netbox = next(y for y, _, text, _ in frame if text == '  NetBox')
+                plugin = next(y for y, _, text, _ in frame if text == '  example-plugin')
+                self.assertEqual((heading, plugin), (netbox + 2, netbox + 3))
+                counts = next(y for y, _, text, _ in frame if menu.t('ut_counts', count=2, changed=2) in text)
+                self.assertEqual(counts, plugin + 1)
+                self.assertTrue(any(y == netbox and attr == curses.A_REVERSE and len(text) < 100
+                                    for y, _, text, attr in frame))
+                self.assertLess(next(y for y, _, text, _ in frame if text == menu.t('ut_operations')), 15)
+                menu.stdscr.dimensions = (16, 50)
+                dashboard.cursor = 1
+                dashboard._draw()
+                frame = menu.stdscr.frames[-1]
+                self.assertTrue(any(y == 4 and text == menu.t('ut_group_plugins') for y, _, text, _ in frame))
+                self.assertTrue(any(text.strip().startswith('example') for _, _, text, _ in frame))
+                self.assertEqual(dashboard.cursor, 1)
+                self.assertTrue(any(menu.t('ut_operations') in text for _, _, text, _ in frame))
+
+    def test_dashboard_scrolls_many_plugins_without_selecting_group_labels(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        dashboard, menu = self._dashboard(dimensions=(24, 100))
+        rows = tuple(TargetRow(None if i == 0 else f'plugin-{i:02}', '1.0.0', '2.0.0',
+                               TargetAssessment('unchecked', 'unknown')) for i in range(25))
+        with patch.object(dashboard, '_rows', return_value=rows):
+            dashboard.cursor = 24
+            dashboard._draw()
+            frame = menu.stdscr.frames[-1]
+            self.assertTrue(any('plugin-24' in text for _, _, text, _ in frame))
+            self.assertTrue(any(y == 4 and text == menu.t('ut_group_plugins') for y, _, text, _ in frame))
+            dashboard.cursor = 0
+            dashboard._draw()
+            self.assertEqual(dashboard.scroll, 0)
+            self.assertTrue(any(text == '  NetBox' for _, _, text, _ in menu.stdscr.frames[-1]))
+            with patch.object(dashboard, '_rows', return_value=rows[:1]):
+                dashboard._draw()
+                self.assertFalse(any(text == menu.t('ut_group_plugins')
+                                     for _, _, text, _ in menu.stdscr.frames[-1]))
+
+    def test_initial_discovery_panel_keeps_unknown_versions_and_disabled_actions(self):
+        from concurrent.futures import Future
+
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    dashboard, menu = self._dashboard(dimensions=dimensions, language=language)
+                    dashboard.model = None
+                    pool = Mock()
+                    pool.submit.return_value = Future()
+                    dashboard._discover(pool, 'suggest')
+                    self.assertTrue(dashboard._draw())
+                    frame = menu.stdscr.frames[-1]
+                    self.assertTrue(any(text == menu.t('ut_discovery_heading')
+                                        for _, _, text, _ in frame))
+                    self.assertNotIn('0/0', ' '.join(text for _, _, text, _ in frame))
+                    self.assertEqual(dashboard._rows()[0].current, '?')
+                    self.assertEqual(dashboard._rows()[0].target, '?')
+                    self.assertFalse(any(dashboard._enabled(action)
+                                         for action in ('suggest', 'reset', 'validate', 'refresh', 'execute')))
+                    dashboard._discovery_event('inventory', 'done', self.context)
+                    dashboard._discovery_event('releases', 'running', None)
+                    dashboard._poll(pool)
+                    self.assertEqual(dashboard._rows()[0].current, '4.4.0')
+                    self.assertEqual(dashboard._rows()[0].target, '?')
+                    self.assertEqual(dashboard._rows()[1].component, 'example-plugin')
+                    self.assertEqual(dashboard._discovery_states['inventory'], 'done')
+                    self.assertEqual(dashboard._discovery_states['releases'], 'running')
+
+    def test_discovery_omits_not_applicable_and_leaves_pending_status_blank(self):
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard._discovery_states = {'inventory': 'done', 'releases': 'running',
+                                           'suggestions': 'not_applicable', 'assessment': 'pending'}
+            for compact in (False, True):
+                lines = dashboard._discovery_lines(44 if compact else 100, compact=compact)
+                text = ' '.join(line for line, _ in lines)
+                self.assertNotIn('N/A', text)
+                self.assertNotIn(menu.t('nbo_task_state_pending'), text)
+                self.assertNotIn(menu.t('ut_discovery_short_suggestions' if compact
+                                       else 'ut_discovery_suggestions'), text)
+                self.assertIn(menu.t('ut_discovery_short_assessment' if compact
+                                     else 'ut_discovery_assessment'), text)
+                self.assertIn(menu.t('nbo_task_state_running'), text)
+                self.assertEqual(text.count('○'), 1)
+                self.assertEqual(text.count('●'), 2)
+            self.assertEqual(dashboard._discovery_states['suggestions'], 'not_applicable')
+
+    def test_failed_inventory_refresh_disables_stale_targets_and_allows_retry(self):
+        from concurrent.futures import Future
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        dashboard.plan = self.build()
+        dashboard.plan_selection = dashboard.model.selection
+        old = dashboard.model
+        pool = Mock()
+        future = Future()
+        pool.submit.return_value = future
+        dashboard._discover(pool)
+        future.set_exception(UpgradeExecutionError('inventory unavailable'))
+        dashboard._poll(pool)
+        self.assertIs(dashboard.model, old)
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._inventory_valid)
+        self.assertEqual(dashboard._rows()[0].current, '?')
+        self.assertEqual(dashboard._discovery_states['inventory'], 'failed')
+        self.assertTrue(dashboard._enabled('refresh'))
+        self.assertFalse(dashboard._enabled('validate'))
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertTrue(dashboard._draw())
+        self.assertTrue(any(menu.t('ut_discovery_failed_retry') in text
+                            for _, _, text, _ in menu.stdscr.frames[-1]))
+        self.assertFalse(any(text == menu.t('ut_discovery_heading')
+                             for _, _, text, _ in menu.stdscr.frames[-1]))
+
+    def test_completed_discovery_returns_to_plan_even_when_partial(self):
+        from concurrent.futures import Future
+        from netbox_ops.upgrade_targets import TargetSnapshot
+
+        dashboard, menu = self._dashboard()
+        for partial in (False, True):
+            request = dashboard.model.request('assess')
+            result = TargetSnapshot(request, request.selection, dashboard._rows(), 'supported', (), partial)
+            dashboard._discovery_states = {'inventory': 'done', 'releases': 'done',
+                                           'suggestions': 'not_applicable', 'assessment': 'done'}
+            dashboard.future = Future()
+            dashboard.future.set_result(result)
+            dashboard._poll()
+            self.assertEqual(bool(dashboard._discovery_states), partial)
+            if partial:
+                self.assertEqual(dashboard._discovery_states['assessment'], 'partial')
+            self.assertTrue(dashboard._draw())
+            self.assertFalse(any(text == menu.t('ut_discovery_heading')
+                                 for _, _, text, _ in menu.stdscr.frames[-1]))
+            if partial:
+                self.assertIn((menu.t('ut_discovery_incomplete_retry'), 'warning'),
+                              dashboard._overview_lines())
+            self.assertFalse(dashboard._enabled('execute'))
+
+    def test_picker_scrolls_continuous_catalogue_and_keeps_status_colors(self):
+        from concurrent.futures import Future
+        from netbox_ops.upgrade_targets import TargetModel
+
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                with self.subTest(language=language, dimensions=dimensions):
+                    dashboard, menu = self._dashboard(
+                        [curses.KEY_END, curses.KEY_HOME, curses.KEY_NPAGE, 27],
+                        dimensions, language)
+                    model = dashboard.model
+                    context = replace(self.context, tags=tuple(f'v4.4.{n}' for n in range(32)))
+                    dashboard.model = TargetModel(context, fetcher=model._fetcher,
+                                                  docs_fetcher=model._docs_fetcher)
+                    menu.colors.update(selected=101, warning=102, failure=103, muted=104, title=105)
+
+                    def submit(fn, *args, **kwargs):
+                        future = Future()
+                        future.set_result(fn(*args, **kwargs))
+                        return future
+
+                    pool = Mock()
+                    pool.submit.side_effect = submit
+                    self.assertIsNone(dashboard._picker(None, pool))
+                    frames = menu.stdscr.frames
+                    self.assertTrue(any('32/32' in text for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any('4.4.31' in text for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any('4.4.1' == text.strip() for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any(menu.t('ut_keep_installed_short') in text
+                                        or menu.t('ut_keep_installed') in text
+                                        for frame in frames for _, _, text, _ in frame))
+                    self.assertTrue(any(y == dimensions[0] - 1 and text == 'F5' and attr == 105
+                                        for frame in frames for y, _, text, attr in frame))
+                    self.assertTrue(all(len(text) < dimensions[1] - 10
+                                        for frame in frames for _, _, text, attr in frame if attr == 101))
+                    self.assertGreaterEqual(pool.submit.call_count, 3)
+
+    def test_picker_notes_prioritize_real_blocking_reason(self):
+        from netbox_ops.plugin_compatibility import CompatibilityEvidence
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        dashboard, _ = self._dashboard()
+        assessment = TargetAssessment('conflict', 'verified', (
+            CompatibilityEvidence('PyPI', 'metadata missing', 'unknown'),
+            CompatibilityEvidence('Python', 'requires >=3.14', 'blocks'),
+        ))
+        row = TargetRow(None, '4.4.0', '4.4.2', assessment)
+        notes = dashboard._picker_notes(row, '4.4.2', None, '4.4.2')
+        self.assertTrue(notes.startswith('Python: requires >=3.14'))
+        self.assertIn(dashboard.t('ut_note_latest'), notes)
+
     def test_dashboard_picker_cancel_and_confirm_preserve_other_targets(self):
-        for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, 10], '4.4.1')):
+        for picker_keys, expected in (([27], '4.4.2'), ([curses.KEY_DOWN, curses.KEY_DOWN, 10], '4.4.1'), ([10], '4.4.0')):
             with self.subTest(expected=expected):
                 dashboard, menu = self._dashboard([10, *picker_keys, 27], (16, 50))
                 self._run_dashboard(dashboard, menu)
@@ -332,6 +534,55 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertIsNone(dashboard.plan)
         self.assertIn(menu.t('ut_no_changes'), [line for line, _ in dashboard._plan_lines()])
 
+    def test_noop_presentation_does_not_change_compatibility_or_hide_real_conflict(self):
+        from netbox_ops.plugin_compatibility import CompatibilityEvidence
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow, TargetSnapshot
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard.model.reset()
+            request = dashboard.model.request('assess')
+            warning = TargetAssessment('warning', 'installed', (
+                CompatibilityEvidence('PyPI', 'Release metadata unavailable', 'unknown'),
+                CompatibilityEvidence('PyPI Requires-Dist', 'No explicit NetBox distribution dependency', 'warns'),
+            ))
+            rows = tuple(TargetRow(row.component, row.current, row.current, warning)
+                         for row in dashboard._rows())
+            dashboard.snapshot = TargetSnapshot(request, request.selection, rows, 'warning', (), False)
+            for dimensions in ((16, 50), (45, 160)):
+                menu.stdscr.dimensions = dimensions
+                dashboard._draw()
+                self.assertIn(menu.t('ut_no_changes'), ' '.join(text for _, _, text, _ in menu.stdscr.frames[-1]))
+                for row in rows:
+                    self.assertEqual(dashboard._row_status(row), (menu.t('ut_unchanged'), 'muted'))
+                    self.assertEqual(row.assessment.status, 'warning')
+                    self.assertIn((menu.t('ut_evidence_hint'), 'muted'),
+                                  dashboard._compact_component_lines(row, 55))
+            conflict = replace(warning, status='conflict', evidence=(
+                CompatibilityEvidence('PluginConfig', 'Known incompatibility', 'blocks'),))
+            blocked = replace(rows[1], assessment=conflict)
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(replace(rows[0], assessment=conflict), blocked),
+                                         status='conflict')
+            self.assertEqual(dashboard._row_status(blocked)[1], 'failure')
+            self.assertTrue(any(style == 'failure' and 'Known incompatibility' in line
+                                for line, style in dashboard._overview_lines()))
+            prereq = SimpleNamespace(status='unknown')
+            core = replace(rows[0], assessment=replace(warning, prerequisites=(('4.4.0', prereq),)))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(core, rows[1]), status='warning')
+            self.assertEqual(dashboard._row_status(core)[1], 'warning')
+            advisory = replace(rows[1], assessment=replace(warning, evidence=(
+                CompatibilityEvidence('publisher', 'Outside declared range', 'warns'),)))
+            dashboard.snapshot = replace(dashboard.snapshot, rows=(rows[0], advisory))
+            self.assertEqual(dashboard._row_status(advisory)[1], 'warning')
+            self.assertEqual(dashboard._row_status(rows[0])[1], 'warning')
+            dashboard.snapshot = replace(dashboard.snapshot, rows=rows, status='warning')
+            dashboard.model.selection = replace(dashboard.model.selection, netbox='4.4.2')
+            self.assertEqual(dashboard._row_status(rows[1])[1], 'warning')
+            dashboard.model.selection = replace(dashboard.model.installed,
+                                                plugins=(('example-plugin', '2.0.0'),))
+            self.assertEqual(dashboard._row_status(rows[0])[1], 'warning')
+            self.assertFalse(dashboard._enabled('execute'))
+
     def test_dashboard_stale_worker_result_does_not_replace_reset_intent(self):
         from concurrent.futures import Future
 
@@ -343,6 +594,9 @@ class UpgradeTuiTests(InterfaceFixture):
         dashboard._poll()
         self.assertEqual(dashboard.model.selection, dashboard.model.installed)
         self.assertIsNone(dashboard.snapshot)
+        self.assertEqual(dashboard._discovery_states['assessment'], 'not_run')
+        self.assertTrue(dashboard.error)
+        self.assertFalse(dashboard._enabled('execute'))
 
     def test_dashboard_validates_exact_modes_and_disables_stale_or_blocked_plan(self):
         from netbox_ops.upgrade_targets import TargetSelection
@@ -454,12 +708,21 @@ class UpgradeTuiTests(InterfaceFixture):
         execute.assert_not_called()
 
     def test_alternative_selection_rebuilds_plan(self):
-        dashboard, menu = self._dashboard([10])
+        dashboard, menu = self._dashboard([curses.KEY_DOWN, 10])
         dashboard.model.reset()
         plan = self.build('plugins', None, {'example-plugin': '2.0.0'})
         with (patch('netbox_ops.upgrade_dashboard.make_plan', return_value=plan) as build,
               patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock()))):
-            target = dashboard._picker('example-plugin')
+            from concurrent.futures import Future
+
+            def submit(fn, *args, **kwargs):
+                future = Future()
+                future.set_result(fn(*args, **kwargs))
+                return future
+
+            pool = Mock()
+            pool.submit.side_effect = submit
+            target = dashboard._picker('example-plugin', pool)
             self.assertEqual(target, '2.0.0')
             dashboard.model.select('example-plugin', target)
             dashboard._validate()
@@ -515,16 +778,244 @@ class UpgradeTuiTests(InterfaceFixture):
               patch('netbox_ops.upgrade_ui.execute_plan') as execute):
             dashboard._validate()
             self.assertTrue(dashboard._enabled('execute'))
-            self.assertTrue(dashboard._discover())
-            result = dashboard.model.evaluate(dashboard.model.request('assess'))
-            self.assertTrue(dashboard.model.accept(result))
-            dashboard.snapshot = result
-        discover.assert_called_once_with(self.cfg)
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                dashboard._discover(pool)
+                self.assertFalse(dashboard._enabled('execute'))
+                dashboard.future.result()
+                dashboard._poll(pool)
+                if dashboard.future is not None:
+                    dashboard.future.result()
+                    dashboard._poll(pool)
+            result = dashboard.snapshot
+        discover.assert_called_once()
+        self.assertEqual(discover.call_args.args, (self.cfg,))
         self.assertEqual(dashboard.model.selection.netbox, '4.4.2')
         self.assertEqual(result.rows[0].assessment.availability, 'unavailable')
         self.assertIsNone(dashboard.plan)
         self.assertFalse(dashboard._enabled('execute'))
         execute.assert_not_called()
+
+    def test_contextual_pin_review_filters_manual_blockers_and_invalidates_plan(self):
+        from netbox_ops.plugin_compatibility import DependencyPreflight
+        from netbox_ops.upgrade_plan import LocalRequirementDiagnostic, StageDependencyReview
+
+        dashboard, menu = self._dashboard()
+        plan = self.build()
+        items = (LocalRequirementDiagnostic('example-plugin', 'example-plugin', '1.0.0',
+                                            '4.4.2', 'unpinned', 'review-pin'),
+                 LocalRequirementDiagnostic('django', 'django==5.2.6', '5.2.6',
+                                            '4.4.2', 'overlap', 'manual-review'))
+        report = StageDependencyReview('4.4.2', 'b' * 40, 'hash', (),
+                                       DependencyPreflight('not-run', 'Blocked'), (), 'not-required',
+                                       local_diagnostics=items)
+        dashboard.plan = replace(plan, blockers=('Review requirements',), dependency_reviews=(report,))
+        dashboard.plan_selection = dashboard.model.selection
+        self.assertEqual(dashboard._correctable_pins(), {'example-plugin'})
+        self.assertIn('pins', dashboard._actions())
+        self.assertTrue(dashboard._enabled('pins'))
+        inventory = replace(self.inventory, local_pin_names=('example-plugin',))
+        pool = Mock()
+        with (patch('netbox_ops.upgrade_dashboard.inventory_plugins', return_value=inventory) as read,
+              patch.object(menu, '_review_plugin_pins', return_value=False) as review,
+              patch.object(dashboard, '_discover') as discover):
+            dashboard._review_plan_pins(pool)
+            review.assert_called_once_with(dashboard.title, inventory, eligible={'example-plugin'})
+            read.assert_called_once_with(self.installation, local_pin_names=('example-plugin',))
+            discover.assert_not_called()
+            self.assertIsNotNone(dashboard.plan)
+            review.return_value = True
+            dashboard._review_plan_pins(pool)
+            discover.assert_called_once_with(pool)
+            self.assertTrue(dashboard._revalidate_after_pins)
+        self.assertFalse(dashboard._enabled('execute'))
+
+    def test_ltree_contextual_action_requires_verified_admin_and_explicit_confirmation(self):
+        from netbox_ops.plugin_compatibility import DependencyPreflight
+        from netbox_ops.upgrade_ltree import LtreeInstallReview
+        from netbox_ops.upgrade_plan import StageDependencyReview
+        from netbox_ops.upgrade_runtime import LtreeEvidence
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        report = StageDependencyReview('4.7.3', 'b' * 40, 'hash', (),
+                                       DependencyPreflight('not-run', 'Blocked'), (), 'permission',
+                                       ltree_details=('role lacks permission',), ltree_identity='db',
+                                       ltree_admin_port=5432)
+        plan = replace(self.build(), blockers=('ltree permission',), dependency_reviews=(report,))
+        dashboard.plan = plan
+        dashboard.plan_selection = dashboard.model.selection
+        self.assertTrue(dashboard._enabled('ltree'))
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertIn('ltree', dashboard._actions())
+        review = LtreeInstallReview(self.installation,
+                                   LtreeEvidence('permission', report.ltree_details, 'db', 5432),
+                                   'netbox', Path('/backup'), 'fingerprint')
+        pool = Mock()
+        with (patch('netbox_ops.upgrade_ltree.build_ltree_review', return_value=review),
+              patch('netbox_ops.upgrade_ltree.apply_ltree_review', return_value=Path('/backup/db.dump')) as apply,
+              patch.object(menu, '_upgrade_job', side_effect=lambda title, worker: worker(Mock())),
+              patch.object(menu, '_show_lines', return_value=True),
+              patch.object(menu, '_confirm_token', return_value=False) as confirm,
+              patch.object(dashboard, '_discover') as discover):
+            dashboard._review_ltree(pool)
+            apply.assert_not_called()
+            discover.assert_not_called()
+            self.assertIs(dashboard.plan, plan)
+            confirm.return_value = True
+            dashboard._review_ltree(pool)
+            self.assertEqual(confirm.call_args.args[2], 'INSTALL LTREE')
+            apply.assert_called_once()
+            discover.assert_called_once_with(pool)
+            self.assertIsNone(dashboard.plan)
+            self.assertTrue(dashboard._revalidate_after_pins)
+        dashboard.plan = replace(plan, dependency_reviews=(replace(report, ltree_admin_port=None),))
+        dashboard.plan_selection = dashboard.model.selection
+        self.assertNotIn('ltree', dashboard._actions())
+        self.assertFalse(dashboard._enabled('ltree'))
+
+    def test_plan_review_prioritizes_blockers_and_keeps_evidence_separate(self):
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                dashboard, menu = self._dashboard(dimensions=dimensions, language=language)
+                dashboard.plan = replace(self.build(), blockers=('Incompatible plugin',),
+                                         warnings=('Advisory range',))
+                dashboard.plan_selection = dashboard.model.selection
+                self.assertTrue(dashboard._plan_matches())
+                lines = dashboard._plan_lines()
+                self.assertEqual(lines[0][1], 'failure')
+                self.assertLess(lines.index(('Incompatible plugin', 'failure')),
+                                lines.index(('Advisory range', 'warning')))
+                self.assertFalse(dashboard._enabled('execute'))
+                self.assertTrue(dashboard._draw())
+                if dimensions[1] >= 100:
+                    count_line = next(text for _, _, text, _ in menu.stdscr.frames[-1]
+                                      if menu.t('ut_counts', count=2, changed=1) in text)
+                    self.assertIn(menu.t('ut_details_key'), count_line)
+                    self.assertNotIn(menu.t('ut_preliminary_short'), count_line)
+                with patch.object(menu, '_show_lines', return_value=False) as show:
+                    dashboard._details(dashboard._rows()[0])
+                    overview = show.call_args.args[1]
+                    self.assertIn(('Incompatible plugin', 'failure'), overview)
+                    self.assertNotIn(dashboard.plan.fingerprint, str(overview))
+                    dashboard._evidence(dashboard._rows()[0])
+                    self.assertIn(dashboard.plan.fingerprint, str(show.call_args.args[1]))
+                dashboard.model.reset()
+                self.assertFalse(dashboard._enabled('execute'))
+                self.assertNotIn(('Incompatible plugin', 'failure'), dashboard._plan_lines())
+
+    def test_adaptive_dashboard_reserves_operations_readiness_and_primary_blocker(self):
+        from netbox_ops.upgrade_targets import TargetAssessment, TargetRow
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(language=language)
+            dashboard.plan = replace(self.build(), blockers=('Incompatible plugin: exact runtime gate',))
+            dashboard.plan_selection = dashboard.model.selection
+            rows = tuple(TargetRow(None if i == 0 else f'plugin-{i:02}-very-long-name',
+                                   '1.0.0', '2.0.0', TargetAssessment('warning', 'verified'))
+                         for i in range(25))
+            with patch.object(dashboard, '_rows', return_value=rows):
+                dashboard.cursor = 24
+                for dimensions in ((45, 160), (30, 120), (24, 80), (16, 50), (45, 160)):
+                    menu.stdscr.dimensions = dimensions
+                    self.assertTrue(dashboard._draw())
+                    frame = menu.stdscr.frames[-1]
+                    ops = next(y for y, _, text, _ in frame if text == menu.t('ut_operations'))
+                    readiness = next(y for y, _, text, _ in frame if menu.t('upgrade_status_blocked') in text)
+                    self.assertLess(ops, readiness)
+                    self.assertLess(readiness, dimensions[0] - 2)
+                    self.assertTrue(any('Incompatible plugin:' in text for _, _, text, _ in frame))
+                    self.assertTrue(any('plugin-24' in text for _, _, text, _ in frame))
+                    self.assertEqual(dashboard.cursor, 24)
+                    self.assertFalse(dashboard._enabled('execute'))
+
+    def test_real_curses_dashboard_capture(self):
+        import errno
+        import json
+        import os
+        import pty
+        import select
+        import subprocess
+        import sys
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for language, monochrome in (('en', False), ('pt', True)):
+                with self.subTest(language=language, monochrome=monochrome):
+                    output = Path(tmp) / f'{language}.json'
+                    master, slave = pty.openpty()
+                    env = dict(os.environ, TERM='xterm-256color', LINES='45', COLUMNS='160')
+                    env.pop('NO_COLOR', None)
+                    if monochrome:
+                        env['NO_COLOR'] = '1'
+                    proc = None
+                    terminal_output = bytearray()
+                    try:
+                        proc = subprocess.Popen(
+                            [sys.executable, '-m', 'tests.upgrade.terminal_dashboard_capture',
+                             str(output), language], stdin=slave, stdout=slave, stderr=slave, env=env)
+                        os.close(slave)
+                        slave = None
+                        deadline = time.monotonic() + 20
+                        while proc.poll() is None:
+                            self.assertLess(time.monotonic(), deadline, 'curses capture timed out')
+                            if select.select([master], [], [], 0.1)[0]:
+                                try:
+                                    terminal_output.extend(os.read(master, 65536))
+                                except OSError as exc:
+                                    if exc.errno != errno.EIO:
+                                        raise
+                        self.assertEqual(proc.returncode, 0, terminal_output.decode(errors='replace'))
+                    finally:
+                        if proc is not None and proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+                        if slave is not None:
+                            os.close(slave)
+                        os.close(master)
+                    frames = json.loads(output.read_text())
+                    t = Translator(language)
+                    self.assertEqual([(f['height'], f['width']) for f in frames],
+                                     [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
+                                      (30, 120), (16, 50)])
+                    for frame in frames:
+                        self.assertEqual(frame['color'], not monochrome)
+                        lines = frame['lines']
+                        operations = next(i for i, line in enumerate(lines) if t('ut_operations') in line)
+                        if frame['scenario'] == 'blocked':
+                            readiness = next(i for i, line in enumerate(lines)
+                                             if t('upgrade_status_blocked') in line)
+                            self.assertTrue(any('Incompatible plugin:' in line for line in lines))
+                            self.assertTrue(any('plugin-24' in line for line in lines))
+                        else:
+                            readiness = next(i for i, line in enumerate(lines) if t('ut_no_changes') in line)
+                            self.assertTrue(any(t('ut_unchanged') in line for line in lines))
+                            self.assertFalse(any('Warning' in line or 'Aviso' in line for line in lines))
+                        self.assertLess(operations, readiness)
+                        self.assertLess(readiness, frame['height'] - 2)
+                        if frame['width'] in (50, 80, 120, 160):
+                            print(f"Actual curses capture: {language} {frame['width']}x{frame['height']}"
+                                  f" color={frame['color']} scenario={frame['scenario']}\n" + '\n'.join(lines))
+
+    def test_dashboard_validation_stays_on_screen_and_rejects_stale_result(self):
+        from concurrent.futures import Future
+
+        dashboard, menu = self._dashboard(dimensions=(16, 50))
+        pool = Mock()
+        future = Future()
+        pool.submit.return_value = future
+        dashboard._validate(pool)
+        self.assertIs(dashboard.future, future)
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertTrue(dashboard._draw())
+        self.assertTrue(any(menu.t('ut_validating') in text for _, _, text, _ in menu.stdscr.frames[-1]))
+        dashboard.model.reset()
+        future.set_result(self.build())
+        dashboard._poll(pool)
+        self.assertIsNone(dashboard.plan)
+        self.assertFalse(dashboard._enabled('execute'))
+        self.assertEqual(dashboard.error, menu.t('ut_plan_mismatch'))
 
     def test_failed_recalculation_does_not_reuse_previous_review(self):
         dashboard, menu = self._dashboard()

@@ -76,7 +76,17 @@ class RequirementOverlap:
     name: str
     local_pin: str
     core_pin: str
-    status: str  # redundant, conflict, ambiguous
+    status: str  # redundant, review, conflict, ambiguous
+
+
+@dataclass(frozen=True)
+class LocalRequirementDiagnostic:
+    name: str
+    declaration: str
+    installed: str | None
+    stage: str
+    reason: str  # unpinned | mismatched | missing | ambiguous | overlap
+    action: str  # review-pin | manual-review
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,10 @@ class StageDependencyReview:
     changes: tuple[tuple[str, str | None, str], ...]
     ltree: str
     overlaps: tuple[RequirementOverlap, ...] = ()
+    local_diagnostics: tuple[LocalRequirementDiagnostic, ...] = ()
+    ltree_details: tuple[str, ...] = ()
+    ltree_identity: str = ''
+    ltree_admin_port: int | None = None
 
 
 @dataclass(frozen=True)
@@ -265,8 +279,10 @@ def _fingerprint(plan: UpgradePlan) -> str:
         'blockers': plan.blockers,
         'dependency_reviews': [(r.version, r.commit, r.core_hash, r.exact_pins,
                                 r.resolution.status, r.resolution.checked_core, r.resolution.packages,
-                                r.resolution.detail, r.changes, r.ltree,
-                                [(o.name, o.local_pin, o.core_pin, o.status) for o in r.overlaps])
+                                r.resolution.detail, r.changes, r.ltree, r.ltree_details, r.ltree_identity, r.ltree_admin_port,
+                                [(o.name, o.local_pin, o.core_pin, o.status) for o in r.overlaps],
+                                [(d.name, d.declaration, d.installed, d.stage, d.reason, d.action)
+                                 for d in r.local_diagnostics])
                                for r in plan.dependency_reviews],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()

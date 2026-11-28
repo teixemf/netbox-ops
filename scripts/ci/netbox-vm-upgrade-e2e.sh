@@ -32,6 +32,10 @@ old_plugin=2.7.0
 new_plugin=2.7.1
 if [[ "$scenario" == cross-minor ]]; then
   old=4.4.10
+  plugin=netbox-reorder-rack
+  old_plugin=1.1.4
+  new_plugin=1.1.5
+  NEEDRESTART_MODE=l apt-get install -y --no-install-recommends libldap-dev libsasl2-dev libssl-dev python3.12-dev
 fi
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
@@ -52,6 +56,10 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
   printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
   printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
+elif [[ "$scenario" == cross-minor ]]; then
+  printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> "$root/netbox/netbox/configuration.py"
+  printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
+  printf '%s\n' 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0' >> "$root/local_requirements.txt"
 else
   printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
 fi
@@ -81,6 +89,9 @@ runuser -u postgres -- createdb --owner=netbox netbox
 # no fixture constraint, and executes the unmodified official script.
 if [[ "$old" == 4.7.2 || "$old" == 4.4.10 ]]; then
   printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
+  if [[ "$scenario" == cross-minor ]]; then
+    printf '%s\n' 'python-ldap==3.4.8' >> "$scratch/source-constraints.txt"
+  fi
   (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
 else
   (cd "$root" && PYTHON="$python" bash upgrade.sh)
@@ -100,6 +111,55 @@ wait_health() {
   return 1
 }
 wait_health "$old"
+if [[ "$scenario" == cross-minor ]]; then
+  # This disposable database has no ltree yet. Exercise both the denied
+  # migration role and the verified administrative path before the real
+  # native migration scenario. Never change roles in production code.
+  [[ $(runuser -u postgres -- psql -X -At -d netbox -c "SELECT count(*) FROM pg_extension WHERE extname='ltree'") == 0 ]]
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE netbox OWNER TO postgres'
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d netbox -c 'REVOKE CREATE ON DATABASE netbox FROM netbox; REVOKE CREATE ON SCHEMA public FROM PUBLIC, netbox; GRANT USAGE ON SCHEMA public TO netbox'
+  install -d -m 0700 "$scratch/ltree-backups"
+  python3 - "$scratch/ltree-backups" <<'PY'
+import sys
+from dataclasses import replace
+from pathlib import Path
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.config import load_config
+from netbox_ops.upgrade_execution import UpgradeExecutionError
+from netbox_ops.upgrade_ltree import build_ltree_review, apply_ltree_review
+
+cfg = replace(load_config(), backup_directory=Path(sys.argv[1]))
+review = build_ltree_review(cfg)
+assert review.evidence.status == 'permission', review.evidence
+assert review.fingerprint and review.evidence.admin_port, review.evidence
+try:
+    apply_ltree_review(cfg, review, 'wrong fingerprint')
+except UpgradeExecutionError:
+    pass
+else:
+    raise AssertionError('Unapproved ltree action accepted')
+assert not list(cfg.backup_directory.iterdir())
+assert build_ltree_review(cfg) == review
+backup = apply_ltree_review(cfg, review, review.fingerprint)
+assert backup.is_file()
+observed = build_ltree_review(cfg)
+assert observed.evidence.status == 'installed' and observed.fingerprint is None, observed
+try:
+    apply_ltree_review(cfg, review, review.fingerprint)
+except UpgradeExecutionError:
+    pass
+else:
+    raise AssertionError('Stale ltree approval accepted')
+print('PASS: real denied migration role, verified local administrative ltree installation and stale approval')
+PY
+  wait_health "$old"
+  # Restore the disposable fixture's initial owner/extension state so the
+  # unchanged upstream upgrade script must still exercise native creation.
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d netbox -c 'DROP EXTENSION ltree'
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE netbox OWNER TO netbox'
+  [[ $(runuser -u postgres -- psql -X -At -d netbox -c "SELECT count(*) FROM pg_extension WHERE extname='ltree'") == 0 ]]
+  wait_health "$old"
+fi
 (cd "$root/netbox" && runuser -u netbox -- "$root/venv/bin/python" manage.py shell -c \
   "from extras.models import Tag; Tag.objects.create(name='Upgrade CI',slug='upgrade-ci',color='123456')")
 media="$root/netbox/media/upgrade-ci.txt"
@@ -128,9 +188,65 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   echo 'PASS: additional local package excluded from plugin selection'
 fi
 
+# Reproduce the reported incompatible plugin upgrade and preserve a bare local dependency
+# against real published releases, before any maintenance begins.
+if [[ "$scenario" == cross-minor ]]; then
+  # The source fixture installed the exact version. Simulate the operator's
+  # existing bare declaration without changing any installed package.
+  sed -i -e 's/^tomli-w==1.2.0$/tomli-w  # preserve local intent/' \
+         -e 's/^django-auth-ldap==5.4.0$/django-auth-ldap  # preserve LDAP declaration/' "$root/local_requirements.txt"
+  for unit in netbox netbox-rq; do
+    systemctl show -p ActiveEnterTimestampMonotonic --value "$unit" > "$scratch/$unit"
+  done
+  python3 - "$target" "$plugin" "$new_plugin" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.config import load_config
+from netbox_ops.plugin_inventory import inventory_plugins
+from netbox_ops.upgrade_ui import discover_context, make_plan
+
+target, plugin, version = sys.argv[1:]
+cfg = load_config()
+context = discover_context(cfg)
+requirements = context.installation.root / 'local_requirements.txt'
+original = requirements.read_bytes()
+bad = make_plan(context, 'plugins', None, {plugin: version})
+assert not bad.can_execute
+check = next(c for stage in bad.stages for c in stage.plugin_checks if c.package == plugin)
+assert check.status == 'blocked', check
+assert any(e.status == 'blocks' and '4.7.0' in e.detail and 'PluginConfig' in e.detail
+           for e in check.evidence), check.evidence
+assert all(r.resolution.status == 'not-run' for r in bad.dependency_reviews)
+assert requirements.read_bytes() == original
+print('PASS: real reorder-rack release rejected on NetBox 4.4.x')
+
+inventory = inventory_plugins(context.installation, local_pin_names=('tomli-w', 'django-auth-ldap', 'python-ldap'))
+assert not any(p.package in ('tomli-w', 'django-auth-ldap', 'python-ldap') for p in inventory.proposals)
+plan = make_plan(context, 'stack', target, {plugin: version})
+assert plan.can_execute, plan.blockers
+assert all(r.resolution.status == 'passed' and r.resolution.checked_core for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('tomli-w') == '1.2.0' for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('django-auth-ldap') == '5.4.0' for r in plan.dependency_reviews)
+assert all(dict(r.resolution.packages).get('python-ldap') == '3.4.8' for r in plan.dependency_reviews)
+assert not any(d.name == 'tomli-w' for r in plan.dependency_reviews for d in r.local_diagnostics)
+assert any(r.ltree in ('installed', 'available') for r in plan.dependency_reviews)
+assert requirements.read_bytes() == original
+assert not list(Path('/var/lib/netbox-ops/pin-recovery').glob('pins-*/local_requirements.txt'))
+print('PASS: bare non-plugin requirement resolved at installed version without permanent pin')
+
+PY
+  [[ $(git -C "$root" rev-parse HEAD) == "$commit" && ! -e "$marker" ]]
+  [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
+  for unit in netbox netbox-rq; do
+    [[ $(systemctl show -p ActiveEnterTimestampMonotonic --value "$unit") == "$(cat "$scratch/$unit")" ]]
+  done
+  wait_health "$old"
+fi
+
 case "$scenario" in
   plugins) args=(upgrade plugins --plugin "$plugin==$new_plugin") ;;
-  combined) args=(upgrade stack --netbox-version "$target" --plugin "$plugin==$new_plugin") ;;
+  combined|cross-minor) args=(upgrade stack --netbox-version "$target" --plugin "$plugin==$new_plugin") ;;
   *) args=(upgrade netbox --version "$target") ;;
 esac
 "${cli[@]}" "${args[@]}" --details | tee "$scratch/plan"
@@ -163,6 +279,7 @@ import curses
 import sys
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, '/opt/netbox-ops')
@@ -171,12 +288,10 @@ from netbox_ops.i18n import Translator
 from netbox_ops.tui import CursesMenu
 from netbox_ops.upgrade_dashboard import UpgradeDashboard
 from netbox_ops.upgrade_plan import UpgradePlanError
-from netbox_ops.upgrade_targets import MAX_PICKER_ROWS, TargetModel, discover_target_context
 from tests.helpers.fake_screen import FakeScreen
 
 scenario, target, plugin, plugin_target, status_url = sys.argv[1:]
 cfg = load_config()
-context = discover_target_context(cfg)
 class TimedScreen(FakeScreen):
     def getch(self):
         # Match curses timeout behavior while backend work is in progress.
@@ -189,9 +304,33 @@ class TimedScreen(FakeScreen):
 screen = TimedScreen(dimensions=(34, 140))
 menu = CursesMenu(screen, Translator('en'))
 dashboard = UpgradeDashboard(menu)
-dashboard.cfg = cfg
-dashboard.model = model = TargetModel(context)
+# Exercise actual initial dashboard discovery, not a preloaded model.
+with ThreadPoolExecutor(max_workers=1) as pool:
+    dashboard._discover(pool, 'suggest')
+    assert dashboard._draw()
+    initial = screen.frames[-1]
+    assert any(text == menu.t('ut_discovery_heading') for _, _, text, _ in initial)
+    assert not dashboard._enabled('execute') and not dashboard._enabled('validate')
+    assert dashboard._rows()[0].current == '?' and dashboard._rows()[0].target == '?'
+    deadline = time.monotonic() + 180
+    while dashboard.future is not None:
+        dashboard._poll(pool)
+        dashboard._draw()
+        assert not dashboard._enabled('execute')
+        assert time.monotonic() < deadline, 'Initial discovery exceeded its test budget'
+        if dashboard.future is not None:
+            time.sleep(0.15)
+assert dashboard.model is not None and dashboard.snapshot is not None
+assert dashboard._inventory_valid and not dashboard.error
+model = dashboard.model
+context = model.context
+assert context.tags and model.installed.netbox == context.installation.version
+assert any(text == context.installation.version for frame in screen.frames for _, _, text, _ in frame)
+assert dashboard.plan is None
+print(f'PASS: {scenario} real dashboard initial discovery and execution gating')
 model.reset()
+# The fixture checks exact targets independently of preliminary suggestions.
+dashboard.snapshot = None
 assert not dashboard._enabled('validate') and not dashboard._enabled('execute')
 try:
     model.select('tomli-w', '1.2.0')
@@ -201,22 +340,15 @@ else:
     raise AssertionError('Non-plugin accepted as target')
 
 def choose(component, version):
-    # Find the pinned fixture version using the public paged catalogue,
-    # then drive the actual picker with navigation keys, not private caches.
-    offset = 0
-    while True:
-        result = model.evaluate(model.request('catalogue', component, offset=offset))
-        assert model.accept(result)
-        positions = [i for i, row in enumerate(result.rows) if row.target == version]
-        if positions:
-            screen.keys = iter([curses.KEY_NPAGE] * (offset // MAX_PICKER_ROWS)
-                               + [curses.KEY_DOWN] * positions[0] + [10])
-            assert dashboard._picker(component) == version
-            model.select(component, version)
-            return
-        offset += MAX_PICKER_ROWS
-        if offset >= result.total:
-            raise AssertionError('Pinned fixture release missing from catalogue')
+    # Enumerate the full eligible list without assessing every version.
+    result = model.evaluate(model.request('listing', component))
+    assert model.accept(result)
+    installed = model.installed.netbox if component is None else dict(model.installed.plugins)[component]
+    assert result.rows[0].target == installed
+    position = next(i for i, row in enumerate(result.rows) if row.target == version)
+    screen.keys = iter([curses.KEY_DOWN] * position + [10])
+    assert dashboard._picker(component) == version
+    model.select(component, version)
 
 if scenario != 'plugins':
     choose(None, target)
@@ -242,7 +374,9 @@ for language in ('en', 'pt'):
         assert dashboard._draw()
         frame = screen.frames[-1]
         headers = ' '.join(text for y, _, text, _ in frame if y == 4)
-        for name in ('component', 'current', 'target', 'status'):
+        assert menu.t('ut_group_core') in headers, headers
+        assert menu.t('ut_col_component') not in headers, headers
+        for name in ('current', 'target', 'status'):
             assert menu.t('ut_col_' + name) in headers, headers
         print(f'PASS: {scenario} dashboard {language} {size[1]}x{size[0]}: {headers}')
 
@@ -312,7 +446,7 @@ PY
     [[ $(systemctl is-active "$unit" || true) == inactive ]]
   done
 else
-  # Cross-minor retains the real CLI execution path. The three other
+  # Cross-minor exercises the real combined CLI execution path. The three other
   # success scenarios executed the exact reviewed plan through the TUI.
   if [[ "$scenario" == cross-minor ]]; then
     "${cli[@]}" "${args[@]}" --execute --approve-plan "$fingerprint" \
@@ -341,6 +475,34 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   "$root/venv/bin/python" -c 'import importlib.metadata as m; assert m.version("tomli-w")=="1.2.0"'
   "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]' "$plugin" "$new_plugin"
   curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
+fi
+if [[ "$scenario" == cross-minor ]]; then
+  grep -Fxq "$plugin==$new_plugin" "$root/local_requirements.txt"
+  grep -Fxq 'tomli-w  # preserve local intent' "$root/local_requirements.txt"
+  grep -Fxq 'django-auth-ldap  # preserve LDAP declaration' "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import ldap, importlib.metadata as m; assert m.version("django-auth-ldap")=="5.4.0"; assert m.version("python-ldap")=="3.4.8"'
+  echo 'PASS: unpinned LDAP declaration preserved and native LDAP module imports'
+  "$root/venv/bin/python" -c 'import importlib.metadata as m,sys; assert m.version(sys.argv[1])==sys.argv[2]; assert m.version("tomli-w")=="1.2.0"' "$plugin" "$new_plugin"
+  curl -fsS "$status_url" | python3 -c 'import sys,json; assert sys.argv[1] in json.load(sys.stdin)["plugins"].values()' "$new_plugin"
+  python3 - "$root" "$new_plugin" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/netbox-ops')
+from netbox_ops.plugin_compatibility import parse_plugin_config, fetch_pypi_json, fetch_release_declaration
+root, version = sys.argv[1:]
+# Compare the actual installed distribution's source to the exact-tag gate;
+# do not import the remote module into the operations process.
+source, = Path(root).glob('venv/lib/python*/site-packages/netbox_reorder_rack/__init__.py')
+installed = parse_plugin_config(source.read_text(), 'netbox_reorder_rack', version, 'https://pypi.org/project/netbox-reorder-rack/')
+metadata = fetch_pypi_json('netbox-reorder-rack', version)
+declaration = fetch_release_declaration(metadata, version)
+assert declaration is not None
+gate = declaration.runtime_gate or declaration
+assert installed is not None and installed.enforced and gate.enforced
+assert installed.min_netbox == gate.min_netbox == '4.7.0'
+assert installed.max_netbox == gate.max_netbox is None
+print('PASS: installed published plugin artifact matches exact-tag runtime gate')
+PY
 fi
 if [[ -n "$overlap_pin" ]]; then
   grep -Fxq "$overlap_pin" "$root/local_requirements.txt"
@@ -382,6 +544,8 @@ assert hashlib.sha256((directory / 'configuration.py').read_bytes()).hexdigest()
 assert record['stages'][-1] == target
 if scenario == 'cross-minor':
     assert old == '4.4.10' and record['stages'] == [target]
+    assert ['netbox-reorder-rack', '1.1.4'] in record['plugin_versions']
+    assert ['netbox-reorder-rack', '1.1.5'] in record['stage_commits'][-1]['plugin_versions']
 if scenario in ('plugins', 'combined'):
     assert ['netbox-inventory', '2.7.0'] in record['plugin_versions']
     assert ['netbox-inventory', '2.7.1'] in record['stage_commits'][-1]['plugin_versions']

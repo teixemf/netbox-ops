@@ -166,9 +166,18 @@ def summary_lines(plan: UpgradePlan, t: Translator, *, details: bool = False) ->
                        status=t('upgrade_dependency_' + review.resolution.status)))
         if review.ltree != 'not-required':
             lines.append(t('upgrade_ltree_status', status=t('upgrade_ltree_' + review.ltree)))
+            if review.ltree_admin_port is not None:
+                lines.append(t('ut_ltree_review_from_plan'))
+            if details:
+                lines.extend(review.ltree_details)
         for overlap in review.overlaps:
             lines.append(t('upgrade_overlap_' + overlap.status, name=overlap.name,
                            local=overlap.local_pin, core=overlap.core_pin))
+        for diagnostic in review.local_diagnostics:
+            lines.append(t('upgrade_local_diagnostic', name=diagnostic.name,
+                           declared=diagnostic.declaration, installed=diagnostic.installed or '?',
+                           stage=diagnostic.stage, reason=t('upgrade_local_' + diagnostic.reason),
+                           action=t('upgrade_local_action_' + diagnostic.action.replace('-', '_'))))
         for name, before, after in review.changes:
             lines.append(f'  {name}: {before or "-"} -> {after}')
         if details:
@@ -218,6 +227,9 @@ def run_cli(args, cfg: Configuration, t: Translator) -> int:
         if args.action == 'pins':
             from .plugin_pin_ui import run_pin_cli
             return run_pin_cli(args, t)
+        if args.action == 'ltree':
+            from .upgrade_ltree import run_ltree_cli
+            return run_ltree_cli(args, cfg, t)
         context = discover_context(cfg, releases=args.action not in ('plugins', 'versions'))
         if args.action in ('plugins', 'stack', 'versions', 'inspect') and context.plugin_selection_incomplete:
             print(t('upgrade_plugin_selection_warning'), file=sys.stderr)

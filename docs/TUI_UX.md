@@ -32,6 +32,19 @@ other views should adopt these conventions incrementally, not via a rewrite.
   Self-upgrade submission is not installation success; show the recorded
   outcome and recovery state on reopening.
 
+## Confirmation and input panels
+
+Use the same top-aligned content-sized panel for service and backup
+confirmation, upgrade/self-upgrade approval, pin review and URL/credential
+input. Keep the exact challenge in bold teal (bold in monochrome), the field
+and local validation message together. Preserve literal case-sensitive tokens,
+masked credentials, cancellation and the existing operation gates.
+Wrap complete summary and target text; scroll the review with arrows or
+Page Up/Down while keeping the input visible. Keep the leading warning
+visible when it fits, with a compact warning and scrollable full text on
+short screens. Resize clamps the review viewport. The normal keyboard footer
+remains separate from the input panel.
+
 ## Unified NetBox and plugin upgrades
 
 The main Upgrade NetBox entry opens a version-target dashboard. NetBox and
@@ -41,10 +54,12 @@ versions are prerequisites in details; self-upgrade remains separate.
 ```text
 NETBOX-OPS                    v0.6.1 EN
 Upgrade management
-AVAILABLE UPGRADES
-COMPONENT            CURRENT    TARGET     STATUS
-NetBox               4.4.9      *4.7.6     OK
-example-plugin       1.0.0      *2.0.0     Warning
+PLANNED CHANGES
+Core                 CURRENT    TARGET     STATUS
+  NetBox             4.4.9      *4.7.6     OK
+
+Plugins
+  example-plugin     1.0.0      *2.0.0     Warning
 Components: 2 | Changes: 2
 UPGRADE OPERATIONS
 [Suggest targets] [Reset targets] [Validate] [Refresh]
@@ -53,20 +68,102 @@ COMPONENT DETAILS                 UPGRADE PLAN
 example-plugin                    Plan: Not checked
 1.0.0 -> 2.0.0                   NetBox: 4.4.9 -> 4.7.6
 Warning                           Stages: ?
-Q Quit | Esc Back | Enter Open | Tab Actions | D Details | P Pins | F5 Refresh
+Q Quit | Esc Back | Enter Open | Tab Actions | D Plan | E Evidence | P Pins | F5 Refresh
 ```
 
+The aligned table sizes columns to content and groups Core and Plugins without
+selectable group headings. On short screens, the current group remains visible
+above the scroll window. Counts and operations follow the visible rows; details
+remain accessible with D, including complete prerequisite reasons and stage evidence.
 An asterisk marks a changed target, not a checkbox. Move with arrows/j/k,
 Home/End and Page Up/Down. Enter opens the version picker, D opens scrollable
-component evidence and the complete plan, P reviews local pins, and Tab or
-Shift+Tab switches between rows and actions. The paged picker assesses the
-candidate against the selected platform; D shows evidence and F5 retries the
-page. Enter selects, Esc cancels. Incomplete evidence is not approval.
+the plan overview, E opens complete technical evidence (including the fingerprint),
+P reviews local pins, and Tab or Shift+Tab switches between rows and actions.
+The plan overview prioritizes readiness, blockers and required actions ahead of
+warnings and stage validation. A contextual Review pins action appears only for
+correctable diagnostics. Unrun checks never appear as passed. On compact
+screens the readiness is retained in the overview and D provides scrollable
+untruncated reasons; the full execution review and approval are unchanged.
+
+The version picker opens with Keep installed version first, followed by all
+eligible discovered releases in descending order. It uses the available screen
+height and continuous navigation; Page Up/Down moves by the visible viewport.
+Listing and preliminary compatibility assessment run separately in one
+read-only worker. The selected batch is assessed using existing bounded
+requests, without replacing the picker or blocking navigation. Unassessed rows
+stay explicitly unchecked. Only the version cell highlights focus; status
+colours remain semantic and notes prioritize actual blocking/warning evidence.
+The installed plugin is assessed against the selected NetBox target too.
+Plugin evidence includes conventional exact-tag compatibility tables and,
+where publisher repository/package/module identity and a literal exported
+PluginConfig can be mapped, explicit runtime minimum/maximum NetBox versions.
+Out-of-range documentation is a warning; a recognized runtime gate or
+declared dependency conflict blocks the target. Tagged README tables are a
+fallback only; remote source is parsed, never imported or executed. If the
+publisher link is missing or stale, a bounded static fallback can check a
+small universal wheel and matching source distribution from the exact PyPI
+release. Both must match the published SHA256 digests and agree on the literal
+runtime limits. Downloads use the fixed PyPI file host without redirects; no
+installation, build hooks or on-disk archive extraction is performed. Other
+artifact layouts, missing, ambiguous or dynamic declarations remain uncertain. The core-aware dependency
+resolver and execution-time review remain mandatory.
+D opens complete evidence, F5 retries release metadata and assessments within
+the inventory session (dashboard F5 refreshes official NetBox releases), Enter
+selects and Esc cancels. Cancellation may wait for a bounded in-flight lookup
+to finish before reusing the model. Discovery failure still permits retaining
+the installed version. Incomplete evidence is not approval.
+Upgrade NetBox opens directly into the planned changes dashboard. Operations
+stay immediately below the scrollable target table. Reserve rows for overall
+readiness, the primary reason and the footer before expanding the table.
+Use side-by-side component and plan panels on wider screens; use a compact
+plan summary on narrow or short screens. D/E expose complete evidence. Exact
+validation runs in the existing read-only worker while retaining the dashboard;
+execution stays disabled until the matching plan has been accepted. For an
+actual offline curses capture (synthetic plan, no live installation), run
+`python -m tests.upgrade.terminal_dashboard_capture /tmp/dashboard.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite captures 50x16, 80x24, 120x30 and 160x45, including resize.
+Dynamic
+pin actions retain focus by identity, never implicitly move focus to execution.
+With no changed targets, use neutral Unchanged labels unless there is a real
+compatibility, runtime or inventory problem; this is not verification. Raw
+evidence stays available on E. Once discovery finishes, restore the plan
+panels, with an explicit incomplete/failure summary and D/F5 retry guidance.
+Discovery opens directly in Upgrade Management. Show unknown values until
+installed inventory is observed, then publish installed rows while official
+release lookup continues. DISCOVERY STATUS reports the actual inventory,
+release lookup, target suggestion and compatibility assessment phases;
+remove it only on completed discovery without incomplete evidence. Partial
+or failed discovery retains the status and D/F5 retry guidance. A failed
+inventory refresh invalidates the previous review and hides stale rows;
+only retry and read-only navigation are available. The worker uses the
+existing bounded requests and cooperative cancellation on exit, not forced
+termination of a running external command.
 Initial suggestions and reassessment run in a single bounded read-only worker;
 while it runs, changes and execution are disabled. Suggest continues a partial
 search or explicitly recomputes plugin targets without changing NetBox.
 Reset restores installed versions; refresh preserves valid intent and clears
 review. Full validation derives the exact changed pins and existing operation.
+A failed local requirements check names the affected package, declaration,
+installed version, stage, reason and next action in both CLI and TUI.
+Use D then Enter Review pins (or P / Review pins in the dashboard) for correctable exact
+pins, restricted to reliably mapped configured plugins. Non-plugin local
+declarations (including bare names, exact pins, extras and comments) remain
+unchanged. Resolve supported declarations together with exact core and plugin
+pins, preferring installed bare-package versions when feasible. Review all
+resolved version changes before approval; bind the full report to temporary
+execution constraints, not permanent non-plugin pins. For a declared LDAP
+requirement, a known exact python-ldap version may be built in a temporary
+unprivileged systemd unit with a private temporary directory. Missing build
+prerequisites or an unverified wheel block execution; no arbitrary source
+builds or automatic OS package installation are allowed. Conflicting core pins,
+ambiguous plugin mapping and complex/unsafe declarations require manual review.
+Only explicitly approved plugin pin changes are written under the
+existing lock and inventory revalidation; original requirements and their
+permissions/hash are retained in a protected pin-recovery directory outside
+the NetBox checkout before replacement. A successful correction invalidates
+the prior plan, refreshes inventory and rebuilds validation; no package
+installation or service action is authorized by pin review.
 Only an executable plan matching the current selection enables review and
 execution. The existing exact fingerprint, confirmation, revalidation, health
 and recovery gates remain unchanged. On narrow terminals use D for full
@@ -101,6 +198,57 @@ offering installation and again before execution; the backend still owns the
 lock, archive verification, fresh plan validation and transactional handoff.
 Reopening the view shows the last recorded status, never an inferred success.
 
+## Selection menus
+
+Simple selectors share a content-sized panel, a section heading, a consistent
+selection highlight and the standard keyboard footer. They do not arm a
+selection until the operator navigates; Enter alone cannot choose a default.
+For fixed short menus, show matching numeric shortcuts and the localized
+open hint; numbers select an option, never confirm a protected operation.
+Keep contextual details next to the menu on wide terminals and stack them on
+narrow terminals. Database and media-only backups do not stop NetBox. Media
+is a live archive, not an atomic snapshot; combined backups temporarily stop
+active NetBox and RQ writers for database/media consistency. None includes
+configuration. Restore scope keeps its selected backup and precautionary backup
+warning visible and Esc cancels immediately. Other selectors retain their
+existing Esc behavior, scrolling and confirmation gates. For real offline
+curses captures, run `python -m tests.tui.terminal_selector_capture /tmp/selectors.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite exercises actual curses at 50x16 and 140x34 without
+performing backups or restores.
+
+## Backup task progress
+
+Backup create, restore, verify and delete show planned tasks before starting.
+The backend emits explicit pending, running, done, failed, skipped,
+not-applicable and not-run states; a later task never implies earlier success.
+For combined archives, extraction is required even for database-only restore;
+a PostgreSQL dump does not require extraction. Tasks that are not applicable
+or skipped do not contribute to the completed/total task counts. Batch file
+tasks have distinct identities. Recovery and cleanup tasks are appended only
+when attempted. Overall success requires a successful worker result, including
+required service restart and cleanup. Legacy progress callbacks retain the
+four-argument signature with task-based counters.
+
+Present PROGRESS, TASKS / STATUS and RESULT as separate top-aligned panels.
+Keep applicable planned rows stable. Show a muted hollow circle (○) with no
+status text before a task starts, and omit non-applicable tasks. Use a filled
+circle (●) for observed states. Show Running, OK, Failed,
+Skipped and Not run when meaningful; never infer completion. The result panel
+has a neutral dash until an outcome exists. Colour reinforces the state,
+not the entire row. Wrap long names and result
+messages without losing characters. Up/Down and Page Up/Down scroll tasks,
+with automatic active-task following until the operator scrolls manually.
+After completion, Tab switches between task and result scrolling; a visible
+focus marker works without colour. Enter/Esc/Space acknowledges the final
+result. Q and other cancellation keys remain disabled while the worker runs.
+Resize clamps both viewports and keeps the outcome accessible at 50x16.
+Apply the same presentation to planned service actions and upgrade discovery.
+Service batches show the applicable service list and observed outcomes;
+read-only discovery omits non-applicable phases. Upgrade execution and
+self-upgrade report actual phases, without adding fabricated task lists.
+Recovery-pending conditions remain explicit; internal states are unchanged.
+
 ## Backup inventory counters
 
 Available Backups is a standalone heading. An empty inventory displays only
@@ -132,8 +280,11 @@ the last group (4, L, Q). CLI commands and menu numbering remain unchanged.
 Update discovery is available in the corresponding upgrade views.
 
 The storage panel uses the existing disk chart only when its legend fits;
-otherwise show compact textual usage/count. The latest local backup section
-has aligned Date, Name, Type and Tag fields below the usage. It selects the
+otherwise show compact textual usage/count. When the legend column is wide
+enough and the full details fit, place Latest Backup under the legend beside
+the chart, separated by one empty row. Size the panel to the taller content.
+Otherwise keep the vertical layout or compact B details. The latest local
+backup section has aligned Date, Name, Type and Tag fields. It selects the
 newest recognized local archive using the same chronological inventory as
 backup management. For the selected file only, read a bounded regular JSON
 sidecar when available. Prefer its validated timezone-aware creation timestamp
@@ -152,3 +303,17 @@ keyboard hints and footer remain accessible at 50x16. No new dependency or
 backup/restore behavior change.
 
 If an inventory refresh fails, discard old marks, preview metadata and storage observations. Require a successful refresh and new selection before operating on existing backups; never show stale entries as current or count an unavailable inventory as zero.
+
+### PostgreSQL ltree prerequisite
+
+For NetBox 4.7+ the read-only plan matches the database against the backup target and distinguishes installed/usable, available/installable, missing files, insufficient migration privileges, unusable schema, mismatched runtime and unverified connections. Detailed review shows role, server version, schema and search path without credentials. Native NetBox migrations create the extension when permitted; execution verifies usability before restarting writers. No extension is created by plan review. Unverified peer/OS-user-dependent migration authentication and unresolved prerequisites require DBA review.
+
+When the migration role cannot install ltree, the contextual Install ltree
+action is available only for a verified local loopback connection matching the
+configured backup database, a peer-authenticated postgres administrator and
+a protected public schema. The CLI equivalent is `upgrade ltree` followed by
+`upgrade ltree --install --approve-ltree <fingerprint>`. Both require explicit
+review, the operation lock, a verified database backup and a fresh identity
+check inside the fixed CREATE EXTENSION transaction. Revalidate the upgrade
+plan afterwards. Never grant privileges, drop/relocate extensions or restart
+services; remote, ambiguous or writable schemas require DBA intervention.
