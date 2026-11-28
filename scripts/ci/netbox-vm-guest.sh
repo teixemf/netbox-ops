@@ -33,8 +33,10 @@ case "$mode" in
     fi
 
     adduser --system --group --quiet netbox
-    chown -R netbox:netbox /opt/netbox/netbox/media \
-      /opt/netbox/netbox/reports /opt/netbox/netbox/scripts
+    for dir in media reports scripts; do
+      install -d -m 0755 -o netbox -g netbox "/opt/netbox/netbox/$dir"
+      chown -R netbox:netbox "/opt/netbox/netbox/$dir"
+    done
     install -m 0644 /opt/netbox/contrib/gunicorn.py /opt/netbox/gunicorn.py
     sed -i 's/^workers = 5$/workers = 2/' /opt/netbox/gunicorn.py
     install -m 0644 /opt/netbox/contrib/netbox.service /etc/systemd/system/netbox.service
