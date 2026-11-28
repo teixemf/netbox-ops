@@ -409,6 +409,8 @@ class UpgradeTuiTests(InterfaceFixture):
                 self.assertIn(menu.t('ut_discovery_short_assessment' if compact
                                      else 'ut_discovery_assessment'), text)
                 self.assertIn(menu.t('nbo_task_state_running'), text)
+                self.assertEqual(text.count('○'), 1)
+                self.assertEqual(text.count('●'), 2)
             self.assertEqual(dashboard._discovery_states['suggestions'], 'not_applicable')
 
     def test_failed_inventory_refresh_disables_stale_targets_and_allows_retry(self):

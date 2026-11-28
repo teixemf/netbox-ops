@@ -463,11 +463,16 @@ class NewServiceTuiTests(unittest.TestCase):
             for name in ('redis', 'postgresql', 'netbox', 'netbox-rq', 'nginx'):
                 self.assertTrue(any(text.endswith(name) for _, _, text, _ in frame))
             self.assertNotIn(menu.t('nbo_task_state_pending'), ' '.join(text for _, _, text, _ in frame))
+            self.assertEqual(sum(text.strip() == '○' for _, _, text, _ in frame), 5)
+            menu._draw_progress('restart', 1, 5, 'redis', 'done', '')
+            self.assertTrue(any(text.startswith('● ' + menu.t('nbo_task_state_done'))
+                                for _, _, text, _ in screen.frames[-1]))
             menu._draw_progress('restart', 0, 5, 'redis', 'error', 'failure',
                                 finished=True, failed=True, summary='Failure')
             text = ' '.join(value for _, _, value, _ in screen.frames[-1])
             self.assertIn(menu.t('nbo_task_state_failed'), text)
             self.assertIn(menu.t('nbo_task_state_not_run'), text)
+            self.assertNotIn('○', text)
             self.assertEqual(menu._service_steps[-1][1], 'pending')
 
     def test_progress_bar_counts_actual_completions(self):
