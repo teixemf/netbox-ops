@@ -1031,6 +1031,16 @@ class UpgradeTuiTests(InterfaceFixture):
                                 except OSError as exc:
                                     if exc.errno != errno.EIO:
                                         raise
+                        while select.select([master], [], [], 0)[0]:
+                            try:
+                                chunk = os.read(master, 65536)
+                            except OSError as exc:
+                                if exc.errno != errno.EIO:
+                                    raise
+                                break
+                            if not chunk:
+                                break
+                            terminal_output.extend(chunk)
                         self.assertEqual(proc.returncode, 0, terminal_output.decode(errors='replace'))
                     finally:
                         if proc is not None and proc.poll() is None:
@@ -1053,7 +1063,21 @@ class UpgradeTuiTests(InterfaceFixture):
                     differences = [(y, x) for y, (before, after) in
                                    enumerate(zip(low['attributes'], peak['attributes']))
                                    for x, (a, b) in enumerate(zip(before, after)) if a != b]
-                    self.assertEqual(differences, [] if monochrome else [(running_y, 3)])
+                    # inch() is a narrow-character API: on some ncurses builds
+                    # the Unicode glyph's bits alias the A_COLOR bits. Require
+                    # unchanged attributes everywhere except the live marker,
+                    # and verify the actual xterm foreground escapes for it.
+                    self.assertEqual([cell for cell in differences if cell != (running_y, 3)], [])
+                    if monochrome:
+                        self.assertEqual(differences, [])
+                    for foreground in (37, 80):
+                        pattern = (rb'\x1b\[38;5;' + str(foreground).encode()
+                                   + rb'(?:;48;5;234)?m(?:\x1b\[[0-9;]*m)*'
+                                   + '●'.encode())
+                        if monochrome:
+                            self.assertNotRegex(bytes(terminal_output), pattern)
+                        else:
+                            self.assertRegex(bytes(terminal_output), pattern)
                     for frame in frames[:-2]:
                         self.assertEqual(frame['color'], not monochrome)
                         lines = frame['lines']
