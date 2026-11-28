@@ -139,6 +139,27 @@ class MenuNavigationTests(unittest.TestCase):
                     self.assertNotIn(menu.t('nbo_create_downtime_combined'),
                                      ' '.join(text for _, _, text, _ in db))
                     self.assertTrue(all(y < dimensions[0] for y, _, _, _ in combined))
+                    type_y = next(y for y, _, text, _ in combined
+                                  if text.startswith(menu.t('nbo_create_type_heading')))
+                    detail_y = next(y for y, _, text, _ in combined
+                                    if text == menu.t('nbo_create_details_heading'))
+                    self.assertEqual(type_y == detail_y, dimensions[1] >= 76)
+                    self.assertIn('3  ' + menu.t('nbo_create_name_combined'), combined_highlight)
+                    self.assertIn('1–3', combined_text)
+
+    def test_numbered_fixed_selectors_ignore_invalid_keys(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        for language in ('en', 'pt'):
+            for number, scope in enumerate(('db', 'media', 'all'), 1):
+                keys = [ord('0'), ord('9'), 10, ord(str(number))]
+                screen = FakeScreen(keys, dimensions=(16, 50))
+                menu = CursesMenu(screen, Translator(language))
+                self.assertEqual(menu._choose_backup_type(), number - 1)
+                screen = FakeScreen(keys, dimensions=(34, 140))
+                menu = CursesMenu(screen, Translator(language))
+                self.assertEqual(menu._choose_restore_scope(SimpleNamespace(path=Path('backup.tar.gz'))), scope)
 
     def test_restore_scope_preserves_explicit_focus_and_escape(self):
         from pathlib import Path
