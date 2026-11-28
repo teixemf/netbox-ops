@@ -15,6 +15,7 @@ from .upgrade_targets import (
     MAX_PICKER_ROWS, TargetAssessment, TargetCatalogue, TargetModel, TargetRow, TargetSnapshot,
     discover_target_context,
 )
+from .upgrade_discovery import UpgradeDiscoveryError
 from .upgrade_plan import UpgradePlanError
 from .upgrade_ui import make_plan, summary_lines
 
@@ -56,6 +57,9 @@ class UpgradeDashboard:
         self._validation_selection = None
         self._inventory_valid = True
         self._discovery_action = None
+        self._discovery_screen = None
+        self._discovery_request = 'suggest'
+        self._discovery_error_detail = ''
         self._discovery_states = {}
         self._discovery_events = SimpleQueue()
         self._preview_context = None
@@ -113,13 +117,16 @@ class UpgradeDashboard:
         return True
 
     def _discover(self, pool, action='assess'):
-        """Start read-only discovery without leaving the management dashboard."""
+        """Start read-only inventory discovery in the dedicated progress view."""
         self._invalidate_plan()
         self.snapshot = self.suggested = None
         self._inventory_valid = False
         self._preview_context = None
         self.error = ''
         self._discovery_action = action
+        self._discovery_screen = 'full'
+        self._discovery_request = action
+        self._discovery_error_detail = ''
         self._discovery_states = {'inventory': 'pending', 'releases': 'pending',
                                   'suggestions': 'pending' if action == 'suggest' else 'not_applicable',
                                   'assessment': 'pending'}
@@ -149,6 +156,10 @@ class UpgradeDashboard:
         self.snapshot = None
         self.error = ''
         request = self.model.request(action)
+        self._discovery_error_detail = ''
+        if action == 'suggest' and self._discovery_screen is None:
+            self._discovery_screen = 'suggest'
+            self._discovery_request = action
         if not self._discovery_states:
             self._discovery_states = {'suggestions': 'pending' if action == 'suggest' else 'not_applicable',
                                       'assessment': 'pending'}
@@ -195,6 +206,7 @@ class UpgradeDashboard:
                             and all(state in ('done', 'not_applicable')
                                     for state in self._discovery_states.values())):
                         self._discovery_states.clear()
+                        self._discovery_screen = None
                 else:
                     # Never report a rejected/stale request as completed discovery.
                     self.error = self.t('upgrade_discovery_error')
@@ -207,9 +219,13 @@ class UpgradeDashboard:
                 for task, state in self._discovery_states.items():
                     if state in ('running', 'pending'):
                         self._discovery_states[task] = 'not_run'
-            except Exception:
+            except Exception as exc:
                 self._discovery_action = None
                 self.error = self.t('upgrade_discovery_error')
+                # Expose known discovery diagnostics, not arbitrary exception
+                # representations that could contain configuration values.
+                if isinstance(exc, UpgradeDiscoveryError):
+                    self._discovery_error_detail = safe_text(exc)[:1024]
                 running = [task for task, state in self._discovery_states.items() if state == 'running']
                 for task in running or ['inventory' if discovering else 'assessment']:
                     self._discovery_states[task] = 'failed'
@@ -551,6 +567,8 @@ class UpgradeDashboard:
         return visible
 
     def _draw(self):
+        if self._discovery_screen is not None:
+            return self._draw_discovery()
         menu, t = self.menu, self.t
         hint = t('ut_hint') if menu.stdscr.getmaxyx()[1] >= 95 else t('ut_hint_short')
         frame = menu._frame(self.title, hint)
@@ -570,11 +588,7 @@ class UpgradeDashboard:
         action_height = 2 + self.positions[-1][1]
         gap = 1 if h >= 22 else 0
         side_by_side = w >= 100 and h >= 24
-        discovery = (self.future is not None and bool(self._discovery_states)
-                     and self._validation_selection is None)
-        discovery_lines = self._discovery_lines(width, compact=h < 21 or width < 74) if discovery else []
-        detail_height = (len(discovery_lines) + 1 if discovery else
-                         min(12, max(5, (h - 12) // 2)) if side_by_side else 3)
+        detail_height = min(12, max(5, (h - 12) // 2)) if side_by_side else 3
         # Reserve operations, readiness/evidence and footer before table rows.
         budget = max(1, h - 8 - action_height - detail_height - 2 * gap)
         self.scroll = max(0, min(self.scroll, self.cursor, len(rows) - 1))
@@ -647,13 +661,7 @@ class UpgradeDashboard:
                       'selected' if focused else 'title' if enabled else 'muted')
         row = rows[self.cursor]
         if detail_y < h - 2:
-            if discovery:
-                menu._paint(detail_y, 2, w - 4, min(detail_height, h - 2 - detail_y))
-                menu._put(detail_y, 3, t('ut_discovery_heading'), 'section')
-                for y, (line, style) in enumerate(discovery_lines, detail_y + 1):
-                    if y < h - 2:
-                        menu._put(y, 3, _clip(line, width), style)
-            elif side_by_side:
+            if side_by_side:
                 split = w // 2
                 component = self._compact_component_lines(row, split - 5)
                 plan = self._overview_lines()
@@ -676,6 +684,91 @@ class UpgradeDashboard:
                     menu._put(detail_y + 1 + i, 3, _clip(line, width), style)
         menu.stdscr.refresh()
         return True
+
+    def _discovery_can_continue(self):
+        return (self.future is None and not self.error and self._inventory_valid
+                and self.model is not None and self.snapshot is not None
+                and self.snapshot.selection == self.model.selection)
+
+    def _discovery_result_lines(self):
+        if self.future is not None:
+            return [('—', 'muted')]
+        if self.error:
+            return [(self._discovery_error_detail or self.error, 'failure')]
+        lines = [(self.t('ut_discovery_incomplete_retry'), 'warning')]
+        if self.snapshot:
+            lines.extend((warning, 'warning') for warning in self.snapshot.warnings)
+        return lines
+
+    def _draw_discovery(self):
+        """Show observed read-only phases; never infer success from a finished worker."""
+        menu, t = self.menu, self.t
+        busy = self.future is not None
+        hint = t('ut_discovery_busy_hint' if busy else
+                 'ut_discovery_continue_hint' if self._discovery_can_continue() else
+                 'ut_discovery_failed_hint')
+        frame = menu._frame(t('ut_discovery_title'), hint)
+        if not frame:
+            return False
+        h, w = frame
+        width = w - 6
+        tasks = [(task, state) for task, state in self._discovery_states.items()
+                 if state != 'not_applicable' and
+                 (self._discovery_screen != 'suggest' or task in ('suggestions', 'assessment'))]
+        done = sum(state == 'done' for _, state in tasks)
+        count = f'{done}/{len(tasks)}' if tasks else '—'
+        gap = 1 if h >= 22 else 0
+        menu._paint(3, 2, w - 4, 3)
+        menu._put(3, 3, t('nbo_progress_heading'), 'section')
+        current = next((t('ut_discovery_' + task) for task, state in tasks if state == 'running'),
+                       t('ut_checking') if busy else
+                       t('ut_discovery_partial') if not self.error else t('nbo_task_state_failed'))
+        menu._put(4, 3, _clip(current, width), 'failure' if self.error else 'title')
+        length = min(50, width - len(count) - 3)
+        filled = length * done // len(tasks) if tasks else 0
+        menu._put(5, 3, '[' + '█' * filled + '░' * (length - filled) + '] ' + count,
+                  'failure' if self.error else 'title')
+        task_y = 6 + gap
+        menu._paint(task_y, 2, w - 4, len(tasks) + 1)
+        menu._put(task_y, 3, t('nbo_task_header'), 'section')
+        labels = {state: t('nbo_task_state_' + state) for state in ('running', 'done', 'failed', 'not_run')}
+        labels.update(pending='', partial=t('ut_discovery_partial'))
+        status_width = max(map(len, labels.values()))
+        styles = {'done': 'success', 'running': 'title', 'failed': 'failure', 'partial': 'warning'}
+        for y, (task, state) in enumerate(tasks, task_y + 1):
+            menu._put(y, 3, task_marker(state) + ' ' + labels[state].ljust(status_width),
+                      styles.get(state, 'muted'))
+            x = 3 + status_width + 4
+            menu._put(y, x, _clip(t('ut_discovery_' + task), w - x - 3))
+        result_y = task_y + len(tasks) + 1 + gap
+        lines = [(part, style) for text, style in self._discovery_result_lines()
+                 for part in menu._backup_wrap(text, width)]
+        result_height = min(len(lines) + 1, h - 2 - result_y)
+        menu._paint(result_y, 2, w - 4, result_height)
+        menu._put(result_y, 3, t('nbo_result_heading'), 'section')
+        for y, (line, style) in enumerate(lines[:result_height - 1], result_y + 1):
+            menu._put(y, 3, line, style)
+        menu.stdscr.refresh()
+        return True
+
+    def _discovery_key(self, key, pool):
+        """Return True to leave the read-only screen/session."""
+        if key in (27, 3):
+            return True
+        if self.future is not None:
+            return False
+        if key == curses.KEY_F5:
+            if self._discovery_screen == 'full':
+                self._discover(pool, self._discovery_request)
+            else:
+                self._start(pool, self._discovery_request)
+        elif key in (ord('d'), ord('D')):
+            self.menu._show_lines(self.t('ut_discovery_title'),
+                                  [*self._discovery_lines(100, compact=False),
+                                   *self._discovery_result_lines()], allow_quit=True)
+        elif key in _ENTER and self._discovery_can_continue():
+            self._discovery_screen = None
+        return False
 
     def _discovery_lines(self, width, *, compact):
         styles = {'done': 'success', 'running': 'title', 'failed': 'failure',
@@ -940,7 +1033,7 @@ class UpgradeDashboard:
             self._draw()
             while True:
                 self._poll(pool)
-                if self.future is None and self._revalidate_after_pins:
+                if self.future is None and self._discovery_screen is None and self._revalidate_after_pins:
                     self._revalidate_after_pins = False
                     if self._inventory_valid and self.model is not None and not self.error:
                         self._validate(pool)
@@ -948,6 +1041,10 @@ class UpgradeDashboard:
                 frame = self._draw()
                 key = menu.stdscr.getch()
                 menu._check_quit(key)
+                if self._discovery_screen is not None:
+                    if self._discovery_key(key, pool):
+                        return
+                    continue
                 if key in (27, 3):
                     if self.actions_focused and key == 27:
                         self.actions_focused = False

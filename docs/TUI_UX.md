@@ -127,16 +127,16 @@ Dynamic
 pin actions retain focus by identity, never implicitly move focus to execution.
 With no changed targets, use neutral Unchanged labels unless there is a real
 compatibility, runtime or inventory problem; this is not verification. Raw
-evidence stays available on E. Once discovery finishes, restore the plan
-panels, with an explicit incomplete/failure summary and D/F5 retry guidance.
-Discovery opens directly in Upgrade Management. Show unknown values until
-installed inventory is observed, then publish installed rows while official
-release lookup continues. DISCOVERY STATUS reports the actual inventory,
-release lookup, target suggestion and compatibility assessment phases;
-remove it only on completed discovery without incomplete evidence. Partial
-or failed discovery retains the status and D/F5 retry guidance. A failed
-inventory refresh invalidates the previous review and hides stale rows;
-only retry and read-only navigation are available. The worker uses the
+evidence stays available on E. Entry, refresh and explicit suggestions use a
+separate discovery progress view with PROGRESS, TASKS / STATUS and RESULT.
+Show observed inventory, release lookup, suggestions and assessment states,
+with a successful-task count and no invented progress. Complete discovery
+opens the dashboard automatically. Incomplete evidence permits explicit Enter
+only for an accepted current inventory and snapshot; failed discovery stays
+on the progress view with D details, F5 retry and Esc back. Local target edits
+and reset retain the dashboard; no discovery panel replaces plan details.
+A failed inventory refresh invalidates the previous review and hides stale rows.
+The worker uses the
 existing bounded requests and cooperative cancellation on exit, not forced
 termination of a running external command.
 Initial suggestions and reassessment run in a single bounded read-only worker;

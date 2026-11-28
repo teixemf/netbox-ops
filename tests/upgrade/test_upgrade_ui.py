@@ -16,7 +16,7 @@ from netbox_ops.i18n import LANGUAGES, Translator
 from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview
 from netbox_ops.plugin_inventory import DeclaredRequirement, InstalledPackage, PinProposal, PluginInventory
 from netbox_ops.tui import CursesMenu
-from netbox_ops.upgrade_discovery import GitNetBoxInstallation
+from netbox_ops.upgrade_discovery import GitNetBoxInstallation, UpgradeDiscoveryError
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_plan import build_upgrade_plan
 from netbox_ops.upgrade_tui import netbox_overview
@@ -378,8 +378,12 @@ class UpgradeTuiTests(InterfaceFixture):
                     dashboard._discover(pool, 'suggest')
                     self.assertTrue(dashboard._draw())
                     frame = menu.stdscr.frames[-1]
-                    self.assertTrue(any(text == menu.t('ut_discovery_heading')
-                                        for _, _, text, _ in frame))
+                    for heading in ('nbo_progress_heading', 'nbo_task_header', 'nbo_result_heading'):
+                        self.assertTrue(any(text == menu.t(heading) for _, _, text, _ in frame))
+                    self.assertEqual(len(menu._panels), 3)
+                    self.assertIn('0/4', ' '.join(text for _, _, text, _ in frame))
+                    self.assertEqual(sum(text.strip() == '○' for _, _, text, _ in frame), 4)
+                    self.assertFalse(any(text == menu.t('ut_operations') for _, _, text, _ in frame))
                     self.assertNotIn('0/0', ' '.join(text for _, _, text, _ in frame))
                     self.assertEqual(dashboard._rows()[0].current, '?')
                     self.assertEqual(dashboard._rows()[0].target, '?')
@@ -424,7 +428,7 @@ class UpgradeTuiTests(InterfaceFixture):
         future = Future()
         pool.submit.return_value = future
         dashboard._discover(pool)
-        future.set_exception(UpgradeExecutionError('inventory unavailable'))
+        future.set_exception(UpgradeDiscoveryError('inventory unavailable'))
         dashboard._poll(pool)
         self.assertIs(dashboard.model, old)
         self.assertIsNone(dashboard.plan)
@@ -435,12 +439,20 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('validate'))
         self.assertFalse(dashboard._enabled('execute'))
         self.assertTrue(dashboard._draw())
-        self.assertTrue(any(menu.t('ut_discovery_failed_retry') in text
+        self.assertTrue(any('inventory unavailable' in text
                             for _, _, text, _ in menu.stdscr.frames[-1]))
-        self.assertFalse(any(text == menu.t('ut_discovery_heading')
+        self.assertFalse(dashboard._discovery_can_continue())
+        dashboard._discovery_key(10, pool)
+        self.assertEqual(dashboard._discovery_screen, 'full')
+        self.assertTrue(dashboard._discovery_key(27, pool))
+        self.assertFalse(any(text == menu.t('ut_operations')
                              for _, _, text, _ in menu.stdscr.frames[-1]))
+        pool.submit.return_value = Future()
+        dashboard._discovery_key(curses.KEY_F5, pool)
+        self.assertTrue(all(state in ('pending', 'not_applicable')
+                            for state in dashboard._discovery_states.values()))
 
-    def test_completed_discovery_returns_to_plan_even_when_partial(self):
+    def test_completed_discovery_returns_to_plan_with_explicit_partial_continue(self):
         from concurrent.futures import Future
         from netbox_ops.upgrade_targets import TargetSnapshot
 
@@ -450,10 +462,19 @@ class UpgradeTuiTests(InterfaceFixture):
             result = TargetSnapshot(request, request.selection, dashboard._rows(), 'supported', (), partial)
             dashboard._discovery_states = {'inventory': 'done', 'releases': 'done',
                                            'suggestions': 'not_applicable', 'assessment': 'done'}
+            dashboard._discovery_screen = 'full'
             dashboard.future = Future()
             dashboard.future.set_result(result)
             dashboard._poll()
             self.assertEqual(bool(dashboard._discovery_states), partial)
+            if partial:
+                self.assertEqual(dashboard._discovery_screen, 'full')
+                self.assertTrue(dashboard._discovery_can_continue())
+                dashboard._draw()
+                self.assertFalse(any(text == menu.t('ut_operations')
+                                     for _, _, text, _ in menu.stdscr.frames[-1]))
+                dashboard._discovery_key(10, Mock())
+            self.assertIsNone(dashboard._discovery_screen)
             if partial:
                 self.assertEqual(dashboard._discovery_states['assessment'], 'partial')
             self.assertTrue(dashboard._draw())
