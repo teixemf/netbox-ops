@@ -950,6 +950,25 @@ class UpgradeTuiTests(InterfaceFixture):
                     self.assertEqual(dashboard.cursor, 24)
                     self.assertFalse(dashboard._enabled('execute'))
 
+    def test_upgrade_operations_use_frame_background_and_distinct_disabled_focus(self):
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                dashboard, menu = self._dashboard(dimensions=dimensions, language=language)
+                dashboard.model.reset()
+                dashboard.actions_focused = True
+                dashboard.action = dashboard._actions().index('validate')
+                self.assertTrue(dashboard._draw())
+                frame = menu.stdscr.frames[-1]
+                ops_y = next(y for y, _, text, _ in frame if text == menu.t('ut_operations'))
+                self.assertFalse(any(y0 <= ops_y < y1 for _, y0, _, y1 in menu._panels))
+                self.assertTrue(any(text == '›' and y > ops_y for y, _, text, _ in frame))
+                self.assertFalse(dashboard._enabled('validate'))
+                label = menu.t('ut_action_validate' + ('_short' if dimensions[1] < 76 else ''))
+                self.assertTrue(any(text == f' {label} ' and attr != curses.A_REVERSE
+                                    for _, _, text, attr in frame))
+                self.assertTrue(any('─' in text and y in (ops_y - 1, ops_y)
+                                    for y, _, text, _ in frame))
+
     def test_real_curses_dashboard_capture(self):
         import errno
         import json
@@ -999,10 +1018,19 @@ class UpgradeTuiTests(InterfaceFixture):
                     t = Translator(language)
                     self.assertEqual([(f['height'], f['width']) for f in frames],
                                      [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
-                                      (30, 120), (16, 50)])
+                                      (30, 120), (16, 50), (30, 120), (16, 50), (30, 120)])
                     for frame in frames:
                         self.assertEqual(frame['color'], not monochrome)
                         lines = frame['lines']
+                        if frame['scenario'] == 'discovery':
+                            for key in ('nbo_progress_heading', 'nbo_task_header', 'nbo_result_heading'):
+                                self.assertTrue(any(t(key) in line for line in lines))
+                            self.assertTrue(any('1/4' in line for line in lines))
+                            self.assertFalse(any(t('ut_operations') in line for line in lines))
+                            self.assertEqual(sum(line.count('○') for line in lines), 2)
+                            print(f"Actual discovery capture: {language} {frame['width']}x{frame['height']}"
+                                  f" color={frame['color']}\\n" + '\\n'.join(lines))
+                            continue
                         operations = next(i for i, line in enumerate(lines) if t('ut_operations') in line)
                         if frame['scenario'] == 'blocked':
                             readiness = next(i for i, line in enumerate(lines)

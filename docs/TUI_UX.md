@@ -73,7 +73,10 @@ Q Quit | Esc Back | Enter Open | Tab Actions | D Plan | E Evidence | P Pins | F5
 
 The aligned table sizes columns to content and groups Core and Plugins without
 selectable group headings. On short screens, the current group remains visible
-above the scroll window. Counts and operations follow the visible rows; details
+above the scroll window. Counts and operations follow the visible rows. Use the Services/Backups
+frame-background operation bar and separators, sharing separator rows with
+headings on short terminals. Enabled actions have brackets; a disabled
+focused action keeps its muted label and a distinct focus marker. Details
 remain accessible with D, including complete prerequisite reasons and stage evidence.
 An asterisk marks a changed target, not a checkbox. Move with arrows/j/k,
 Home/End and Page Up/Down. Enter opens the version picker, D opens scrollable

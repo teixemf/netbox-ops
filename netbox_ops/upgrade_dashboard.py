@@ -584,7 +584,7 @@ class UpgradeDashboard:
         self.action = actions.index(previous) if previous in actions else actions.index('validate')
         self._drawn_actions = actions
         labels = [t('ut_action_' + a + ('_short' if compact else '')) for a in actions]
-        self.positions = menu._backup_action_positions(labels, width)
+        self.positions = menu._backup_action_positions(labels, width - 1)
         action_height = 2 + self.positions[-1][1]
         gap = 1 if h >= 22 else 0
         side_by_side = w >= 100 and h >= 24
@@ -608,7 +608,6 @@ class UpgradeDashboard:
         action_y = counts_y + 1 + gap
         detail_y = action_y + action_height + gap
         menu._paint(3, 2, w - 4, counts_y - 2)
-        menu._paint(action_y, 2, w - 4, action_height)
         menu._put(3, 3, t('ut_available'), 'section')
         widths, column_gap = self._table_widths(rows, width)
         offsets = [0]
@@ -652,13 +651,24 @@ class UpgradeDashboard:
                   else t('ut_inventory_pending'))
         position = f'{self.cursor + 1}/{len(rows)} | ' if len(visible) < len(rows) else ''
         menu._put(counts_y, 3, _clip(f'{position}{counts} | {note}', width), 'muted')
-        menu._put(action_y, 3, t('ut_operations'), 'section')
+        heading = t('ut_operations')
+        # On short terminals share separators with headings to retain the
+        # readiness and primary-blocker rows instead of consuming two rows.
+        if gap:
+            menu._put(action_y - 1, 3, '─' * (w - 7), 'muted')
+        else:
+            menu._put(action_y, 4 + len(heading), '─' * max(0, width - len(heading) - 2), 'muted')
+        menu._put(action_y, 3, heading, 'section')
         for i, (x, line) in enumerate(self.positions):
             enabled = self._enabled(actions[i])
             label = f'[{labels[i]}]' if enabled else f' {labels[i]} '
             focused = self.actions_focused and i == self.action
-            menu._put(action_y + 1 + line, 3 + x, label,
-                      'selected' if focused else 'title' if enabled else 'muted')
+            menu._put(action_y + 1 + line, 4 + x, label,
+                      'selected' if focused and enabled else 'title' if enabled else 'muted')
+            if focused and not enabled:
+                menu._put(action_y + 1 + line, 3 + x, '›', 'section')
+        if gap:
+            menu._put(detail_y - 1, 3, '─' * (w - 7), 'muted')
         row = rows[self.cursor]
         if detail_y < h - 2:
             if side_by_side:
@@ -678,7 +688,12 @@ class UpgradeDashboard:
             else:
                 height = min(detail_height, h - 2 - detail_y)
                 menu._paint(detail_y, 2, w - 4, height)
-                menu._put(detail_y, 3, _clip(t('ut_plan') + ' | ' + t('ut_details_key'), width), 'section')
+                if gap:
+                    menu._put(detail_y, 3, _clip(t('ut_plan') + ' | ' + t('ut_details_key'), width), 'section')
+                else:
+                    heading = t('ut_plan')
+                    menu._put(detail_y, 3, heading, 'section')
+                    menu._put(detail_y, 4 + len(heading), '─' * max(0, width - len(heading) - 2), 'muted')
                 lines = self._overview_lines()
                 for i, (line, style) in enumerate(lines[:height - 1]):
                     menu._put(detail_y + 1 + i, 3, _clip(line, width), style)
@@ -1042,7 +1057,7 @@ class UpgradeDashboard:
                 key = menu.stdscr.getch()
                 menu._check_quit(key)
                 if self._discovery_screen is not None:
-                    if self._discovery_key(key, pool):
+                    if (frame or key in (27, 3)) and self._discovery_key(key, pool):
                         return
                     continue
                 if key in (27, 3):
