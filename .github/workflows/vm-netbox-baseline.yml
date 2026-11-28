@@ -122,7 +122,7 @@ jobs:
             echo '::error::Source baseline already exists; never overwrite'
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$CROSS_MINOR_BASELINE_TAG"; then
+          if git -C "$GITHUB_WORKSPACE" ls-remote --exit-code --tags origin "refs/tags/$CROSS_MINOR_BASELINE_TAG"; then
             echo '::error::Source baseline tag already exists'
             exit 1
           else
