@@ -20,12 +20,15 @@ jobs:
           - profile: A-control
             vcpus: 2
             memory: 4096
-          - profile: B-cpu
-            vcpus: 3
-            memory: 4096
           - profile: C-memory
             vcpus: 2
             memory: 8192
+          - profile: D-combined
+            vcpus: 3
+            memory: 8192
+          - profile: E-high-memory
+            vcpus: 3
+            memory: 12288
     steps:
       - uses: actions/checkout@v5
         with:
@@ -34,6 +37,8 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse HEAD
+          lscpu
+          free -m
           bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh scripts/ci/netbox-vm-upgrade-e2e.sh
           source scripts/ci/netbox-vm-baseline.env
           [[ "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]

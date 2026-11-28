@@ -18,7 +18,7 @@ sudo chmod a+rw /dev/kvm
 vcpus=${NETBOX_VM_VCPUS:-2}
 memory=${NETBOX_VM_MEMORY_MIB:-4096}
 case "$vcpus:$memory" in
-  2:4096|3:4096|2:8192|3:8192) ;;
+  2:4096|3:4096|2:8192|3:8192|3:12288) ;;
   *) echo '::error::Unsupported VM resource profile'; exit 2 ;;
 esac
 if (( $(nproc) < vcpus + 1 || $(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo) < memory + 2048 )); then
