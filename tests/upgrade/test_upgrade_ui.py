@@ -398,6 +398,26 @@ class UpgradeTuiTests(InterfaceFixture):
                     self.assertEqual(dashboard._discovery_states['inventory'], 'done')
                     self.assertEqual(dashboard._discovery_states['releases'], 'running')
 
+    def test_discovery_pulses_only_running_marker(self):
+        from concurrent.futures import Future
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(dimensions=(16, 50), language=language)
+            menu.colors.update(title=11, pulse_low=21, pulse_high=31, pulse_peak=41)
+            dashboard._discovery_screen = 'full'
+            dashboard._discovery_states = {'inventory': 'done', 'releases': 'running',
+                                           'suggestions': 'pending', 'assessment': 'pending'}
+            dashboard.future = Future()
+            with patch('netbox_ops.tui.time.monotonic', return_value=1.4):
+                dashboard._draw()
+            frame = menu.stdscr.frames[-1]
+            self.assertEqual([attr for _, _, text, attr in frame if text == '●'], [41])
+            dashboard.future = None
+            dashboard._discovery_states['releases'] = 'failed'
+            dashboard.error = menu.t('upgrade_discovery_error')
+            dashboard._draw()
+            self.assertFalse(any(text == '●' for _, _, text, _ in menu.stdscr.frames[-1]))
+
     def test_discovery_omits_not_applicable_and_leaves_pending_status_blank(self):
         for language in LANGUAGES:
             dashboard, menu = self._dashboard(language=language)

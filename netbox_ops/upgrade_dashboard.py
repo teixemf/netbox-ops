@@ -753,6 +753,8 @@ class UpgradeDashboard:
         for y, (task, state) in enumerate(tasks, task_y + 1):
             menu._put(y, 3, task_marker(state) + ' ' + labels[state].ljust(status_width),
                       styles.get(state, 'muted'))
+            if busy and state == 'running':
+                menu._pulse_task_marker(y, 3)
             x = 3 + status_width + 4
             menu._put(y, x, _clip(t('ut_discovery_' + task), w - x - 3))
         result_y = task_y + len(tasks) + 1 + gap

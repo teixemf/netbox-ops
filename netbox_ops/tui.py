@@ -184,6 +184,11 @@ class CursesMenu:
                                  'warning', 'muted', 'disk_backup', 'disk_other',
                                  'disk_free'):
                         palette[role + '_panel'] = (palette[role][0], 234)
+                # Only add local colour pairs when the terminal has room.
+                if curses.COLORS >= 256 and getattr(curses, 'COLOR_PAIRS', 256) > len(palette) + 6:
+                    for role, foreground in (('pulse_low', 37), ('pulse_high', 44), ('pulse_peak', 80)):
+                        palette[role] = (foreground, 233)
+                        palette[role + '_panel'] = (foreground, 234)
                 for number, (name, pair) in enumerate(palette.items(), 1):
                     curses.init_pair(number, *pair)
                     self.colors[name] = curses.color_pair(number)
@@ -220,6 +225,14 @@ class CursesMenu:
             self.stdscr.addnstr(y, x, text, limit, attr)
         except curses.error:
             pass
+
+    def _pulse_task_marker(self, y: int, x: int) -> None:
+        """Overlay only a live marker, using the caller's existing refresh cycle."""
+        if not all(role in self.colors for role in ('pulse_low', 'pulse_high', 'pulse_peak')):
+            return
+        # Six 400 ms steps; monotonic time is independent of keypress frequency.
+        roles = ('pulse_low', 'title', 'pulse_high', 'pulse_peak', 'pulse_high', 'title')
+        self._put(y, x, '●', roles[int(time.monotonic() * 2.5) % len(roles)])
 
     def _frame(self, title: str, hint: str) -> tuple[int, int] | None:
         self.stdscr.erase()
@@ -2057,6 +2070,8 @@ class CursesMenu:
         for y, (marker, label, style, line, active) in enumerate(
                 task_lines[task_offset:task_offset + task_visible], task_y + 1):
             self._put(y, 3, marker + ' ' + label.ljust(status_width), style)
+            if active and marker == '●' and not finished:
+                self._pulse_task_marker(y, 3)
             self._put(y, 3 + status_width + 4, line, 'title' if active else '')
         self._paint(result_y, 2, w - 4, result_height)
         heading(result_y, 'nbo_result_heading', self._backup_result_offset,
