@@ -1,8 +1,8 @@
 # NetBox and plugin upgrades
 
 The CLI and TUI share an editable upgrade plan and a guarded executor for
-NetBox-only, plugin-only and combined upgrades. This guide describes v0.6.0;
-these upgrade workflows are not available in v0.5.0.
+NetBox-only, plugin-only and combined upgrades. This guide includes the
+changes prepared for v0.6.1; these upgrade workflows are not available in v0.5.0.
 
 ## Supported setup
 
@@ -23,10 +23,11 @@ NetBox 4.0 through 4.7; newer releases require additional manual review.
 - Configured NetBox web and RQ services, local PostgreSQL, and a media directory
   matching the running installation. Both services must be active before the
   upgrade.
-- Configured plugins must be identifiable. All relevant local requirements,
-  including disabled plugins and additional packages, must be exact installed
-  pins unless explicitly selected for upgrade. Includes, URLs, editable
-  installations, duplicate requirements and ambiguous specifications need
+- Configured plugins must map reliably to installed distributions. Unselected
+  configured plugins must have exact installed pins. Non-plugin local
+  requirements may be bare names or exact pins, including extras; their
+  declarations and comments are preserved. Includes, URLs, editable
+  installations, duplicate requirements and unsupported specifications need
   manual review. Compatibility warnings still require strong confirmation.
 - Provide the installation's explicit `/api/status/` URL. Local HTTP without
   credentials or HTTPS with normal certificate validation is supported. A
@@ -42,8 +43,8 @@ upgrade system Python, PostgreSQL, Redis or Nginx.
 
 ## Dependency review before downtime
 
-Every executable plan reviews the exact target core requirements and local
-package pins for each stage. Target Git requirements are read from private
+Every executable plan reviews the exact target core requirements, configured
+plugin pins and supported local declarations for each stage. Target Git requirements are read from private
 temporary storage without checking out the live installation. The plan shows
 resolved package version changes, conflicts and uncertainty, and binds the
 review to its fingerprint. For NetBox 4.7 and later it also checks PostgreSQL
@@ -54,9 +55,48 @@ execution. An uncertain plugin compatibility declaration can still require
 explicit additional approval. Recalculate the plan after resolving blockers.
 Under the shared operation lock the executor rebuilds the plan, checks the
 fingerprint and prepares the approved offline wheel sets before downtime.
-The only source-build exception is the official core `psycopg[c]` dependency
-requiring `psycopg-c`; existing build prerequisites are needed. No other
-source-only plugin distributions are supported.
+Source builds are restricted to the official core `psycopg[c]` dependency
+and the exact known `python-ldap` version when LDAP is explicitly declared.
+The LDAP wheel is built in a temporary unprivileged systemd unit with bounded
+runtime and restricted filesystem access. Existing compiler, Python and
+library development dependencies are required; netbox-ops does not install
+them. Arbitrary source-only packages remain unsupported.
+
+### PostgreSQL ltree
+
+For NetBox 4.7 and later, the plan checks the extension in the verified
+database, service and migration contexts. It distinguishes installed/usable,
+available/installable, missing extension files, insufficient permissions,
+unusable schema/type and mismatched or unverified connections. The normal
+path lets the upstream migration create the extension when the migration
+role can do so. Execution verifies usability before restarting writers.
+
+For a supported local database where the migration role cannot create the
+extension, preview the narrow administrative action:
+
+```sh
+netbox-ops upgrade ltree
+```
+
+Only a review with a verified local administrative connection and a safe
+public schema offers an installation fingerprint. Review the exact target,
+backup location and evidence before repeating the command with
+`--install --approve-ltree <fingerprint>` (replace the placeholder with the
+complete displayed value). The TUI offers the same contextual action with
+the literal `INSTALL LTREE` confirmation. Under the operation lock, the
+action rejects stale approval or pending recovery, creates and verifies a
+database backup, rechecks the identity and executes only the guarded
+extension creation transaction. No service restart or role changes are
+performed by this separate action. Recalculate the upgrade plan afterward.
+
+If the files are missing, ask the DBA to install the matching PostgreSQL
+extension package on the actual server. For an unverified or remote
+administrative connection, insufficient privileges, or an unusable existing
+extension, ask the DBA to review the evidence; do not drop or move an
+extension. netbox-ops never installs OS packages or grants privileges.
+After an unsuccessful installation attempt, inspect the reported database
+backup and actual extension state before retrying; no automatic rollback
+is performed.
 
 ## Execution and recovery
 
@@ -114,15 +154,19 @@ recovery workflow without fetching a NetBox release or changing the Git revision
 The planner offers the newest stable plugin release or an explicit alternative;
 only selected packages receive new pins.
 
-The current backend supports exact, ordinary PyPI requirements (including
-extras). Resolve ambiguous local requirements, duplicate entries or unpinned
-unselected packages before execution. All enabled plugins must map to installed
-distributions. Unselected local pins and comments are preserved, and installed
-core dependency versions must match the current NetBox release requirements.
+The backend supports ordinary PyPI names and exact versions (including
+extras). Resolve ambiguous local requirements, duplicate entries and
+unpinned unselected configured plugins before execution. All enabled plugins
+must map to installed distributions. Non-plugin declarations and comments
+are preserved byte-for-byte. Installed core dependency versions must match
+the current NetBox release requirements.
 
-Before downtime the resolver checks all proposed local pins and exact core
-pins using NetBox's current Python, then prepares and verifies the offline
-wheel set. Dependency conflicts and incomplete resolution block execution.
+Before downtime the resolver checks all local declarations with exact core
+and plugin pins using NetBox's current Python. It prefers installed bare
+package versions when feasible, reports required changes and binds approved
+resolved versions to temporary execution constraints. It then prepares and
+verifies the offline wheel set. Dependency conflicts and incomplete
+resolution block execution.
 
 Once the verified backup is captured, the executor atomically writes the
 approved pins and installs the reviewed dependency set from the prepared
@@ -151,10 +195,11 @@ constraints are passed to the script to prevent dependency resolution from
 silently changing approved versions. The combined backend uses the existing
 Python runtime and requires wheels for installation. Before maintenance it
 prepares one complete wheel set per stage, including pip and wheel, in a
-private temporary directory. The only source-build exception is `psycopg-c`
-when required by the official NetBox core pin `psycopg[c]`. This requires an
-existing C compiler, Python headers and PostgreSQL client development files;
-netbox-ops does not install system build dependencies. Both upstream
+private temporary directory. Source-build exceptions are restricted to
+`psycopg-c` when required by the official core pin `psycopg[c]`, and the exact
+known `python-ldap` version for explicitly declared LDAP. Existing C compiler,
+Python headers and the respective PostgreSQL/LDAP client development files
+are required; netbox-ops does not install system build dependencies. Both upstream
 installation calls use only that local wheel set, so an unavailable package
 fails before service interruption and dependency versions cannot change
 between preflight and installation. Temporary wheels are removed on exit.
@@ -176,10 +221,11 @@ applied migrations; there is no automatic full rollback.
 
 ## CLI and terminal interface
 
-The existing NetBox, plugin and combined upgrade entries open an editable
-plan in the TUI. Choose a target release and select plugin packages, optionally
-pinning a specific stable release. Recalculate after edits, review the compact
-summary and open the compatibility details before approving. An edited
+Upgrade NetBox opens a single editable dashboard with planned changes,
+operations and overall readiness. Choose exact NetBox and/or plugin targets.
+Validate after edits, review the compact plan with D and technical evidence
+with E before approving. Unchanged rows are neutral when no changes are
+planned and no real conflict is known; this does not verify compatibility. An edited
 selection invalidates the previous plan. Execution requires the literal
 `UPGRADE` confirmation and, for uncertain plans, a second `UNCERTAIN`
 confirmation. The API authorization header is optional and entered without echo.
@@ -199,9 +245,9 @@ Use `--all` for plugins or `--plugins all` for a combined plan to select
 only installed packages reliably mapped to configured `PLUGINS` modules.
 The mapping uses installed distribution metadata (`top_level.txt` or wheel
 `RECORD`), not package names or local requirement declarations. Missing or
-ambiguous metadata needs manual review. Additional local packages remain
-pinned and included in dependency review; they are not plugin upgrade
-targets. Repeat `--plugin` to select multiple packages. Omitting a plugin version selects its latest
+ambiguous metadata needs manual review. Additional local declarations remain
+unchanged and are included in dependency review; they are not pin-management
+or plugin upgrade targets. Repeat `--plugin` to select multiple packages. Omitting a plugin version selects its latest
 stable release. Review the resulting versions and warnings, not just the
 requested selection. Published alternatives are candidates, not verified
 NetBox compatibility. Choose a version and recalculate the plan.
@@ -214,13 +260,13 @@ Pin review alone never writes a file; a stale review is rejected under the
 operation lock. Recalculate the upgrade plan after applying pins.
 
 If a local requirement also appears in the core requirements of a target
-release, the plan shows the exact local and core pins for that stage.
-An identical, simple local pin for a non-plugin package may be retained
-only when full dependency resolution succeeds. No declaration or comment
-is removed automatically. Review whether that local declaration is still
-needed before a later upgrade changes the core version. Differing pins,
-local extras, unpinned declarations and configured-plugin overlaps block
-execution until reviewed manually or a compatible target is chosen.
+release, the plan shows the local declaration and exact core pin for that
+stage. Bare non-plugin names, extras and identical exact non-plugin pins
+are resolved together with the core pin. No non-plugin declaration or comment
+is edited or removed automatically. Review whether a declaration is still
+needed before a later upgrade changes the core version. Conflicting exact
+pins, configured-plugin overlaps and unsupported declarations block execution
+until resolved manually or a compatible target is chosen.
 Independent prerequisite checks (including PostgreSQL ltree) still run
 when the resolver cannot safely run; the plan explicitly reports skipped
 dependency resolution. Every stage must pass before approval.
@@ -249,8 +295,12 @@ baseline database or publishes a new image.
 
 The scenarios cover NetBox 4.7.2 to 4.7.3, NetBox Inventory 2.7.0 to 2.7.1
 without a NetBox change, a combined upgrade, a cross-minor upgrade from
-4.4.10 to 4.7.3, and an injected final health validation failure after real
-migrations. Required intermediate stages remain covered by unit tests using
+4.4.10 to 4.7.3 with reorder-rack 1.1.4 to 1.1.5 and preserved bare LDAP/local
+requirements, and an injected final health validation failure after real
+migrations. The cross-minor case verifies denied migration permissions,
+explicit local administrative ltree installation and native migration creation
+on a disposable database. LDAP import is verified, not login against a real
+directory. Required intermediate stages remain covered by unit tests using
 hypothetical reviewed major boundaries until a supported real transition
 is available.
 

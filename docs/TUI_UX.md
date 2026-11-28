@@ -112,6 +112,23 @@ the inventory session (dashboard F5 refreshes official NetBox releases), Enter
 selects and Esc cancels. Cancellation may wait for a bounded in-flight lookup
 to finish before reusing the model. Discovery failure still permits retaining
 the installed version. Incomplete evidence is not approval.
+Upgrade NetBox opens directly into the planned changes dashboard. Operations
+stay immediately below the scrollable target table. Reserve rows for overall
+readiness, the primary reason and the footer before expanding the table.
+Use side-by-side component and plan panels on wider screens; use a compact
+plan summary on narrow or short screens. D/E expose complete evidence. Exact
+validation runs in the existing read-only worker while retaining the dashboard;
+execution stays disabled until the matching plan has been accepted. For an
+actual offline curses capture (synthetic plan, no live installation), run
+`python -m tests.upgrade.terminal_dashboard_capture /tmp/dashboard.json en`
+in a terminal from the repository root; use `pt` and `NO_COLOR=1` as needed.
+The regression suite captures 50x16, 80x24, 120x30 and 160x45, including resize.
+Dynamic
+pin actions retain focus by identity, never implicitly move focus to execution.
+With no changed targets, use neutral Unchanged labels unless there is a real
+compatibility, runtime or inventory problem; this is not verification. Raw
+evidence stays available on E. Once discovery finishes, restore the plan
+panels, with an explicit incomplete/failure summary and D/F5 retry guidance.
 Discovery opens directly in Upgrade Management. Show unknown values until
 installed inventory is observed, then publish installed rows while official
 release lookup continues. DISCOVERY STATUS reports the actual inventory,
@@ -186,9 +203,12 @@ Reopening the view shows the last recorded status, never an inferred success.
 Simple selectors share a content-sized panel, a section heading, a consistent
 selection highlight and the standard keyboard footer. They do not arm a
 selection until the operator navigates; Enter alone cannot choose a default.
-The backup type selector aligns the type and short description and shows
-contextual details below. Database and media-only backups do not stop NetBox;
-combined backups temporarily stop active NetBox and RQ writers. None includes
+For fixed short menus, show matching numeric shortcuts and the localized
+open hint; numbers select an option, never confirm a protected operation.
+Keep contextual details next to the menu on wide terminals and stack them on
+narrow terminals. Database and media-only backups do not stop NetBox. Media
+is a live archive, not an atomic snapshot; combined backups temporarily stop
+active NetBox and RQ writers for database/media consistency. None includes
 configuration. Restore scope keeps its selected backup and precautionary backup
 warning visible and Esc cancels immediately. Other selectors retain their
 existing Esc behavior, scrolling and confirmation gates. For real offline
@@ -211,8 +231,9 @@ required service restart and cleanup. Legacy progress callbacks retain the
 four-argument signature with task-based counters.
 
 Present PROGRESS, TASKS / STATUS and RESULT as separate top-aligned panels.
-Keep applicable planned rows stable. Leave the status column blank before
-a task starts, and omit non-applicable tasks. Show Running, OK, Failed,
+Keep applicable planned rows stable. Show a muted hollow circle (○) with no
+status text before a task starts, and omit non-applicable tasks. Use a filled
+circle (●) for observed states. Show Running, OK, Failed,
 Skipped and Not run when meaningful; never infer completion. The result panel
 has a neutral dash until an outcome exists. Colour reinforces the state,
 not the entire row. Wrap long names and result
