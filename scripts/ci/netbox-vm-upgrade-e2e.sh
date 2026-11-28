@@ -220,7 +220,6 @@ if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
   echo 'PASS: additional local package excluded from plugin selection'
 fi
 
-
 # Reproduce the reported incompatible plugin upgrade and preserve a bare local dependency
 # against real published releases, before any maintenance begins.
 if [[ "$scenario" == cross-minor ]]; then
@@ -238,6 +237,7 @@ sys.path.insert(0, '/opt/netbox-ops')
 from netbox_ops.config import load_config
 from netbox_ops.plugin_inventory import inventory_plugins
 from netbox_ops.upgrade_ui import discover_context, make_plan
+
 target, plugin, version = sys.argv[1:]
 cfg = load_config()
 context = discover_context(cfg)

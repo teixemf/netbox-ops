@@ -106,7 +106,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: netbox-449-schema-experiment
+          name: netbox-449-source-baseline
           path: ${{ runner.temp }}/netbox-ci
       - name: Publish immutable-version source baseline
         env:

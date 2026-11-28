@@ -173,12 +173,13 @@ EOF
       # Redis jobs and these commands must use fresh per-boot credentials.
       (
         cd /opt/netbox
-        venv/bin/python netbox/manage.py trace_paths --no-input
-        venv/bin/mkdocs build
-        venv/bin/python netbox/manage.py collectstatic --no-input
-        venv/bin/python netbox/manage.py remove_stale_contenttypes --no-input
-        venv/bin/python netbox/manage.py reindex --lazy
-        venv/bin/python netbox/manage.py clearsessions
+        source venv/bin/activate
+        python3 netbox/manage.py trace_paths --no-input
+        mkdocs build
+        python3 netbox/manage.py collectstatic --no-input
+        python3 netbox/manage.py remove_stale_contenttypes --no-input
+        python3 netbox/manage.py reindex --lazy
+        python3 netbox/manage.py clearsessions
       )
       echo 'PASS: NetBox 4.4.9 source auxiliary setup complete'
     fi

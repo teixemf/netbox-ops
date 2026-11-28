@@ -40,14 +40,14 @@ jobs:
       - name: Upload temporary baseline
         uses: actions/upload-artifact@v4
         with:
-          name: netbox-449-schema-experiment
+          name: netbox-449-source-baseline
           path: |
             ${{ runner.temp }}/netbox-ci/netbox-ubuntu24.qcow2
             ${{ runner.temp }}/netbox-ci/SHA256SUMS.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
-  benchmark:
+  verify-source:
     needs: build-source-baseline
     name: NetBox 4.4.9 / ${{ matrix.fixture }}
     runs-on: ubuntu-24.04
@@ -91,7 +91,7 @@ jobs:
         if: matrix.fixture == 'pre-migrated'
         uses: actions/download-artifact@v4
         with:
-          name: netbox-449-schema-experiment
+          name: netbox-449-source-baseline
           path: ${{ runner.temp }}/netbox-ci
       - name: Verify baseline integrity
         run: |
@@ -104,10 +104,46 @@ jobs:
           NETBOX_VM_BASELINE_VERSION: ${{ matrix.fixture == 'pre-migrated' && '4.4.9' || '4.7.3' }}
         run: |
           set -euo pipefail
-          bash scripts/ci/netbox-vm-host.sh verify | tee "$RUNNER_TEMP/benchmark.log"
+          bash scripts/ci/netbox-vm-host.sh verify | tee "$RUNNER_TEMP/source-upgrade.log"
       - name: Report fixture identity
         if: always()
         run: |
-          if test -f "$RUNNER_TEMP/benchmark.log"; then
-            grep -E '^(Source fixture:|Source dependency list SHA256:|PASS: NetBox 4.4.9 source auxiliary setup complete|PASS: isolated NetBox boot)' "$RUNNER_TEMP/benchmark.log" >> "$GITHUB_STEP_SUMMARY" || true
+          if test -f "$RUNNER_TEMP/source-upgrade.log"; then
+            grep -E '^(Source fixture:|Source dependency list SHA256:|PASS: NetBox 4.4.9 source auxiliary setup complete|PASS: isolated NetBox boot)' "$RUNNER_TEMP/source-upgrade.log" >> "$GITHUB_STEP_SUMMARY" || true
           fi
+
+      - name: Record exact fixture evidence
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/source-upgrade.log"
+          if [[ "$FIXTURE" == pre-migrated ]]; then
+            grep -Fx 'PASS: NetBox 4.4.9 source auxiliary setup complete' "$log"
+          fi
+          grep -Fx 'PASS: cross-minor real upgrade scenario' "$log"
+          grep -Ex "Source fixture: $FIXTURE; NetBox 4[.]4[.]9; revision [0-9a-f]{40}" "$log" |
+            sed 's/^.*revision //' > "$RUNNER_TEMP/source-identity.txt"
+          grep -Ex 'Source dependency list SHA256: [0-9a-f]{64}' "$log" >> "$RUNNER_TEMP/source-identity.txt"
+          test "$(wc -l < "$RUNNER_TEMP/source-identity.txt")" -eq 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-identity-${{ matrix.fixture }}
+          path: ${{ runner.temp }}/source-identity.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  compare-source:
+    name: Compare source fixture identity
+    needs: verify-source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: source-identity-*
+          path: source-identity
+      - name: Require identical source revision and installed dependencies
+        run: |
+          set -euo pipefail
+          diff -u source-identity/source-identity-fresh/source-identity.txt source-identity/source-identity-pre-migrated/source-identity.txt
+          echo 'PASS: source revision and installed dependency versions match'
