@@ -346,7 +346,8 @@ class CursesMenu:
                         return name.ljust(names_width) + '  ' + safe_text(subtitles[item])
                     labels = [option_text(item, label) if item is not None else safe_text(label)
                               for item, label, _ in lines]
-                panel_width = min(w - 6, max(len(heading), *(len(label) for label in labels)) + 4)
+                heading_width = len(heading) + (len(f' {len(entries)}/{len(entries)}') if details else 0)
+                panel_width = min(w - 6, max(heading_width, *(len(label) for label in labels)) + 4)
                 detail_width = w - 6
                 side_by_side = bool(details and w >= 76)
                 if side_by_side:
