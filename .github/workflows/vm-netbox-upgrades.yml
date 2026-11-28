@@ -34,7 +34,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [netbox, plugins, combined, cross-minor, failure]
+        scenario: ${{ fromJSON(github.workflow == 'Full regression' && '["netbox","plugins","combined","cross-minor","failure","cross-minor-fresh"]' || '["netbox","plugins","combined","cross-minor","failure"]') }}
+    env:
+      NETBOX_VM_BASELINE_VERSION: ${{ matrix.scenario == 'cross-minor' && '4.4.9' || '4.7.3' }}
+      NETBOX_VM_CROSS_MINOR_SOURCE: ${{ matrix.scenario == 'cross-minor' && '4.4.9' || '4.4.10' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -43,8 +46,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh scripts/ci/netbox-vm-upgrade-e2e.sh
+          for script in scripts/ci/netbox-vm-{host,guest,upgrade-e2e}.sh; do bash -n "$script" || exit; done
           source scripts/ci/netbox-vm-baseline.env
+          if [[ "$NETBOX_VM_BASELINE_VERSION" == 4.4.9 ]]; then BASELINE_TAG=$CROSS_MINOR_BASELINE_TAG; fi
           if [[ ! "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]; then
             echo '::error::Invalid baseline tag'
             exit 1
@@ -63,6 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           source scripts/ci/netbox-vm-baseline.env
+          if [[ "$NETBOX_VM_BASELINE_VERSION" == 4.4.9 ]]; then BASELINE_TAG=$CROSS_MINOR_BASELINE_TAG; fi
           mkdir -p "$RUNNER_TEMP/netbox-ci"
           start=$SECONDS
           gh release download "$BASELINE_TAG" \
@@ -79,5 +84,5 @@ jobs:
 
       - name: Execute upgrade in a disposable overlay
         env:
-          NETBOX_VM_UPGRADE_SCENARIO: ${{ matrix.scenario }}
+          NETBOX_VM_UPGRADE_SCENARIO: ${{ matrix.scenario == 'cross-minor-fresh' && 'cross-minor' || matrix.scenario }}
         run: bash scripts/ci/netbox-vm-host.sh verify
