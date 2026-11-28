@@ -203,9 +203,12 @@ Reopening the view shows the last recorded status, never an inferred success.
 Simple selectors share a content-sized panel, a section heading, a consistent
 selection highlight and the standard keyboard footer. They do not arm a
 selection until the operator navigates; Enter alone cannot choose a default.
-The backup type selector aligns the type and short description and shows
-contextual details below. Database and media-only backups do not stop NetBox;
-combined backups temporarily stop active NetBox and RQ writers. None includes
+For fixed short menus, show matching numeric shortcuts and the localized
+open hint; numbers select an option, never confirm a protected operation.
+Keep contextual details next to the menu on wide terminals and stack them on
+narrow terminals. Database and media-only backups do not stop NetBox. Media
+is a live archive, not an atomic snapshot; combined backups temporarily stop
+active NetBox and RQ writers for database/media consistency. None includes
 configuration. Restore scope keeps its selected backup and precautionary backup
 warning visible and Esc cancels immediately. Other selectors retain their
 existing Esc behavior, scrolling and confirmation gates. For real offline
