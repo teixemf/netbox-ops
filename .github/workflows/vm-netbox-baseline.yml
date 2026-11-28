@@ -1,12 +1,19 @@
 name: Publish reusable NetBox VM baseline
 
 on:
-  # Bootstrap the first baseline when this workflow reaches main.
-  # Later baseline refreshes are manual and use a new version tag.
-  push:
-    branches: [main]
-    paths: ['.github/workflows/vm-netbox-baseline.yml']
+  # Baselines are refreshed explicitly; never overwrite an existing tag.
   workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline to build, validate and publish
+        type: choice
+        options: ['4.7.3', '4.4.9']
+        default: '4.7.3'
+        required: true
+      publish_source:
+        description: Authorize publication of the 4.4.9 test-only baseline
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,7 +21,7 @@ permissions:
 jobs:
   publish:
     name: Prepare and publish a versioned QCOW2
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.baseline == '4.7.3'
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     permissions:
@@ -43,7 +50,8 @@ jobs:
           fi
 
       - name: Check shell syntax
-        run: bash -n scripts/ci/netbox-vm-host.sh scripts/ci/netbox-vm-guest.sh
+        run: |
+          for script in scripts/ci/netbox-vm-{host,guest}.sh; do bash -n "$script" || exit; done
 
       - name: Install virtualization tools
         run: |
@@ -77,3 +85,51 @@ jobs:
           echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"
           echo "Source commit: $source_commit" >> "$GITHUB_STEP_SUMMARY"
           echo "SHA256: $(cut -d' ' -f1 SHA256SUMS.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+  validate-source:
+    if: github.ref == 'refs/heads/dev' && inputs.baseline == '4.4.9'
+    uses: ./.github/workflows/vm-netbox-source-baseline.yml
+
+  publish-source:
+    name: Publish validated 4.4.9 test-only baseline
+    needs: validate-source
+    if: github.ref == 'refs/heads/dev' && inputs.baseline == '4.4.9' && inputs.publish_source
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-netbox-source-baseline
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: netbox-449-source-baseline
+          path: ${{ runner.temp }}/netbox-ci
+      - name: Publish immutable-version source baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/netbox-vm-baseline.env
+          [[ "$CROSS_MINOR_BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox449-schema-v[0-9]+$ ]]
+          cd "$RUNNER_TEMP/netbox-ci"
+          sha256sum -c SHA256SUMS.txt
+          test "$(stat -c %s netbox-ubuntu24.qcow2)" -lt 2147483648
+          if gh release view "$CROSS_MINOR_BASELINE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo '::error::Source baseline already exists; never overwrite'
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$CROSS_MINOR_BASELINE_TAG"; then
+            echo '::error::Source baseline tag already exists'
+            exit 1
+          else
+            [[ $? == 2 ]]
+          fi
+          gh release create "$CROSS_MINOR_BASELINE_TAG" netbox-ubuntu24.qcow2 SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --latest=false --title "NetBox CI baseline $CROSS_MINOR_BASELINE_TAG" \
+            --notes "Test-only Ubuntu 24.04 / NetBox 4.4.9 migrated source fixture. Real cross-minor upgrade verified in this run. No netbox-ops checkout, runtime secrets or SSH keys. Auxiliary source setup runs in each disposable overlay."
+          echo "Published source baseline: $CROSS_MINOR_BASELINE_TAG" >> "$GITHUB_STEP_SUMMARY"

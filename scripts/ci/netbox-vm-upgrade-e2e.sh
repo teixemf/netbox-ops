@@ -4,6 +4,13 @@ set -Eeuo pipefail
 # Report the failed fixture line without echoing commands or credentials.
 trap 'echo "FAIL: upgrade E2E fixture line $LINENO" >&2' ERR
 scenario=${1:?Missing scenario}
+source_version=${2:-4.4.10}
+fixture=${3:-fresh}
+case "$source_version:$fixture" in
+  4.4.10:fresh|4.4.9:fresh) ;;
+  4.4.9:pre-migrated) [[ "$scenario" == cross-minor ]] ;;
+  *) exit 2 ;;
+esac
 [[ $(id -u) == 0 && -f /run/netbox-ops-ci-e2e ]]
 [[ $(cat /run/netbox-ops-ci-e2e) == netbox-ci-e2e ]]
 case "$(systemd-detect-virt --vm)" in qemu|kvm) ;; *) exit 1 ;; esac
@@ -13,7 +20,13 @@ cli=(/usr/local/sbin/netbox-ops --lang en)
 status_url=http://127.0.0.1/api/status/
 backup_dir=/var/lib/netbox-ops/backups
 marker=/var/lib/netbox-ops/upgrade.pending
-[[ -d "$root" && ! -e "$root/.git" && ! -e "$marker" ]]
+[[ -d "$root" && ! -e "$marker" ]]
+if [[ "$fixture" == fresh ]]; then
+  [[ ! -e "$root/.git" ]]
+else
+  [[ -d "$root/.git" ]]
+  [[ $(git -C "$root" describe --tags --exact-match) == v4.4.9 ]]
+fi
 [[ -z $(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]
 umask 022
 # Check isolation configured at boot, before creating the source fixture.
@@ -22,8 +35,10 @@ for unit in apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-
   case "$state" in masked|masked-runtime) ;; *) echo "FAIL: background APT unit is not masked: $unit" >&2; exit 1 ;; esac
   case "$(systemctl show -p ActiveState --value "$unit")" in inactive|failed) ;; *) echo "FAIL: background APT unit active: $unit" >&2; exit 1 ;; esac
 done
-apt-get update -qq
-NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git
+if [[ "$fixture" == fresh ]]; then
+  apt-get update -qq
+  NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git
+fi
 old=4.7.2
 target=4.7.3
 python=/usr/bin/python3.12
@@ -31,73 +46,86 @@ plugin=netbox-inventory
 old_plugin=2.7.0
 new_plugin=2.7.1
 if [[ "$scenario" == cross-minor ]]; then
-  old=4.4.10
+  old=$source_version
   plugin=netbox-reorder-rack
   old_plugin=1.1.4
   new_plugin=1.1.5
-  NEEDRESTART_MODE=l apt-get install -y --no-install-recommends libldap-dev libsasl2-dev libssl-dev python3.12-dev
+  if [[ "$fixture" == fresh ]]; then
+    NEEDRESTART_MODE=l apt-get install -y --no-install-recommends libldap-dev libsasl2-dev libssl-dev python3.12-dev
+  fi
 fi
 [[ "$scenario" != plugins ]] || target=$old
 # Preserve the fixture configuration, never the newer schema. A fresh database
 # is created for the older release rather than attempting a downgrade.
-systemctl stop netbox-rq netbox
 scratch=$(mktemp -d)
 chmod 700 "$scratch"
 trap 'rm -rf -- "$scratch"' EXIT
-cp "$root/netbox/netbox/configuration.py" "$scratch/configuration.py"
-mv "$root" "$scratch/archive-install"
-git clone --quiet --depth 1 --branch "v$old" https://github.com/netbox-community/netbox.git "$root"
-install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netbox/configuration.py"
-# Both tested releases accept DATABASES and reject a simultaneous DATABASE.
-# The baseline supplies DATABASES. Permit unauthenticated status checks only
-# in this disposable guest (loopback nginx, no production configuration).
-printf '\nLOGIN_REQUIRED = False\n' >> "$root/netbox/netbox/configuration.py"
-if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
-  printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
-  printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
-  printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
-elif [[ "$scenario" == cross-minor ]]; then
-  printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> "$root/netbox/netbox/configuration.py"
-  printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
-  printf '%s\n' 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0' >> "$root/local_requirements.txt"
-else
-  printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
-fi
-# Keep an ordinary local declaration that matches a core pin at the target.
-case "$scenario" in
-  plugins) overlap_pin='Django==6.1.1' ;;
-  netbox|combined) overlap_pin='pymdown-extensions==12.1' ;;
-  *) overlap_pin='' ;;
-esac
-if [[ -n "$overlap_pin" ]]; then
-  printf '# preserve local intent\n%s\n' "$overlap_pin" >> "$root/local_requirements.txt"
-fi
-install -m 0644 "$root/contrib/gunicorn.py" "$root/gunicorn.py"
-sed -i 's/^workers = 5$/workers = 2/' "$root/gunicorn.py"
-install -m 0644 "$root/contrib/netbox.service" /etc/systemd/system/netbox.service
-install -m 0644 "$root/contrib/netbox-rq.service" /etc/systemd/system/netbox-rq.service
-systemctl daemon-reload
-for dir in media scripts reports; do
-  install -d -o netbox -g netbox "$root/netbox/$dir"
-  chown -R netbox:netbox "$root/netbox/$dir"
-done
-runuser -u postgres -- dropdb --if-exists netbox
-runuser -u postgres -- createdb --owner=netbox netbox
-# Both source tags leave pymdown-extensions unpinned; 13.x breaks
-# their documentation builders. Use the exact pin from upstream 4.7.3
-# only while creating the source fixture. The tested upgrade receives
-# no fixture constraint, and executes the unmodified official script.
-if [[ "$old" == 4.7.2 || "$old" == 4.4.10 ]]; then
-  printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
-  if [[ "$scenario" == cross-minor ]]; then
-    printf '%s\n' 'python-ldap==3.4.8' >> "$scratch/source-constraints.txt"
+overlap_pin=''
+if [[ "$fixture" == fresh ]]; then
+  systemctl stop netbox-rq netbox
+  cp "$root/netbox/netbox/configuration.py" "$scratch/configuration.py"
+  mv "$root" "$scratch/archive-install"
+  git clone --quiet --depth 1 --branch "v$old" https://github.com/netbox-community/netbox.git "$root"
+  install -o root -g netbox -m 0640 "$scratch/configuration.py" "$root/netbox/netbox/configuration.py"
+  # Both tested releases accept DATABASES and reject a simultaneous DATABASE.
+  # The baseline supplies DATABASES. Permit unauthenticated status checks only
+  # in this disposable guest (loopback nginx, no production configuration).
+  printf '\nLOGIN_REQUIRED = False\n' >> "$root/netbox/netbox/configuration.py"
+  if [[ "$scenario" == plugins || "$scenario" == combined ]]; then
+    printf '\nPLUGINS = ["netbox_inventory"]\n' >> "$root/netbox/netbox/configuration.py"
+    printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
+    printf '%s\n' 'tomli-w==1.2.0' >> "$root/local_requirements.txt"
+  elif [[ "$scenario" == cross-minor ]]; then
+    printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> "$root/netbox/netbox/configuration.py"
+    printf '%s==%s\n' "$plugin" "$old_plugin" > "$root/local_requirements.txt"
+    printf '%s\n' 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0' >> "$root/local_requirements.txt"
+  else
+    printf '\nPLUGINS = []\n' >> "$root/netbox/netbox/configuration.py"
   fi
-  (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
+  # Keep an ordinary local declaration that matches a core pin at the target.
+  case "$scenario" in
+    plugins) overlap_pin='Django==6.1.1' ;;
+    netbox|combined) overlap_pin='pymdown-extensions==12.1' ;;
+    *) overlap_pin='' ;;
+  esac
+  if [[ -n "$overlap_pin" ]]; then
+    printf '# preserve local intent\n%s\n' "$overlap_pin" >> "$root/local_requirements.txt"
+  fi
+  install -m 0644 "$root/contrib/gunicorn.py" "$root/gunicorn.py"
+  sed -i 's/^workers = 5$/workers = 2/' "$root/gunicorn.py"
+  install -m 0644 "$root/contrib/netbox.service" /etc/systemd/system/netbox.service
+  install -m 0644 "$root/contrib/netbox-rq.service" /etc/systemd/system/netbox-rq.service
+  systemctl daemon-reload
+  for dir in media scripts reports; do
+    install -d -o netbox -g netbox "$root/netbox/$dir"
+    chown -R netbox:netbox "$root/netbox/$dir"
+  done
+  runuser -u postgres -- dropdb --if-exists netbox
+  runuser -u postgres -- createdb --owner=netbox netbox
+  # These source tags leave pymdown-extensions unpinned; 13.x breaks
+  # their documentation builders. Use the exact pin from upstream 4.7.3
+  # only while creating the source fixture. The tested upgrade receives
+  # no fixture constraint, and executes the unmodified official script.
+  if [[ "$old" == 4.7.2 || "$old" == 4.4.10 || "$old" == 4.4.9 ]]; then
+    printf '%s\n' 'pymdown-extensions==12.1' > "$scratch/source-constraints.txt"
+    if [[ "$scenario" == cross-minor ]]; then
+      printf '%s\n' 'python-ldap==3.4.8' >> "$scratch/source-constraints.txt"
+    fi
+    (cd "$root" && PIP_CONSTRAINT="$scratch/source-constraints.txt" PYTHON="$python" bash upgrade.sh)
+  else
+    (cd "$root" && PYTHON="$python" bash upgrade.sh)
+  fi
+  systemctl start netbox netbox-rq
+  echo "Fixture installed: NetBox $old"
 else
-  (cd "$root" && PYTHON="$python" bash upgrade.sh)
+  # The baseline was built without runtime credentials; provision has already
+  # installed this checkout, created fresh credentials and checked migrations.
+  [[ $(git -C "$root" describe --tags --exact-match) == "v$old" ]]
+  diff -u <(printf '%s\n' "$plugin==$old_plugin" 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0') "$root/local_requirements.txt"
+  "$root/venv/bin/python" -c 'import ldap, importlib.metadata as m; assert m.version("netbox-reorder-rack")=="1.1.4"; assert m.version("tomli-w")=="1.2.0"; assert m.version("django-auth-ldap")=="5.4.0"; assert m.version("python-ldap")=="3.4.8"'
+  for unit in netbox netbox-rq; do systemctl is-active --quiet "$unit"; done
+  echo "Fixture pre-migrated: NetBox $old"
 fi
-systemctl start netbox netbox-rq
-echo "Fixture installed: NetBox $old"
 wait_health() {
   local version=$1
   for i in $(seq 1 60); do
@@ -111,6 +139,10 @@ wait_health() {
   return 1
 }
 wait_health "$old"
+printf 'Source fixture: %s; NetBox %s; revision %s\n' "$fixture" "$old" "$(git -C "$root" rev-parse HEAD)"
+if [[ "$scenario" == cross-minor ]]; then
+  printf 'Source dependency list SHA256: %s\n' "$("$root/venv/bin/python" -m pip list --format=freeze | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
+fi
 if [[ "$scenario" == cross-minor ]]; then
   # This disposable database has no ltree yet. Exercise both the denied
   # migration role and the verified administrative path before the real
@@ -555,7 +587,7 @@ assert record['target_netbox'] == target
 assert hashlib.sha256((directory / 'configuration.py').read_bytes()).hexdigest() == config_sha
 assert record['stages'][-1] == target
 if scenario == 'cross-minor':
-    assert old == '4.4.10' and record['stages'] == [target]
+    assert old in ('4.4.9', '4.4.10') and record['stages'] == [target]
     assert ['netbox-reorder-rack', '1.1.4'] in record['plugin_versions']
     assert ['netbox-reorder-rack', '1.1.5'] in record['stage_commits'][-1]['plugin_versions']
 if scenario in ('plugins', 'combined'):

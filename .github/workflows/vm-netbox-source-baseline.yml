@@ -1,0 +1,149 @@
+name: Validate NetBox 4.4.9 source baseline
+
+on:
+  workflow_call:
+  pull_request:
+    branches: [dev]
+    paths:
+      - '.github/workflows/vm-netbox-source-baseline.yml'
+      - '.github/workflows/vm-netbox-baseline.yml'
+      - 'scripts/ci/netbox-vm-host.sh'
+      - 'scripts/ci/netbox-vm-guest.sh'
+      - 'scripts/ci/netbox-vm-upgrade-e2e.sh'
+      - 'scripts/ci/netbox-vm-baseline.env'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-source-baseline:
+    name: Build pre-migrated NetBox 4.4.9
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: |
+          for script in scripts/ci/netbox-vm-{host,guest,upgrade-e2e}.sh; do bash -n "$script" || exit; done
+      - name: Install virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Build isolated source fixture
+        env:
+          NETBOX_VM_BASELINE_VERSION: '4.4.9'
+          NETBOX_VM_CROSS_MINOR_SOURCE: '4.4.9'
+        run: bash scripts/ci/netbox-vm-host.sh build
+      - name: Upload temporary baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: netbox-449-source-baseline
+          path: |
+            ${{ runner.temp }}/netbox-ci/netbox-ubuntu24.qcow2
+            ${{ runner.temp }}/netbox-ci/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+  verify-source:
+    needs: build-source-baseline
+    name: NetBox 4.4.9 / ${{ matrix.fixture }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [fresh, pre-migrated]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate and record source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          lscpu
+          free -m
+          for script in scripts/ci/netbox-vm-{host,guest,upgrade-e2e}.sh; do bash -n "$script" || exit; done
+          source scripts/ci/netbox-vm-baseline.env
+          [[ "$BASELINE_TAG" =~ ^netbox-ubuntu2404-netbox[0-9]+-schema-v[0-9]+$ ]]
+          echo "Control baseline: $BASELINE_TAG; source: 4.4.9; fixture: ${{ matrix.fixture }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Download and verify versioned baseline
+        if: matrix.fixture == 'fresh'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/netbox-vm-baseline.env
+          mkdir -p "$RUNNER_TEMP/netbox-ci"
+          gh release download "$BASELINE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/netbox-ci" --pattern netbox-ubuntu24.qcow2 --pattern SHA256SUMS.txt
+          cd "$RUNNER_TEMP/netbox-ci"
+          test -s netbox-ubuntu24.qcow2
+          test -s SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+      - name: Download temporary 4.4.9 baseline
+        if: matrix.fixture == 'pre-migrated'
+        uses: actions/download-artifact@v4
+        with:
+          name: netbox-449-source-baseline
+          path: ${{ runner.temp }}/netbox-ci
+      - name: Verify baseline integrity
+        run: |
+          cd "$RUNNER_TEMP/netbox-ci"
+          sha256sum -c SHA256SUMS.txt
+      - name: Run identical cross-minor scenario
+        env:
+          NETBOX_VM_UPGRADE_SCENARIO: cross-minor
+          NETBOX_VM_CROSS_MINOR_SOURCE: '4.4.9'
+          NETBOX_VM_BASELINE_VERSION: ${{ matrix.fixture == 'pre-migrated' && '4.4.9' || '4.7.3' }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/netbox-vm-host.sh verify | tee "$RUNNER_TEMP/source-upgrade.log"
+      - name: Report fixture identity
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/source-upgrade.log"; then
+            grep -E '^(Source fixture:|Source dependency list SHA256:|PASS: NetBox 4.4.9 source auxiliary setup complete|PASS: isolated NetBox boot)' "$RUNNER_TEMP/source-upgrade.log" >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: Record exact fixture evidence
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/source-upgrade.log"
+          if [[ "$FIXTURE" == pre-migrated ]]; then
+            grep -Fx 'PASS: NetBox 4.4.9 source auxiliary setup complete' "$log"
+          fi
+          grep -Fx 'PASS: cross-minor real upgrade scenario' "$log"
+          grep -Ex "Source fixture: $FIXTURE; NetBox 4[.]4[.]9; revision [0-9a-f]{40}" "$log" |
+            sed 's/^.*revision //' > "$RUNNER_TEMP/source-identity.txt"
+          grep -Ex 'Source dependency list SHA256: [0-9a-f]{64}' "$log" >> "$RUNNER_TEMP/source-identity.txt"
+          test "$(wc -l < "$RUNNER_TEMP/source-identity.txt")" -eq 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-identity-${{ matrix.fixture }}
+          path: ${{ runner.temp }}/source-identity.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  compare-source:
+    name: Compare source fixture identity
+    needs: verify-source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: source-identity-*
+          path: source-identity
+      - name: Require identical source revision and installed dependencies
+        run: |
+          set -euo pipefail
+          diff -u source-identity/source-identity-fresh/source-identity.txt source-identity/source-identity-pre-migrated/source-identity.txt
+          echo 'PASS: source revision and installed dependency versions match'

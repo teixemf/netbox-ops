@@ -2,6 +2,16 @@
 # Build a secret-free NetBox VM and check two disposable boots from its QCOW2.
 set -euo pipefail
 mode=$1
+baseline_version=${NETBOX_VM_BASELINE_VERSION:-4.7.3}
+source_version=${NETBOX_VM_CROSS_MINOR_SOURCE:-4.4.10}
+case "$baseline_version:$source_version" in
+  4.7.3:4.4.10|4.7.3:4.4.9|4.4.9:4.4.9) ;;
+  *) echo 'Invalid baseline/source version pair' >&2; exit 2 ;;
+esac
+if [[ "$mode" == verify && "$baseline_version" == 4.4.9 && "${NETBOX_VM_UPGRADE_SCENARIO:-}" != cross-minor ]]; then
+  echo 'The 4.4.9 baseline is restricted to cross-minor verification' >&2
+  exit 2
+fi
 workdir="$RUNNER_TEMP/netbox-ci"
 mkdir -p "$workdir"
 cd "$workdir"
@@ -129,7 +139,7 @@ if [[ "$mode" == build ]]; then
     -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./known-build \
     "$GITHUB_WORKSPACE/scripts/ci/netbox-vm-guest.sh" \
     ubuntu@127.0.0.1:/home/ubuntu/netbox-vm-guest.sh
-  ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh prepare'
+  ssh_guest "sudo bash /home/ubuntu/netbox-vm-guest.sh prepare $baseline_version"
   # Refuse to publish when sanitization fails.
   ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh sanitize'
   qmp_powerdown
@@ -167,10 +177,12 @@ elif [[ "$mode" == verify ]]; then
       -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=./known-$attempt" \
       "$GITHUB_WORKSPACE/scripts/ci/netbox-vm-guest.sh" source.tar.gz \
       ubuntu@127.0.0.1:/home/ubuntu/
-    ssh_guest 'sudo bash /home/ubuntu/netbox-vm-guest.sh provision'
+    ssh_guest "sudo bash /home/ubuntu/netbox-vm-guest.sh provision $baseline_version"
     if [[ -n "$scenario" ]]; then
       ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
-      ssh_guest "sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-upgrade-e2e.sh $scenario"
+      fixture=fresh
+      if [[ "$baseline_version" == 4.4.9 ]]; then fixture=pre-migrated; fi
+      ssh_guest "sudo bash /opt/netbox-ops/scripts/ci/netbox-vm-upgrade-e2e.sh $scenario $source_version $fixture"
     elif (( attempt == 1 )); then
       if [[ "${NETBOX_VM_E2E:-0}" == 1 ]]; then
         ssh_guest 'printf "%s\\n" netbox-ci-e2e | sudo tee /run/netbox-ops-ci-e2e >/dev/null'
