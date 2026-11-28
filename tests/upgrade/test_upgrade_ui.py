@@ -398,6 +398,26 @@ class UpgradeTuiTests(InterfaceFixture):
                     self.assertEqual(dashboard._discovery_states['inventory'], 'done')
                     self.assertEqual(dashboard._discovery_states['releases'], 'running')
 
+    def test_discovery_pulses_only_running_marker(self):
+        from concurrent.futures import Future
+
+        for language in LANGUAGES:
+            dashboard, menu = self._dashboard(dimensions=(16, 50), language=language)
+            menu.colors.update(title=11, pulse_low=21, pulse_high=31, pulse_peak=41)
+            dashboard._discovery_screen = 'full'
+            dashboard._discovery_states = {'inventory': 'done', 'releases': 'running',
+                                           'suggestions': 'pending', 'assessment': 'pending'}
+            dashboard.future = Future()
+            with patch('netbox_ops.tui.time.monotonic', return_value=1.4):
+                dashboard._draw()
+            frame = menu.stdscr.frames[-1]
+            self.assertEqual([attr for _, _, text, attr in frame if text == '●'], [41])
+            dashboard.future = None
+            dashboard._discovery_states['releases'] = 'failed'
+            dashboard.error = menu.t('upgrade_discovery_error')
+            dashboard._draw()
+            self.assertFalse(any(text == '●' for _, _, text, _ in menu.stdscr.frames[-1]))
+
     def test_discovery_omits_not_applicable_and_leaves_pending_status_blank(self):
         for language in LANGUAGES:
             dashboard, menu = self._dashboard(language=language)
@@ -1011,6 +1031,16 @@ class UpgradeTuiTests(InterfaceFixture):
                                 except OSError as exc:
                                     if exc.errno != errno.EIO:
                                         raise
+                        while select.select([master], [], [], 0)[0]:
+                            try:
+                                chunk = os.read(master, 65536)
+                            except OSError as exc:
+                                if exc.errno != errno.EIO:
+                                    raise
+                                break
+                            if not chunk:
+                                break
+                            terminal_output.extend(chunk)
                         self.assertEqual(proc.returncode, 0, terminal_output.decode(errors='replace'))
                     finally:
                         if proc is not None and proc.poll() is None:
@@ -1023,8 +1053,32 @@ class UpgradeTuiTests(InterfaceFixture):
                     t = Translator(language)
                     self.assertEqual([(f['height'], f['width']) for f in frames],
                                      [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
-                                      (30, 120), (16, 50), (30, 120), (16, 50), (30, 120)])
-                    for frame in frames:
+                                      (30, 120), (16, 50), (30, 120), (16, 50), (30, 120),
+                                      (30, 120), (30, 120)])
+                    low, peak = frames[-2:]
+                    self.assertEqual((low['scenario'], peak['scenario']), ('pulse', 'pulse'))
+                    self.assertEqual(low['lines'], peak['lines'])
+                    running_y = next(y for y, line in enumerate(low['lines'])
+                                     if t('nbo_task_state_running') in line)
+                    differences = [(y, x) for y, (before, after) in
+                                   enumerate(zip(low['attributes'], peak['attributes']))
+                                   for x, (a, b) in enumerate(zip(before, after)) if a != b]
+                    # inch() is a narrow-character API: on some ncurses builds
+                    # the Unicode glyph's bits alias the A_COLOR bits. Require
+                    # unchanged attributes everywhere except the live marker,
+                    # and verify the actual xterm foreground escapes for it.
+                    self.assertEqual([cell for cell in differences if cell != (running_y, 3)], [])
+                    if monochrome:
+                        self.assertEqual(differences, [])
+                    for foreground in (37, 80):
+                        pattern = (rb'\x1b\[38;5;' + str(foreground).encode()
+                                   + rb'(?:;48;5;234)?m(?:\x1b\[[0-9;]*m)*'
+                                   + '●'.encode())
+                        if monochrome:
+                            self.assertNotRegex(bytes(terminal_output), pattern)
+                        else:
+                            self.assertRegex(bytes(terminal_output), pattern)
+                    for frame in frames[:-2]:
                         self.assertEqual(frame['color'], not monochrome)
                         lines = frame['lines']
                         if frame['scenario'] == 'discovery':

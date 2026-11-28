@@ -119,5 +119,27 @@ class V033Tests(unittest.TestCase):
         self.assertIn((1,255,233),used)
         self.assertIn((6,255,23),used)
 
+    def test_pulse_palette_uses_only_available_local_pairs(self):
+        for colors, pairs, expected in ((256, 256, True), (256, 24, False), (8, 8, False)):
+            with self.subTest(colors=colors, pairs=pairs):
+                menu = CursesMenu(FakeScreen(), Translator('en'))
+                with (patch('netbox_ops.tui.curses.has_colors', return_value=True),
+                      patch('netbox_ops.tui.curses.start_color'),
+                      patch('netbox_ops.tui.curses.use_default_colors'),
+                      patch('netbox_ops.tui.curses.COLORS', colors, create=True),
+                      patch('netbox_ops.tui.curses.COLOR_PAIRS', pairs, create=True),
+                      patch('netbox_ops.tui.curses.init_pair') as initialize,
+                      patch('netbox_ops.tui.curses.color_pair', side_effect=lambda n: n),
+                      patch('netbox_ops.tui.curses.init_color') as global_color,
+                      patch('netbox_ops.tui.curses.curs_set'),
+                      patch('netbox_ops.tui.curses.set_escdelay'),
+                      patch.dict('os.environ', {}, clear=True)):
+                    menu._init_screen()
+                self.assertEqual('pulse_low' in menu.colors, expected)
+                self.assertEqual('pulse_peak_panel' in menu.colors, expected)
+                self.assertIn('title', menu.colors)
+                self.assertTrue(all(call.args[0] < pairs for call in initialize.call_args_list))
+                global_color.assert_not_called()
+
 if __name__=='__main__':
     unittest.main()

@@ -236,7 +236,12 @@ four-argument signature with task-based counters.
 Present PROGRESS, TASKS / STATUS and RESULT as separate top-aligned panels.
 Keep applicable planned rows stable. Show a muted hollow circle (○) with no
 status text before a task starts, and omit non-applicable tasks. Use a filled
-circle (●) for observed states. Show Running, OK, Failed,
+circle (●) for observed states. In periodically refreshed backup and discovery
+views, only the running marker pulses through local teal colour pairs over
+about 2.4 seconds; keep it visible and stop the pulse on completion or failure.
+Use static markers with limited colours or monochrome. Synchronous service
+callbacks and phase-only execution messages remain static; do not introduce
+threads or change operations just for animation. Show Running, OK, Failed,
 Skipped and Not run when meaningful; never infer completion. The result panel
 has a neutral dash until an outcome exists. Colour reinforces the state,
 not the entire row. Wrap long names and result

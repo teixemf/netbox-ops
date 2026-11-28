@@ -73,6 +73,17 @@ def capture(screen, language):
             result.append(dict(scenario='discovery', height=h, width=w, color=bool(menu.colors),
                                lines=[screen.instr(y, 0).decode('utf-8', errors='replace').rstrip()
                                       for y in range(h)]))
+        # Read actual curses cell attributes, not only the FakeScreen calls.
+        # Compare low/peak phases at the same size so only the marker can vary.
+        curses.resizeterm(30, 120)
+        for instant in (0.2, 1.4):
+            with patch('netbox_ops.tui.time.monotonic', return_value=instant):
+                assert dashboard._draw()
+            result.append(dict(scenario='pulse', height=30, width=120, color=bool(menu.colors),
+                               lines=[screen.instr(y, 0).decode('utf-8', errors='replace').rstrip()
+                                      for y in range(30)],
+                               attributes=[[screen.inch(y, x) & curses.A_COLOR for x in range(119)]
+                                           for y in range(30)]))
         return result
     finally:
         fixture.doCleanups()
