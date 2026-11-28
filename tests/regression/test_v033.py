@@ -57,7 +57,7 @@ class V033Tests(unittest.TestCase):
         words=' '.join(w[2] for w in screen.frames[-1])
         self.assertIn('denied',words)
         self.assertIn('Failed: redis', words)
-        self.assertTrue(any(text.strip() == m.t('nbo_task_state_failed')
+        self.assertTrue(any(text.strip() == '● ' + m.t('nbo_task_state_failed')
                             for _, _, text, _ in screen.frames[-1]))
         self.assertNotIn('100%',words)
 
