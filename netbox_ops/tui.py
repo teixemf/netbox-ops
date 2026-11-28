@@ -32,6 +32,11 @@ LOG_COUNTS = (10, 20, 50, 100, 200, 500)
 ACTIONS = ('start', 'stop', 'restart', 'enable', 'disable')
 
 
+def task_marker(state: str) -> str:
+    """Use the same single-cell marker for planned and observed task states."""
+    return '○' if state == 'pending' else '●'
+
+
 def make_main_items(t: Translator) -> list[tuple[str, str, tuple[str, ...]]]:
     """One source of truth for the menu labels and CLI commands."""
     items = [(f'{number}  {t(key)}', 'action', (group, action))
@@ -829,9 +834,9 @@ class CursesMenu:
         for i, (service, state, info) in enumerate(self._service_steps[offset:offset + capacity]):
             displayed = 'not_run' if finished and state == 'pending' else state
             style = {'done': 'success', 'error': 'failure', 'running': 'title'}.get(state, 'muted')
-            self._put(8 + i, 3, labels[displayed].ljust(status_width), style)
+            self._put(8 + i, 3, task_marker(displayed) + ' ' + labels[displayed].ljust(status_width), style)
             task = f'{self.t("action_" + action)} {service}' + (f': {info}' if info else '')
-            self._put(8 + i, 4 + status_width, task[:max(1, w - status_width - 6)])
+            self._put(8 + i, 6 + status_width, task[:max(1, w - status_width - 8)])
         if finished:
             self._put(h - 3, 3, summary[:max(10, w - 8)],
                       'failure' if failed else 'success')
@@ -1999,7 +2004,8 @@ class CursesMenu:
                 active_line = len(task_lines)
                 active_found = True
             for index, line in enumerate(self._backup_wrap(name_text, width - status_width - 4)):
-                task_lines.append((label if index == 0 else '', style, line, state == 'running'))
+                marker = task_marker(displayed) if index == 0 else ' '
+                task_lines.append((marker, label if index == 0 else '', style, line, state == 'running'))
 
         result_lines = []
         def add_result(text, style):
@@ -2048,9 +2054,9 @@ class CursesMenu:
         self._paint(task_y, 2, w - 4, task_height)
         heading(task_y, 'nbo_task_header', task_offset, task_visible, len(task_lines),
                 not self._backup_result_focus)
-        for y, (label, style, line, active) in enumerate(
+        for y, (marker, label, style, line, active) in enumerate(
                 task_lines[task_offset:task_offset + task_visible], task_y + 1):
-            self._put(y, 3, ('● ' if label else '  ') + label.ljust(status_width), style)
+            self._put(y, 3, marker + ' ' + label.ljust(status_width), style)
             self._put(y, 3 + status_width + 4, line, 'title' if active else '')
         self._paint(result_y, 2, w - 4, result_height)
         heading(result_y, 'nbo_result_heading', self._backup_result_offset,
