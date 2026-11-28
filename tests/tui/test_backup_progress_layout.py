@@ -40,7 +40,7 @@ class BackupProgressLayoutTests(unittest.TestCase):
                     y = next(y for y, x, text, _ in frame
                              if menu._panels[1][1] < y < menu._panels[1][3] and x > 3
                              and text == menu.t('nbo_stage_' + task.phase))
-                    self.assertTrue(any(row == y and x == 3 and not text.strip()
+                    self.assertTrue(any(row == y and x == 3 and text.strip() == '○'
                                         for row, x, text, _ in frame))
             self.assertNotIn('N/A', ' '.join(text for _, _, text, _ in frame))
             self.assertNotIn(menu.t('nbo_task_state_pending'), ' '.join(text for _, _, text, _ in frame))
@@ -67,6 +67,8 @@ class BackupProgressLayoutTests(unittest.TestCase):
                 for state in ('done', 'failed', 'skipped', 'not_run'):
                     self.assertIn(menu.t('nbo_task_state_' + state), text)
                 self.assertNotIn(menu.t('nbo_stage_extract_media'), text)
+                self.assertNotIn('○', text)
+                self.assertIn('●', text)
                 self.assertEqual(menu._backup_steps[-1][1], 'pending')
 
     def test_compact_scroll_and_resize_preserve_all_task_and_result_content(self):

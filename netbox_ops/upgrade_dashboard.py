@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from .config import load_config
 from .plugin_inventory import PluginInventoryError, configured_plugin_packages, inventory_plugins
-from .tui import move_action_focus, move_selection, safe_text
+from .tui import move_action_focus, move_selection, safe_text, task_marker
 from .upgrade_targets import (
     MAX_PICKER_ROWS, TargetAssessment, TargetCatalogue, TargetModel, TargetRow, TargetSnapshot,
     discover_target_context,
@@ -685,18 +685,20 @@ class UpgradeDashboard:
         if not compact:
             labels = [((self.t('nbo_task_state_' + state) if state != 'partial'
                         else self.t('ut_discovery_partial')) if state != 'pending' else '',
-                       self.t('ut_discovery_' + task), styles.get(state, 'muted'))
+                       self.t('ut_discovery_' + task), styles.get(state, 'muted'), task_marker(state))
                       for task, state in tasks]
-            state_width = max((len(state) for state, _, _ in labels), default=0)
+            state_width = max((len(state) for state, _, _, _ in labels), default=0)
             # Reserve the column even when every task is still unstarted.
             state_width = max(state_width, *(len(self.t('nbo_task_state_' + state))
                                              for state in ('running', 'done', 'failed', 'not_run')))
-            lines = [(f'{state:<{state_width}}  {task}', style) for state, task, style in labels]
+            lines = [(f'{marker} {state:<{state_width}}  {task}', style)
+                     for state, task, style, marker in labels]
             if self.future is None:
                 lines.append((self.t('ut_discovery_retry'), 'warning'))
             return lines
         # Compact layout keeps unstarted tasks visible without a status label.
-        labels = [((self.t('ut_discovery_state_' + state) + ' ') if state != 'pending' else '')
+        labels = [(task_marker(state) + ' ')
+                  + ((self.t('ut_discovery_state_' + state) + ' ') if state != 'pending' else '')
                   + self.t('ut_discovery_short_' + task) for task, state in tasks]
         return [(' | '.join(labels[i:i + 2]), 'muted')
                 for i in range(0, len(labels), 2)]
