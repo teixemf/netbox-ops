@@ -309,7 +309,11 @@ with ThreadPoolExecutor(max_workers=1) as pool:
     dashboard._discover(pool, 'suggest')
     assert dashboard._draw()
     initial = screen.frames[-1]
-    assert any(text == menu.t('ut_discovery_heading') for _, _, text, _ in initial)
+    for heading in ('nbo_progress_heading', 'nbo_task_header', 'nbo_result_heading'):
+        assert any(text == menu.t(heading) for _, _, text, _ in initial), initial
+    assert not any(text == menu.t('ut_operations') for _, _, text, _ in initial)
+    assert sum(text.strip() == '○' for _, _, text, _ in initial) == 4, initial
+    assert any('0/4' in text for _, _, text, _ in initial), initial
     assert not dashboard._enabled('execute') and not dashboard._enabled('validate')
     assert dashboard._rows()[0].current == '?' and dashboard._rows()[0].target == '?'
     deadline = time.monotonic() + 180
@@ -322,6 +326,14 @@ with ThreadPoolExecutor(max_workers=1) as pool:
             time.sleep(0.15)
 assert dashboard.model is not None and dashboard.snapshot is not None
 assert dashboard._inventory_valid and not dashboard.error
+if dashboard._discovery_incomplete():
+    assert dashboard._discovery_screen == 'full'
+    assert dashboard._discovery_can_continue()
+    assert not dashboard._discovery_key(10, None)
+assert dashboard._discovery_screen is None
+assert dashboard._draw()
+assert any(text == menu.t('ut_operations') for _, _, text, _ in screen.frames[-1])
+assert not dashboard._enabled('execute')
 model = dashboard.model
 context = model.context
 assert context.tags and model.installed.netbox == context.installation.version

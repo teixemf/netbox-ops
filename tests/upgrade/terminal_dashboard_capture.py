@@ -9,6 +9,7 @@ from __future__ import annotations
 import curses
 import json
 import sys
+from concurrent.futures import Future
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -60,6 +61,16 @@ def capture(screen, language):
             assert dashboard._draw()
             assert not dashboard._enabled('validate') and not dashboard._enabled('execute')
             result.append(dict(scenario='unchanged', height=h, width=w, color=bool(menu.colors),
+                               lines=[screen.instr(y, 0).decode('utf-8', errors='replace').rstrip()
+                                      for y in range(h)]))
+        dashboard._discovery_screen = 'full'
+        dashboard.future = Future()
+        dashboard._discovery_states = {'inventory': 'done', 'releases': 'running',
+                                       'suggestions': 'pending', 'assessment': 'pending'}
+        for h, w in ((30, 120), (16, 50), (30, 120)):
+            curses.resizeterm(h, w)
+            assert dashboard._draw()
+            result.append(dict(scenario='discovery', height=h, width=w, color=bool(menu.colors),
                                lines=[screen.instr(y, 0).decode('utf-8', errors='replace').rstrip()
                                       for y in range(h)]))
         return result

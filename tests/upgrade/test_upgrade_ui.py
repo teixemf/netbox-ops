@@ -16,7 +16,7 @@ from netbox_ops.i18n import LANGUAGES, Translator
 from netbox_ops.plugin_compatibility import PluginCompatibility, PluginReview
 from netbox_ops.plugin_inventory import DeclaredRequirement, InstalledPackage, PinProposal, PluginInventory
 from netbox_ops.tui import CursesMenu
-from netbox_ops.upgrade_discovery import GitNetBoxInstallation
+from netbox_ops.upgrade_discovery import GitNetBoxInstallation, UpgradeDiscoveryError
 from netbox_ops.upgrade_execution import UpgradeExecutionError
 from netbox_ops.upgrade_plan import build_upgrade_plan
 from netbox_ops.upgrade_tui import netbox_overview
@@ -378,8 +378,12 @@ class UpgradeTuiTests(InterfaceFixture):
                     dashboard._discover(pool, 'suggest')
                     self.assertTrue(dashboard._draw())
                     frame = menu.stdscr.frames[-1]
-                    self.assertTrue(any(text == menu.t('ut_discovery_heading')
-                                        for _, _, text, _ in frame))
+                    for heading in ('nbo_progress_heading', 'nbo_task_header', 'nbo_result_heading'):
+                        self.assertTrue(any(text == menu.t(heading) for _, _, text, _ in frame))
+                    self.assertEqual(len(menu._panels), 3)
+                    self.assertIn('0/4', ' '.join(text for _, _, text, _ in frame))
+                    self.assertEqual(sum(text.strip() == '○' for _, _, text, _ in frame), 4)
+                    self.assertFalse(any(text == menu.t('ut_operations') for _, _, text, _ in frame))
                     self.assertNotIn('0/0', ' '.join(text for _, _, text, _ in frame))
                     self.assertEqual(dashboard._rows()[0].current, '?')
                     self.assertEqual(dashboard._rows()[0].target, '?')
@@ -424,7 +428,7 @@ class UpgradeTuiTests(InterfaceFixture):
         future = Future()
         pool.submit.return_value = future
         dashboard._discover(pool)
-        future.set_exception(UpgradeExecutionError('inventory unavailable'))
+        future.set_exception(UpgradeDiscoveryError('inventory unavailable'))
         dashboard._poll(pool)
         self.assertIs(dashboard.model, old)
         self.assertIsNone(dashboard.plan)
@@ -435,12 +439,20 @@ class UpgradeTuiTests(InterfaceFixture):
         self.assertFalse(dashboard._enabled('validate'))
         self.assertFalse(dashboard._enabled('execute'))
         self.assertTrue(dashboard._draw())
-        self.assertTrue(any(menu.t('ut_discovery_failed_retry') in text
+        self.assertTrue(any('inventory unavailable' in text
                             for _, _, text, _ in menu.stdscr.frames[-1]))
-        self.assertFalse(any(text == menu.t('ut_discovery_heading')
+        self.assertFalse(dashboard._discovery_can_continue())
+        dashboard._discovery_key(10, pool)
+        self.assertEqual(dashboard._discovery_screen, 'full')
+        self.assertTrue(dashboard._discovery_key(27, pool))
+        self.assertFalse(any(text == menu.t('ut_operations')
                              for _, _, text, _ in menu.stdscr.frames[-1]))
+        pool.submit.return_value = Future()
+        dashboard._discovery_key(curses.KEY_F5, pool)
+        self.assertTrue(all(state in ('pending', 'not_applicable')
+                            for state in dashboard._discovery_states.values()))
 
-    def test_completed_discovery_returns_to_plan_even_when_partial(self):
+    def test_completed_discovery_returns_to_plan_with_explicit_partial_continue(self):
         from concurrent.futures import Future
         from netbox_ops.upgrade_targets import TargetSnapshot
 
@@ -450,10 +462,24 @@ class UpgradeTuiTests(InterfaceFixture):
             result = TargetSnapshot(request, request.selection, dashboard._rows(), 'supported', (), partial)
             dashboard._discovery_states = {'inventory': 'done', 'releases': 'done',
                                            'suggestions': 'not_applicable', 'assessment': 'done'}
+            dashboard._discovery_screen = 'full'
             dashboard.future = Future()
             dashboard.future.set_result(result)
             dashboard._poll()
             self.assertEqual(bool(dashboard._discovery_states), partial)
+            if partial:
+                self.assertEqual(dashboard._discovery_screen, 'full')
+                self.assertTrue(dashboard._discovery_can_continue())
+                dashboard._draw()
+                self.assertFalse(any(text == menu.t('ut_operations')
+                                     for _, _, text, _ in menu.stdscr.frames[-1]))
+                with patch.object(dashboard, '_start') as start, patch.object(dashboard, '_discover') as discover:
+                    pool = Mock()
+                    dashboard._discovery_key(curses.KEY_F5, pool)
+                    start.assert_called_once_with(pool, dashboard._discovery_request)
+                    discover.assert_not_called()
+                dashboard._discovery_key(10, Mock())
+            self.assertIsNone(dashboard._discovery_screen)
             if partial:
                 self.assertEqual(dashboard._discovery_states['assessment'], 'partial')
             self.assertTrue(dashboard._draw())
@@ -929,6 +955,25 @@ class UpgradeTuiTests(InterfaceFixture):
                     self.assertEqual(dashboard.cursor, 24)
                     self.assertFalse(dashboard._enabled('execute'))
 
+    def test_upgrade_operations_use_frame_background_and_distinct_disabled_focus(self):
+        for language in LANGUAGES:
+            for dimensions in ((16, 50), (34, 140)):
+                dashboard, menu = self._dashboard(dimensions=dimensions, language=language)
+                dashboard.model.reset()
+                dashboard.actions_focused = True
+                dashboard.action = dashboard._actions().index('validate')
+                self.assertTrue(dashboard._draw())
+                frame = menu.stdscr.frames[-1]
+                ops_y = next(y for y, _, text, _ in frame if text == menu.t('ut_operations'))
+                self.assertFalse(any(y0 <= ops_y < y1 for _, y0, _, y1 in menu._panels))
+                self.assertTrue(any(text == '›' and y > ops_y for y, _, text, _ in frame))
+                self.assertFalse(dashboard._enabled('validate'))
+                label = menu.t('ut_action_validate' + ('_short' if dimensions[1] < 76 else ''))
+                self.assertTrue(any(text == f' {label} ' and attr != curses.A_REVERSE
+                                    for _, _, text, attr in frame))
+                self.assertTrue(any('─' in text and y in (ops_y - 1, ops_y)
+                                    for y, _, text, _ in frame))
+
     def test_real_curses_dashboard_capture(self):
         import errno
         import json
@@ -978,10 +1023,19 @@ class UpgradeTuiTests(InterfaceFixture):
                     t = Translator(language)
                     self.assertEqual([(f['height'], f['width']) for f in frames],
                                      [(45, 160), (30, 120), (24, 80), (16, 50), (45, 160),
-                                      (30, 120), (16, 50)])
+                                      (30, 120), (16, 50), (30, 120), (16, 50), (30, 120)])
                     for frame in frames:
                         self.assertEqual(frame['color'], not monochrome)
                         lines = frame['lines']
+                        if frame['scenario'] == 'discovery':
+                            for key in ('nbo_progress_heading', 'nbo_task_header', 'nbo_result_heading'):
+                                self.assertTrue(any(t(key) in line for line in lines))
+                            self.assertTrue(any('1/4' in line for line in lines))
+                            self.assertFalse(any(t('ut_operations') in line for line in lines))
+                            self.assertEqual(sum(line.count('○') for line in lines), 2)
+                            print(f"Actual discovery capture: {language} {frame['width']}x{frame['height']}"
+                                  f" color={frame['color']}\\n" + '\\n'.join(lines))
+                            continue
                         operations = next(i for i, line in enumerate(lines) if t('ut_operations') in line)
                         if frame['scenario'] == 'blocked':
                             readiness = next(i for i, line in enumerate(lines)
