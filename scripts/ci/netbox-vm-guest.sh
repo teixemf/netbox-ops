@@ -3,6 +3,8 @@
 set -euo pipefail
 
 mode=$1
+netbox_version=${2:-4.7.3}
+case "$netbox_version" in 4.7.3|4.4.9) ;; *) exit 2 ;; esac
 export DEBIAN_FRONTEND=noninteractive
 
 case "$mode" in
@@ -16,13 +18,19 @@ case "$mode" in
     systemctl enable --now postgresql redis-server nginx
 
     # Pinned NetBox source release. No production credentials enter this baseline.
-    netbox_version=4.7.3
-    install -d -m 0755 /opt/netbox
-    curl -fLsS --retry 3 \
-      -o /tmp/netbox-source.tar.gz \
-      "https://github.com/netbox-community/netbox/archive/refs/tags/v$netbox_version.tar.gz"
-    tar -xzf /tmp/netbox-source.tar.gz -C /opt/netbox --strip-components=1
-    rm -f /tmp/netbox-source.tar.gz
+    if [[ "$netbox_version" == 4.4.9 ]]; then
+      NEEDRESTART_MODE=l apt-get install -y --no-install-recommends git libldap-dev libsasl2-dev python3.12-dev
+      git clone --quiet --depth 1 --branch v4.4.9 https://github.com/netbox-community/netbox.git /opt/netbox
+      test "$(git -C /opt/netbox describe --tags --exact-match)" = v4.4.9
+      printf '%s\n' 'netbox-reorder-rack==1.1.4' 'tomli-w==1.2.0' 'django-auth-ldap==5.4.0' > /opt/netbox/local_requirements.txt
+    else
+      install -d -m 0755 /opt/netbox
+      curl -fLsS --retry 3 \
+        -o /tmp/netbox-source.tar.gz \
+        "https://github.com/netbox-community/netbox/archive/refs/tags/v$netbox_version.tar.gz"
+      tar -xzf /tmp/netbox-source.tar.gz -C /opt/netbox --strip-components=1
+      rm -f /tmp/netbox-source.tar.gz
+    fi
 
     adduser --system --group --quiet netbox
     chown -R netbox:netbox /opt/netbox/netbox/media \
@@ -34,7 +42,14 @@ case "$mode" in
     systemctl daemon-reload
 
     # Install Python dependencies, but do not initialize DB or generate secrets yet.
-    (cd /opt/netbox && PYTHON=/usr/bin/python3.12 bash ./upgrade.sh --readonly)
+    if [[ "$netbox_version" == 4.4.9 ]]; then
+      constraints=$(mktemp)
+      printf '%s\n' 'pymdown-extensions==12.1' 'python-ldap==3.4.8' > "$constraints"
+      (cd /opt/netbox && PIP_CONSTRAINT="$constraints" PYTHON=/usr/bin/python3.12 bash ./upgrade.sh --readonly)
+      rm -f "$constraints"
+    else
+      (cd /opt/netbox && PYTHON=/usr/bin/python3.12 bash ./upgrade.sh --readonly)
+    fi
     /opt/netbox/venv/bin/python -c 'import django; print("Django", django.get_version())'
 
     # Migrate using local peer authentication and public placeholder values.
@@ -63,11 +78,19 @@ REDIS = {
 SECRET_KEY = 'public-ci-placeholder-for-schema-migrations-not-a-real-secret-key'
 API_TOKEN_PEPPERS = {1: 'public-ci-placeholder-for-schema-migrations-not-a-real-api-pepper'}
 CONFIG
+    if [[ "$netbox_version" == 4.4.9 ]]; then
+      printf '\nPLUGINS = ["netbox_reorder_rack"]\n' >> /opt/netbox/netbox/netbox/configuration.py
+    fi
     chown root:netbox /opt/netbox/netbox/netbox/configuration.py
     chmod 0640 /opt/netbox/netbox/netbox/configuration.py
     runuser -u netbox -- /opt/netbox/venv/bin/python \
       /opt/netbox/netbox/manage.py migrate --noinput
     test "$(runuser -u postgres -- psql -tAc 'SELECT count(*) FROM django_migrations' -d netbox)" -gt 0
+    if [[ "$netbox_version" == 4.4.9 ]]; then
+      runuser -u netbox -- /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py migrate --check --noinput
+      test "$(runuser -u postgres -- psql -X -At -d netbox -c "SELECT count(*) FROM pg_extension WHERE extname='ltree'")" = 0
+      /opt/netbox/venv/bin/python -c 'import ldap, importlib.metadata as m; assert m.version("netbox-reorder-rack")=="1.1.4"; assert m.version("tomli-w")=="1.2.0"; assert m.version("django-auth-ldap")=="5.4.0"; assert m.version("python-ldap")=="3.4.8"'
+    fi
     runuser -u postgres -- psql -v ON_ERROR_STOP=1 \
       -c 'ALTER ROLE netbox NOLOGIN PASSWORD NULL'
     rm -f /opt/netbox/netbox/netbox/configuration.py
@@ -130,6 +153,10 @@ REDIS = {
 SECRET_KEY = '$secret'
 API_TOKEN_PEPPERS = {1: '$pepper'}
 EOF
+    if [[ "$netbox_version" == 4.4.9 ]]; then
+      test "$(git -C /opt/netbox describe --tags --exact-match)" = v4.4.9
+      printf '\nPLUGINS = ["netbox_reorder_rack"]\nLOGIN_REQUIRED = False\n' >> /opt/netbox/netbox/netbox/configuration.py
+    fi
     chown root:netbox /opt/netbox/netbox/netbox/configuration.py
     chmod 0640 /opt/netbox/netbox/netbox/configuration.py
     unset password secret pepper
